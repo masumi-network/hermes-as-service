@@ -1,0 +1,5 @@
+app = "hermes-user-image"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile.hermes-user"

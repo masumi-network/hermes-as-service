@@ -1,0 +1,147 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model HermesInstance {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  /// Fly app name (one app per user). Also used historically as the
+  /// "sprite name" — column kept for migration continuity but holds a
+  /// Fly app slug now.
+  spriteName     String   @unique
+  /// Fly machine ID inside the per-user app. Old "sprite ID" semantically.
+  spriteId       String?
+  region         String
+  endpointUrl    String?
+  apiServerKey   String
+  openRouterKey  String
+  llmProxyToken  String?
+  /// New: the Fly volume ID attached to the machine for /opt/data
+  flyVolumeId    String?
+  /// Optional human-readable display name supplied at provision time.
+  /// Seeded into Hermes' memory so the agent knows who the user is.
+  name           String?
+  /// Optional email, same purpose. Lets Hermes do an initial public-web
+  /// research pass and personalize daily suggestions.
+  email          String?
+  status         String
+  lastActivityAt DateTime @default(now())
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  messages         ChatMessage[]
+  provisionEvents  ProvisionEvent[]
+  llmUsage         LlmUsage[]
+  schedules        ScheduledTask[]
+  outbox           OutboxMessage[]
+
+  @@index([status])
+  @@index([lastActivityAt])
+}
+
+model LlmUsage {
+  id               String   @id @default(uuid())
+  instanceId       String
+  userId           String
+  model            String
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  costUsd          Decimal  @db.Decimal(12, 6) @default(0)
+  streamed         Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([instanceId, createdAt])
+  @@index([createdAt])
+}
+
+model ChatMessage {
+  id               String   @id @default(uuid())
+  instanceId       String
+  userId           String
+  requestId        String
+  role             String
+  content          String
+  /// "chat" (default) or "scheduled" — surfaced so Sokosumi can render
+  /// scheduled-result messages with a visual indicator.
+  kind             String   @default("chat")
+  scheduledTaskId  String?
+  model            String?
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  finishReason     String?
+  latencyMs        Int?
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+
+  instance      HermesInstance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  scheduledTask ScheduledTask?  @relation(fields: [scheduledTaskId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([instanceId, createdAt])
+  @@index([requestId])
+  @@index([createdAt])
+  @@index([scheduledTaskId])
+}
+
+model OutboxMessage {
+  id         String   @id @default(uuid())
+  instanceId String
+  userId     String
+  content    String
+  kind       String   @default("text")
+  createdAt  DateTime @default(now())
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([instanceId, createdAt])
+  @@index([createdAt])
+}
+
+model ScheduledTask {
+  id           String   @id @default(uuid())
+  instanceId   String
+  userId       String
+  name         String
+  prompt       String
+  cronExpr     String
+  timezone     String   @default("UTC")
+  enabled      Boolean  @default(true)
+  lastRunAt    DateTime?
+  lastError    String?
+  nextRunAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([userId])
+  @@index([enabled, nextRunAt])
+}
+
+model ProvisionEvent {
+  id         String   @id @default(uuid())
+  instanceId String?
+  userId     String
+  event      String
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  instance HermesInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([event, createdAt])
+  @@index([createdAt])
+}

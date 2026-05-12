@@ -1,0 +1,19 @@
+node_modules/
+dist/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.local
+.fly/
+
+# Build artefacts + caches
+*.log
+.DS_Store
+coverage/
+.idea/
+.vscode/
+prisma/migrations/dev.db*
+.turbo/
+.next/

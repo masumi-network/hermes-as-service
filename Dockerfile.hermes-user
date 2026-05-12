@@ -1,0 +1,79 @@
+# Per-user Hermes image — runs always-on as one Fly Machine per user.
+# Built FROM Hermes' official Dockerfile. Customizations live in the image
+# filesystem (/opt/hermes-user-config/, /opt/hermes-hooks/, /usr/local/bin/)
+# and are synced to /opt/data (the volume mount) on every boot by our
+# launcher script.
+#
+# Build + push to Fly registry:
+#   docker login registry.fly.io -u x --password "$FLY_API_TOKEN"
+#   docker build --platform linux/amd64 -f Dockerfile.hermes-user \
+#       -t registry.fly.io/hermes-user-image:v1 .
+#   docker push registry.fly.io/hermes-user-image:v1
+
+FROM nousresearch/hermes-agent:latest
+
+USER root
+
+# ----- curated skill packs (image-fs, NOT in /opt/data) -----
+# We bake them under /opt/hermes-user-config/skills/ and the launcher rsyncs
+# to /opt/data/skills/ on every boot (idempotent, user customizations to
+# specific skill dirs survive).
+
+RUN mkdir -p /opt/hermes-user-config/skills /opt/hermes-user-config/skills/meta \
+ && cd /tmp \
+ && git clone --depth 1 https://github.com/coreyhaines31/marketingskills.git \
+ && cp -r marketingskills/skills/* /opt/hermes-user-config/skills/ \
+ && git clone --depth 1 https://github.com/conorbronsdon/avoid-ai-writing.git \
+ && mkdir -p /opt/hermes-user-config/skills/avoid-ai-writing \
+ && cp avoid-ai-writing/SKILL.md /opt/hermes-user-config/skills/avoid-ai-writing/SKILL.md \
+ && if [ -f avoid-ai-writing/CLAUDE.md ]; then cp avoid-ai-writing/CLAUDE.md /opt/hermes-user-config/skills/avoid-ai-writing/CLAUDE.md ; fi \
+ && git clone --depth 1 https://github.com/Romanescu11/hermes-skill-factory.git \
+ && mkdir -p /opt/hermes-user-config/skills/meta/skill-factory \
+ && cp hermes-skill-factory/skills/skill-factory/SKILL.md /opt/hermes-user-config/skills/meta/skill-factory/SKILL.md \
+ && git clone --depth 1 https://github.com/AgriciDaniel/claude-ads.git \
+ && for d in claude-ads/skills/*/; do cp -r "$d" /opt/hermes-user-config/skills/ ; done \
+ && git clone --depth 1 https://github.com/nowork-studio/toprank.git \
+ && for cat in seo google-ads meta-ads gemini; do \
+      if [ -d "toprank/$cat" ]; then \
+        for d in toprank/$cat/*/; do \
+          if [ -f "$d/SKILL.md" ]; then cp -r "$d" "/opt/hermes-user-config/skills/tr-$cat-$(basename "$d")" ; fi ; \
+        done ; \
+      fi ; \
+    done \
+ && rm -rf /tmp/marketingskills /tmp/avoid-ai-writing /tmp/hermes-skill-factory /tmp/claude-ads /tmp/toprank \
+ && chmod -R a+rX /opt/hermes-user-config/skills
+
+# ----- operator SOUL + config (image-fs) -----
+
+COPY docker/hermes-user/SOUL.md /opt/hermes-user-config/SOUL.md
+COPY docker/hermes-user/config.yaml /opt/hermes-user-config/config.yaml
+
+# ----- post_llm_call shell hook (image-fs, referenced by config.yaml) -----
+
+COPY docker/hermes-user/cron-outbox-bridge.sh /opt/hermes-hooks/cron-outbox-bridge.sh
+
+# ----- bootstrap-on-boot launcher -----
+# Composes /opt/data/.env from Fly env vars, syncs SOUL.md / config.yaml /
+# skills from /opt/hermes-user-config/ → /opt/data/, then exec's hermes.
+# Upstream entrypoint.sh sees this on PATH and exec's it directly.
+
+COPY docker/hermes-user/hermes-user-launcher /usr/local/bin/hermes-user-launcher
+
+# Permissions in one layer so the upstream `chown -R hermes:hermes /opt/hermes`
+# from the base image's RUN steps doesn't fight us. We make our config dir
+# world-readable; the volume mount will be world-writable for the hermes
+# user after upstream's entrypoint chown.
+RUN chmod +x /usr/local/bin/hermes-user-launcher /opt/hermes-hooks/cron-outbox-bridge.sh \
+ && chmod -R a+rX /opt/hermes-user-config /opt/hermes-hooks
+
+# Install jq (required by the cron-outbox-bridge hook for JSON parsing).
+RUN apt-get update && apt-get install -y --no-install-recommends jq \
+ && rm -rf /var/lib/apt/lists/*
+
+VOLUME ["/opt/data"]
+EXPOSE 8642
+
+# We do NOT override ENTRYPOINT — upstream's /opt/hermes/docker/entrypoint.sh
+# handles uid/gid remap and privilege drop. It sees `hermes-user-launcher`
+# on PATH and exec's it directly (see upstream entrypoint's tail logic).
+CMD ["hermes-user-launcher"]

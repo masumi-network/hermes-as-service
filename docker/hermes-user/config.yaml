@@ -1,0 +1,32 @@
+# Per-user Hermes config — baked into the image. Per-instance secrets
+# (OPENROUTER_API_KEY, ORCHESTRATOR_OUTBOX_TOKEN, etc.) come from Fly
+# Machine env vars at start time, not from this file.
+
+model:
+  default: anthropic/claude-sonnet-4.6
+
+terminal:
+  backend: local
+
+gateway:
+  allow_all_users: true
+
+# Cron is back ON. Hermes' built-in scheduler now does the ticking
+# (always-on Fly Machine = always-running gateway daemon = cron works).
+# We bridge each cron-fire's final response to the orchestrator's outbox
+# via the post_llm_call shell hook below.
+cron:
+  wrap_response: false
+
+# Shell hook bridging cron output to the orchestrator. Fires after every
+# successful agent turn. The script itself filters on platform so it only
+# pushes the result for cron-platform runs (not user chats which already
+# flow through the orchestrator chat proxy).
+hooks:
+  post_llm_call:
+    - command: "/opt/hermes-hooks/cron-outbox-bridge.sh"
+      timeout: 30
+
+# Auto-accept the hook so we don't need an interactive consent prompt on
+# every new machine (this image bakes the hook in; consent is implicit).
+hooks_auto_accept: true

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Launcher: composes the per-instance .env from Fly Machine env vars into
+# /opt/data/.env, then exec's the real Hermes gateway.
+#
+# Why a launcher? Hermes' subprocess sandbox (terminal/execute_code tools)
+# only sees env vars that are in the .env file, NOT the parent process env.
+# On Sprites we discovered this the hard way. So we materialize the env to
+# /opt/data/.env on every boot.
+
+set -euo pipefail
+
+export HERMES_HOME=/opt/data
+mkdir -p "$HERMES_HOME"
+
+# Compose .env from required Fly env vars. Variables are space-separated
+# in the parent env (set via fly machine create --env ...); we copy the
+# ones Hermes/skills need into the dotenv that gets sourced by both the
+# gateway AND the subprocess sandbox.
+{
+  for var in \
+      API_SERVER_ENABLED API_SERVER_HOST API_SERVER_PORT API_SERVER_KEY \
+      API_SERVER_MODEL_NAME \
+      OPENROUTER_API_KEY OPENROUTER_BASE_URL \
+      HERMES_HOME TERMINAL_ENV HERMES_QUIET \
+      GATEWAY_ALLOW_ALL_USERS \
+      EXA_API_KEY \
+      ORCHESTRATOR_BASE INSTANCE_ID ORCHESTRATOR_OUTBOX_TOKEN; do
+    val="${!var-}"
+    if [ -n "$val" ]; then
+      # Quote if value contains whitespace or special chars.
+      if [[ "$val" =~ [[:space:]\#\"] ]]; then
+        printf '%s="%s"\n' "$var" "${val//\"/\\\"}"
+      else
+        printf '%s=%s\n' "$var" "$val"
+      fi
+    fi
+  done
+} > "$HERMES_HOME/.env"
+chmod 0600 "$HERMES_HOME/.env"
+
+# Now exec the real hermes gateway. Tini is our PID 1 (set in the
+# Dockerfile entrypoint) so this exec stays clean.
+exec /usr/local/bin/hermes gateway "$@"

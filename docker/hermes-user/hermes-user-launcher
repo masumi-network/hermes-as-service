@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# hermes-user-launcher
+#
+# Runs as PID-2 inside the Fly Machine, after upstream's
+# /opt/hermes/docker/entrypoint.sh has done uid/gid remapping and dropped
+# to the `hermes` user via gosu. Our job here:
+#   1. Compose /opt/data/.env from Fly env vars (so Hermes' subprocess
+#      sandbox sees them — they're NOT inherited otherwise).
+#   2. Sync /opt/hermes-user-config/{SOUL.md,config.yaml,skills/} →
+#      /opt/data/ on every boot. Idempotent; overrides any drift on the
+#      volume so the orchestrator's profile is always source of truth.
+#   3. exec hermes gateway.
+
+set -euo pipefail
+
+export HERMES_HOME=/opt/data
+mkdir -p "$HERMES_HOME"
+
+# ---- 1. .env from Fly env vars ----
+{
+  for var in \
+      API_SERVER_ENABLED API_SERVER_HOST API_SERVER_PORT API_SERVER_KEY \
+      API_SERVER_MODEL_NAME \
+      OPENROUTER_API_KEY OPENROUTER_BASE_URL \
+      HERMES_HOME TERMINAL_ENV HERMES_QUIET \
+      GATEWAY_ALLOW_ALL_USERS \
+      EXA_API_KEY \
+      ORCHESTRATOR_BASE INSTANCE_ID ORCHESTRATOR_OUTBOX_TOKEN; do
+    val="${!var-}"
+    if [ -n "$val" ]; then
+      if [[ "$val" =~ [[:space:]\#\"] ]]; then
+        printf '%s="%s"\n' "$var" "${val//\"/\\\"}"
+      else
+        printf '%s=%s\n' "$var" "$val"
+      fi
+    fi
+  done
+} > "$HERMES_HOME/.env"
+chmod 0600 "$HERMES_HOME/.env"
+
+# ---- 2. sync operator config from image-fs → volume ----
+
+# Always overwrite — orchestrator profile is source of truth. Hermes also
+# bootstraps a SOUL.md and config.yaml from /opt/hermes/docker/* on first
+# boot via the upstream entrypoint; we override that here.
+cp -f /opt/hermes-user-config/SOUL.md  "$HERMES_HOME/SOUL.md"
+cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
+
+# Skills: ensure curated skill packs are present. We use a simple
+# "copy if missing or older" rule — preserves any user-added skills.
+mkdir -p "$HERMES_HOME/skills" "$HERMES_HOME/skills/meta"
+for src in /opt/hermes-user-config/skills/*/; do
+  [ -d "$src" ] || continue
+  name=$(basename "$src")
+  dest="$HERMES_HOME/skills/$name"
+  if [ ! -d "$dest" ] || [ "$src" -nt "$dest" ]; then
+    rm -rf "$dest"
+    cp -r "$src" "$dest"
+  fi
+done
+# also the meta/* subdir (skill-factory)
+for src in /opt/hermes-user-config/skills/meta/*/; do
+  [ -d "$src" ] || continue
+  name=$(basename "$src")
+  dest="$HERMES_HOME/skills/meta/$name"
+  if [ ! -d "$dest" ] || [ "$src" -nt "$dest" ]; then
+    rm -rf "$dest"
+    cp -r "$src" "$dest"
+  fi
+done
+
+# Standard Hermes home subdirs (Hermes creates these lazily but explicit is
+# safer for cron's filesystem layout).
+mkdir -p "$HERMES_HOME"/{sessions,logs,memories,workspace,home,cron,cron/output}
+
+# ---- 3. exec hermes gateway ----
+cd "$HERMES_HOME"
+exec /opt/hermes/.venv/bin/hermes gateway "$@"
