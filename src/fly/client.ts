@@ -242,6 +242,13 @@ export class FlyClient {
       await this.waitForState(appName, machineId, 'started', 60);
       return;
     }
+    if (state === 'replacing') {
+      // Fly is already replacing the machine (likely from a recent config
+      // update). The replace IS a restart with new config — just wait it
+      // out and we're done.
+      await this.waitForState(appName, machineId, 'started', 120);
+      return;
+    }
     throw upstream(undefined, `restartMachine: machine ${machineId} in unsupported state '${state}'`);
   }
 

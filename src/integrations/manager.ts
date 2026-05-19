@@ -66,13 +66,30 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
   const encUrl = await encryptSecret(input.mcpUrl);
   const encToken = await encryptSecret(input.mcpToken ?? '');
 
-  const machineReady =
+  // First gate: DB state. If the instance is provisioning / destroyed / has
+  // no spriteId, definitely queue.
+  const dbSaysReady =
     instance.spriteId !== null &&
     instance.destroyedAt === null &&
     (instance.status === 'ready' ||
       instance.status === 'infrastructure_ready' ||
       instance.status === 'running' ||
       instance.status === 'suspended');
+
+  // Second gate: Fly truth. Even if our DB thinks the machine is ready,
+  // it could be mid-`replacing` (e.g. from a recent env patch) — in which
+  // case we can't apply now. Skip the Fly check if the DB already says no.
+  let machineReady = dbSaysReady;
+  if (machineReady) {
+    try {
+      const fly = new FlyClient();
+      const m = await fly.getMachine(instance.spriteName, instance.spriteId!);
+      machineReady = m?.state === 'started';
+    } catch (err) {
+      logger.warn({ err, userId: input.userId }, 'fly_state_precheck_failed_queuing');
+      machineReady = false;
+    }
+  }
 
   // Path 2: queue as pending. No Fly work.
   if (!machineReady) {
@@ -133,10 +150,16 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
   try {
     const mcpJson = await buildMcpServersJsonForUser(input.userId);
     const fly = new FlyClient();
+    // patchMachineEnv: Fly's machine-update endpoint replaces the machine
+    // in-place to apply the new config. The machine transitions
+    // `started → replacing → started` automatically; do NOT call restart
+    // here (that was the source of the prior 412 / unsupported-state
+    // errors — calling restart on a machine that's already restarting).
     await fly.patchMachineEnv(instance.spriteName, instance.spriteId!, {
       MCP_SERVERS_JSON: mcpJson,
     });
-    await fly.restartMachine(instance.spriteName, instance.spriteId!);
+    // Wait for the replace to settle. 90s is generous; usually ~30s.
+    await fly.waitForState(instance.spriteName, instance.spriteId!, 'started', 90);
 
     const updated = await prisma.integration.update({
       where: { id: row.id },
@@ -153,18 +176,19 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     const message = err instanceof Error ? err.message : String(err);
     logger.error(
       { err, userId: input.userId, provider: input.provider },
-      'integration_apply_failed',
+      'integration_apply_failed_queuing',
     );
+    // Fall back to pending — next provision cycle will bake it in.
+    // Sokosumi sees "pending" + lastError so they know it's queued not dead.
     const updated = await prisma.integration.update({
       where: { id: row.id },
-      // Use "error" not "failed" — matches the documented enum.
-      data: { status: 'error', lastError: message.slice(0, 1000) },
+      data: { status: 'pending', lastError: message.slice(0, 1000) },
     });
     await recordEvent({
       userId: input.userId,
       instanceId: instance.id,
       event: 'integration_failed',
-      detail: { provider: input.provider, message: message.slice(0, 300) },
+      detail: { provider: input.provider, message: message.slice(0, 300), queued: true },
     });
     return toView(updated);
   }
