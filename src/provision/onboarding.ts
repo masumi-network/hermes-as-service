@@ -62,6 +62,9 @@ export async function runOnboarding(
 
   const steps: OnboardingStep[] = [
     { id: 'memory', label: 'Saving your details', status: 'pending' },
+    ...(connectedProviders.length > 0
+      ? [{ id: 'verify_mcps', label: 'Connecting to your integrations', status: 'pending' as const }]
+      : []),
     {
       id: 'inbox_scan',
       label: hasInbox ? 'Reading your inbox' : 'Inbox not connected',
@@ -97,9 +100,36 @@ export async function runOnboarding(
     await markStep(instanceId, 'memory', 'failed', errToMessage(err));
   }
 
-  // ---- 2. inbox scan (only if integrations connected) ----
+  // ---- 1.5 verify MCPs are loaded ----
+  // Hermes' API server becoming reachable doesn't mean its MCP client has
+  // actually registered the Composio tools yet — the gateway daemon loads
+  // MCPs async, can take 10–60s after gateway boot. If we run inbox_scan
+  // before that, Hermes correctly reports "I don't have Gmail" and the
+  // generated welcome reflects a state the user wouldn't expect.
+  //
+  // Probe Hermes with a short structured prompt; retry until it confirms
+  // tool access or we time out (~90s). If we time out, skip the inbox
+  // scan and degrade to web-only — the intro_draft prompt will know.
+  let mcpsLoaded = true;
+  if (connectedProviders.length > 0) {
+    await markStep(instanceId, 'verify_mcps', 'running');
+    const result = await verifyMcpsReady(row.endpointUrl, apiKey, connectedProviders, log);
+    if (result.ready) {
+      await markStep(instanceId, 'verify_mcps', 'done');
+    } else {
+      mcpsLoaded = false;
+      await markStep(
+        instanceId,
+        'verify_mcps',
+        'failed',
+        `Integrations didn't come online within 90s: ${result.missing.join(', ')}`,
+      );
+    }
+  }
+
+  // ---- 2. inbox scan (only if integrations connected AND MCPs loaded) ----
   let inboxSummary = '';
-  if (hasInbox) {
+  if (hasInbox && mcpsLoaded) {
     await markStep(instanceId, 'inbox_scan', 'running');
     try {
       inboxSummary = await callHermes(
@@ -113,6 +143,10 @@ export async function runOnboarding(
       log.error({ err }, 'inbox_scan_failed');
       await markStep(instanceId, 'inbox_scan', 'failed', errToMessage(err));
     }
+  } else if (hasInbox && !mcpsLoaded) {
+    // Mark the inbox_scan step as skipped so the loader UI shows
+    // a sensible state (instead of stuck on "pending").
+    await markStep(instanceId, 'inbox_scan', 'skipped');
   }
 
   // ---- 3. web research ----
@@ -132,12 +166,16 @@ export async function runOnboarding(
   }
 
   // ---- 4. intro draft ----
+  // Only claim integration access if we actually verified MCPs loaded.
+  // Otherwise the welcome message would tell the user "your Gmail is
+  // connected" while the agent secretly can't see it.
+  const introProviders = mcpsLoaded ? connectedProviders : [];
   await markStep(instanceId, 'intro_draft', 'running');
   try {
     const intro = await callHermes(
       row.endpointUrl,
       apiKey,
-      buildIntroDraftPrompt(row.name, row.email, inboxSummary, webSummary, connectedProviders),
+      buildIntroDraftPrompt(row.name, row.email, inboxSummary, webSummary, introProviders),
       4 * 60_000,
     );
     if (intro && intro.trim().length > 30) {
@@ -299,6 +337,72 @@ async function waitForHermesReady(
     await new Promise((r) => setTimeout(r, 4_000));
   }
   log.warn({ lastErr, attempts: attempt }, 'hermes_api_never_became_ready_continuing_anyway');
+}
+
+/**
+ * Probe Hermes to confirm it has registered the MCP tools for the user's
+ * connected integrations. The gateway daemon registers MCPs async after
+ * the API server starts listening, so /v1/chat/completions can 200 while
+ * the tools still aren't usable.
+ *
+ * We ask Hermes a structured yes/no — single token expected — and retry
+ * with a short interval. ~90s budget; if we don't get confirmation, the
+ * caller falls back to a non-MCP onboarding path (web-only research).
+ *
+ * Returns { ready: true } on success, or { ready: false, missing } on
+ * timeout. `missing` is the list of providers we asked about — we don't
+ * know which specifically didn't load, just that the probe never
+ * succeeded.
+ */
+async function verifyMcpsReady(
+  endpointUrl: string,
+  apiKey: string,
+  providers: string[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log: any,
+): Promise<{ ready: boolean; missing: string[] }> {
+  const tools = providers.map(providerToolLabel).join(', ');
+  const probe = `INTERNAL READINESS CHECK — your reply will not be shown to \
+the user. Reply with ONLY the single uppercase word READY if you currently \
+have working tool access to all of: ${tools}. If any are missing or \
+your MCP client hasn't connected to them yet, reply with ONLY the single \
+uppercase word NOTREADY. No other text, no markdown, no explanation.`;
+
+  const deadline = Date.now() + 90_000;
+  let attempt = 0;
+  let lastReply = '';
+  while (Date.now() < deadline) {
+    attempt++;
+    try {
+      const reply = await callHermes(endpointUrl, apiKey, probe, 30_000);
+      lastReply = reply.trim();
+      if (/^READY$/i.test(lastReply)) {
+        log.info({ attempt }, 'mcps_ready');
+        return { ready: true, missing: [] };
+      }
+      log.info({ attempt, reply: lastReply.slice(0, 80) }, 'mcps_not_ready_yet');
+    } catch (err) {
+      log.warn({ err, attempt }, 'mcp_probe_failed');
+    }
+    await new Promise((r) => setTimeout(r, 8_000));
+  }
+  log.warn({ attempts: attempt, lastReply: lastReply.slice(0, 120) }, 'mcps_never_became_ready');
+  return { ready: false, missing: providers };
+}
+
+function providerToolLabel(provider: string): string {
+  switch (provider) {
+    case 'gmail':
+      return 'Gmail';
+    case 'google_calendar':
+      return 'Google Calendar';
+    case 'outlook':
+      return 'Outlook mail';
+    case 'outlook_calendar':
+      return 'Outlook Calendar';
+    default:
+      return provider;
+  }
 }
 
 async function callHermes(
