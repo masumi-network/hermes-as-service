@@ -249,13 +249,21 @@ export async function listIntegrations(userId: string): Promise<IntegrationView[
 
 /**
  * Build the JSON blob to set as MCP_SERVERS_JSON env on a Fly machine.
- * Composio's auth model: one org-wide API key (COMPOSIO_API_KEY) sent as
- * the `x-api-key` header on every MCP HTTP call. Per-user identity is
- * scoped via the `?user_id=` query param Composio already bakes into each
- * connection URL.
+ *
+ * The Hermes machine receives ONLY orchestrator-proxy URLs — never the
+ * real Composio URLs and never the COMPOSIO_API_KEY. Hermes authenticates
+ * to the orchestrator with its per-instance bearer (llmProxyToken, same
+ * one the LLM proxy and outbox endpoint use). The orchestrator looks up
+ * the actual Composio URL per request, attaches x-api-key server-side,
+ * forwards to Composio, streams the response back.
+ *
+ * Why this matters: if a user runs Hermes' shell tool and `cat`s
+ * /opt/data/config.yaml, the worst they extract is their own per-instance
+ * bearer — which only works for their own instance and is rotatable. The
+ * Composio org-wide key stays in our Railway env.
  *
  * Emits the array shape the hermes-user-launcher expects:
- *   [{ name, url, headers: { "x-api-key": "<key>", ... } }]
+ *   [{ name, url: <orchestrator-proxy>, headers: { Authorization: "Bearer <token>" } }]
  *
  * Returns "[]" if the user has no connected integrations.
  */
@@ -266,35 +274,31 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
   });
   if (rows.length === 0) return '[]';
 
+  // Need the instanceId + plaintext per-instance bearer to build the
+  // proxy URL + auth header the Fly machine will use to call us.
+  const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!instance || !instance.llmProxyToken) {
+    logger.warn({ userId }, 'mcp_build_no_instance_or_token');
+    return '[]';
+  }
+  let proxyToken: string;
+  try {
+    proxyToken = await decryptSecret(instance.llmProxyToken);
+  } catch (err) {
+    logger.error({ err, userId }, 'mcp_build_token_decrypt_failed');
+    return '[]';
+  }
+
   const cfg = loadConfig();
-  const composioKey = cfg.COMPOSIO_API_KEY;
+  const base = cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, '');
 
   const entries: { name: string; url: string; headers: Record<string, string> }[] = [];
   for (const row of rows) {
-    try {
-      const url = await decryptSecret(row.mcpUrl);
-      const headers: Record<string, string> = {};
-      // Composio: x-api-key. Heuristic: if the URL points at any composio
-      // host, attach the org key. Other brokers (future) would slot in here.
-      if (composioKey && /(composio\.dev|composio\.ai)/i.test(url)) {
-        headers['x-api-key'] = composioKey;
-      }
-      // Legacy: if Sokosumi passed a per-integration token (mcpToken) we
-      // honor it as Authorization: Bearer for non-Composio brokers. For
-      // Composio we ignore it — the org key wins.
-      if (row.mcpToken) {
-        const legacyToken = await decryptSecret(row.mcpToken);
-        if (legacyToken && !headers['x-api-key']) {
-          headers['Authorization'] = `Bearer ${legacyToken}`;
-        }
-      }
-      entries.push({ name: row.provider, url, headers });
-    } catch (err) {
-      logger.error(
-        { err, userId, provider: row.provider },
-        'mcp_decrypt_failed_skipping_row',
-      );
-    }
+    entries.push({
+      name: row.provider,
+      url: `${base}/v1/mcp/${instance.id}/${row.provider}`,
+      headers: { Authorization: `Bearer ${proxyToken}` },
+    });
   }
   return JSON.stringify(entries);
 }

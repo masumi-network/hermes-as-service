@@ -7,6 +7,7 @@ import { bearerAuth } from './auth.js';
 import { instancesRouter } from './routes/instances.js';
 import { proxyRouter } from './routes/proxy.js';
 import { llmProxyRouter } from './routes/llm-proxy.js';
+import { mcpProxyRouter } from './routes/mcp-proxy.js';
 import { schedulesSokosumiRouter, schedulesSpriteRouter } from './routes/schedules.js';
 import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
 import { adminAuth } from './admin/auth.js';
@@ -25,6 +26,7 @@ app.get('/health', (c) => c.json({ ok: true }));
 // the orchestrator bearer — mount BEFORE the bearerAuth middleware so they
 // aren't intercepted.
 app.route('/', llmProxyRouter);
+app.route('/', mcpProxyRouter);
 app.route('/', schedulesSpriteRouter);
 app.route('/', outboxSpriteRouter);
 
