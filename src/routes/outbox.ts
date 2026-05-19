@@ -19,14 +19,16 @@ sokosumi.get('/v1/instances/:userId/inbox', async (c) => {
   const userId = c.req.param('userId');
   const row = await prisma.hermesInstance.findUnique({
     where: { userId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, destroyedAt: true },
   });
-  if (!row) return c.json({ error: { message: 'instance not found' } }, 404);
+  if (!row || row.destroyedAt) return c.json({ error: { message: 'instance not found' } }, 404);
 
-  if (row.status !== 'running') {
-    c.header('Cache-Control', 'no-store');
-    return c.json({ status: row.status }, 409);
-  }
+  // No lifecycle gate — outbox messages should always be readable.
+  // Sokosumi may poll the inbox before the chat opens (to surface the
+  // research_intro message) and after onboarding has partially failed
+  // (the fallback welcome lands here). Returning 409 with {status} for
+  // anything other than the legacy 'running' value was a regression from
+  // onboarding v2's status rename ('running' → 'ready').
 
   const since = c.req.query('since');
   let sinceDate: Date | null = null;

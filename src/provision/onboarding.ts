@@ -12,6 +12,9 @@ export interface OnboardingStep {
   status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
   startedAt?: string;
   finishedAt?: string;
+  /** Set when status === 'failed'. Truncated to ~300 chars to keep the
+   *  progress payload small. Safe to surface in Sokosumi's UI verbatim. */
+  errorMessage?: string;
 }
 
 export interface OnboardOptions {
@@ -44,6 +47,12 @@ export async function runOnboarding(
     return;
   }
   const apiKey = await decryptSecret(row.apiServerKey);
+
+  // Hermes' API server can take 30–60s to actually start listening after
+  // the Fly machine reaches `started`. Poll until it responds before
+  // sending the first boot prompt, otherwise we get 503 storms.
+  await waitForHermesReady(row.endpointUrl, apiKey, log);
+
   const integrations = await listIntegrations(row.userId);
   const connectedProviders = integrations
     .filter((i) => i.status === 'connected' || i.status === 'connecting')
@@ -85,7 +94,7 @@ export async function runOnboarding(
     await markStep(instanceId, 'memory', 'done');
   } catch (err) {
     log.error({ err }, 'boot_prompt_failed');
-    await markStep(instanceId, 'memory', 'failed');
+    await markStep(instanceId, 'memory', 'failed', errToMessage(err));
   }
 
   // ---- 2. inbox scan (only if integrations connected) ----
@@ -102,7 +111,7 @@ export async function runOnboarding(
       await markStep(instanceId, 'inbox_scan', 'done');
     } catch (err) {
       log.error({ err }, 'inbox_scan_failed');
-      await markStep(instanceId, 'inbox_scan', 'failed');
+      await markStep(instanceId, 'inbox_scan', 'failed', errToMessage(err));
     }
   }
 
@@ -119,7 +128,7 @@ export async function runOnboarding(
     await markStep(instanceId, 'web_research', 'done');
   } catch (err) {
     log.error({ err }, 'web_research_failed');
-    await markStep(instanceId, 'web_research', 'failed');
+    await markStep(instanceId, 'web_research', 'failed', errToMessage(err));
   }
 
   // ---- 4. intro draft ----
@@ -151,7 +160,7 @@ export async function runOnboarding(
     }
   } catch (err) {
     log.error({ err }, 'intro_draft_failed');
-    await markStep(instanceId, 'intro_draft', 'failed');
+    await markStep(instanceId, 'intro_draft', 'failed', errToMessage(err));
     await enqueueOutboxMessage({
       instanceId: row.id,
       userId: row.userId,
@@ -210,11 +219,13 @@ async function markStep(
   instanceId: string,
   id: string,
   status: OnboardingStep['status'],
+  errorMessage?: string,
 ): Promise<void> {
   const row = await prisma.hermesInstance.findUniqueOrThrow({
     where: { id: instanceId },
     select: { onboardingSteps: true, userId: true },
   });
+  const trimmed = errorMessage?.slice(0, 300);
   const steps = ((row.onboardingSteps as OnboardingStep[] | null) ?? []).map((s) =>
     s.id === id
       ? {
@@ -225,6 +236,7 @@ async function markStep(
             status === 'done' || status === 'failed' || status === 'skipped'
               ? new Date().toISOString()
               : s.finishedAt,
+          ...(status === 'failed' && trimmed ? { errorMessage: trimmed } : {}),
         }
       : s,
   );
@@ -236,8 +248,57 @@ async function markStep(
     userId: row.userId,
     instanceId,
     event: 'onboarding_step',
-    detail: { step: id, status },
+    detail: { step: id, status, ...(trimmed ? { errorMessage: trimmed } : {}) },
   });
+}
+
+/**
+ * Poll Hermes' API server until it responds successfully. The Fly machine
+ * reaching `started` doesn't mean Python is fully up — the launcher script
+ * has to run (sync skills, write .env, etc.) and `hermes gateway` has to
+ * boot before the API server is listening. Usually 20–60s on a cold boot.
+ *
+ * Probe: a 1-token chat completion. We accept any non-5xx response as
+ * "ready" — even 401/400 means the server is alive and can route requests.
+ * Only 503/connection-refused/timeout count as not-ready.
+ */
+async function waitForHermesReady(
+  endpointUrl: string,
+  apiKey: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log: any,
+): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  let lastErr: unknown;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    try {
+      const res = await fetch(`${endpointUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'hermes-agent',
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status < 500 || res.status === 501) {
+        log.info({ attempt, status: res.status }, 'hermes_api_ready');
+        return;
+      }
+      lastErr = new Error(`status ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, 4_000));
+  }
+  log.warn({ lastErr, attempts: attempt }, 'hermes_api_never_became_ready_continuing_anyway');
 }
 
 async function callHermes(
@@ -419,4 +480,10 @@ I'll take it from there.`;
 
 function firstName(full: string): string {
   return full.trim().split(/\s+/)[0] || full.trim();
+}
+
+function errToMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  return String(err);
 }

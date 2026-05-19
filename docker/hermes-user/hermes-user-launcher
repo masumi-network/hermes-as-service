@@ -58,10 +58,19 @@ cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
 # We append a `mcp_servers:` block to config.yaml so Hermes loads them on
 # gateway start. Restart the machine to pick up changes after add/remove.
 if [ -n "${MCP_SERVERS_JSON-}" ] && [ "$MCP_SERVERS_JSON" != "[]" ]; then
+  # Hermes expects mcp_servers as a YAML MAP keyed by server name
+  # (it iterates with .items()), not a list of {name, ...} entries.
+  # Schema:
+  #   mcp_servers:
+  #     gmail:
+  #       transport: streamable_http
+  #       url: https://...
+  #       headers:
+  #         x-api-key: "..."
   yaml_block=$(printf '%s' "$MCP_SERVERS_JSON" | jq -r '
     "\nmcp_servers:\n" +
     ([.[] |
-      "  - name: \(.name)\n" +
+      "  \(.name):\n" +
       "    transport: streamable_http\n" +
       "    url: \(.url)\n" +
       (if (.headers // {}) | length > 0 then
