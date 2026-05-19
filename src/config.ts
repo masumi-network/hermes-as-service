@@ -28,6 +28,11 @@ const schema = z.object({
 
   OPENROUTER_API_KEY: z.string().min(8),
   EXA_API_KEY: z.string().optional().default(''),
+  // Composio API key (single org-wide secret). Injected as the x-api-key
+  // header on every Composio MCP request the Hermes agent makes. Per-user
+  // identity is scoped via the ?user_id= query param Composio bakes into
+  // each connection URL.
+  COMPOSIO_API_KEY: z.string().optional().default(''),
   MASTER_ENCRYPTION_KEY: z.string().min(40),
   ADMIN_PASSWORD: z.string().min(8),
   // Public base URL of the orchestrator itself. Used to construct the

@@ -99,12 +99,15 @@ Called by Sokosumi when the user finishes an OAuth flow for a provider.
 ```json
 {
   "provider": "gmail",
-  "mcpUrl": "https://mcp.composio.dev/composio/server/<connection-id>/mcp",
-  "mcpToken": "ck_live_..."
+  "mcpUrl": "https://backend.composio.dev/v3/mcp/<server-uuid>?user_id=<sokosumi-user-id>"
 }
 ```
 
-Valid `provider` values: `gmail`, `google_calendar`, `outlook`, `outlook_calendar`. `mcpToken` is optional — omit it if the broker bakes auth into the URL.
+Valid `provider` values: `gmail`, `google_calendar`, `outlook`, `outlook_calendar`.
+
+**Auth:** for Composio integrations you do **not** send a token. The orchestrator holds `COMPOSIO_API_KEY` server-side and injects it as the `x-api-key` header on every MCP request the Hermes agent makes to `*.composio.dev` URLs. Outlook & Outlook Calendar share one Composio toolkit — POST twice (`outlook` then `outlook_calendar`) with the same `mcpUrl` and we'll track them as two providers.
+
+`mcpToken` is still accepted in the body but ignored for Composio URLs (kept for future non-Composio brokers).
 
 **What we do:**
 - Encrypt + persist `(userId, provider, mcpUrl, mcpToken)` in Postgres.
@@ -239,17 +242,15 @@ After `status = "ready"`, Sokosumi calls this to fetch the research-intro messag
 
 **You own this part.** We deliberately don't run OAuth in the orchestrator — managing 10+ OAuth apps + verification + token refresh is a multi-quarter project.
 
-**Recommendation: use Composio** (or Arcade.dev / Klavis / Pipedream Connect — any "MCP-per-user OAuth broker"). Workflow:
+**Recommendation: use Composio.** Workflow:
 
-1. User clicks "Connect Gmail" in your UI.
-2. You open `https://mcp.composio.dev/connect/gmail?user_id=<sokosumi-user-id>&redirect_uri=<your-callback>`.
-3. Composio runs the Google OAuth, stores the token in their DB, redirects back to you with a `connectionId`.
-4. You build the MCP URL from the connectionId (Composio's docs spec this) and `POST` it to us at `/v1/instances/:userId/integrations`.
-5. We inject + restart Hermes. Done.
+1. User clicks "Connect Gmail" in your UI → opens a Composio-hosted OAuth popup.
+2. Composio runs the Google OAuth, stores the token in their DB, returns a per-user connection scoped by `user_id`.
+3. You build the MCP URL: `https://backend.composio.dev/v3/mcp/<server-uuid>?user_id=<sokosumi-user-id>` and `POST` it to us at `/v1/instances/:userId/integrations` (no token in the body — see §3.3).
+4. We inject + restart Hermes. The orchestrator attaches `x-api-key: <COMPOSIO_API_KEY>` to every outbound MCP call on Hermes' behalf, so the API key never leaves the orchestrator-controlled environment.
+5. Done.
 
-Per-provider, you'll need to know the MCP URL template Composio gives you. That's a 30-min Composio onboarding, not something we need to coordinate on.
-
-If you'd rather not use Composio, the alternative is option 3 from our prior discussion (Google app passwords for Gmail, etc.) — uglier UX but no third party.
+Outlook & Outlook Calendar share one Composio toolkit but we still track them as two providers — POST twice with the same `mcpUrl`.
 
 ---
 

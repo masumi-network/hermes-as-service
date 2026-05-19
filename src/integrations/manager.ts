@@ -4,6 +4,7 @@ import { encryptSecret, decryptSecret } from '../crypto.js';
 import { FlyClient } from '../fly/client.js';
 import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
+import { loadConfig } from '../config.js';
 
 /** Providers supported in the v1 integration set. Keep this list authoritative. */
 export const SUPPORTED_PROVIDERS = [
@@ -172,9 +173,13 @@ export async function listIntegrations(userId: string): Promise<IntegrationView[
 
 /**
  * Build the JSON blob to set as MCP_SERVERS_JSON env on a Fly machine.
- * Decrypts URL + token per integration and emits the array shape the
- * hermes-user-launcher expects:
- *   [{ name, url, token }]
+ * Composio's auth model: one org-wide API key (COMPOSIO_API_KEY) sent as
+ * the `x-api-key` header on every MCP HTTP call. Per-user identity is
+ * scoped via the `?user_id=` query param Composio already bakes into each
+ * connection URL.
+ *
+ * Emits the array shape the hermes-user-launcher expects:
+ *   [{ name, url, headers: { "x-api-key": "<key>", ... } }]
  *
  * Returns "[]" if the user has no connected integrations.
  */
@@ -185,12 +190,29 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
   });
   if (rows.length === 0) return '[]';
 
-  const entries: { name: string; url: string; token: string }[] = [];
+  const cfg = loadConfig();
+  const composioKey = cfg.COMPOSIO_API_KEY;
+
+  const entries: { name: string; url: string; headers: Record<string, string> }[] = [];
   for (const row of rows) {
     try {
       const url = await decryptSecret(row.mcpUrl);
-      const token = row.mcpToken ? await decryptSecret(row.mcpToken) : '';
-      entries.push({ name: row.provider, url, token });
+      const headers: Record<string, string> = {};
+      // Composio: x-api-key. Heuristic: if the URL points at any composio
+      // host, attach the org key. Other brokers (future) would slot in here.
+      if (composioKey && /(composio\.dev|composio\.ai)/i.test(url)) {
+        headers['x-api-key'] = composioKey;
+      }
+      // Legacy: if Sokosumi passed a per-integration token (mcpToken) we
+      // honor it as Authorization: Bearer for non-Composio brokers. For
+      // Composio we ignore it — the org key wins.
+      if (row.mcpToken) {
+        const legacyToken = await decryptSecret(row.mcpToken);
+        if (legacyToken && !headers['x-api-key']) {
+          headers['Authorization'] = `Bearer ${legacyToken}`;
+        }
+      }
+      entries.push({ name: row.provider, url, headers });
     } catch (err) {
       logger.error(
         { err, userId, provider: row.provider },

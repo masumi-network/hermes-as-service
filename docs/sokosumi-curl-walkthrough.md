@@ -124,8 +124,7 @@ curl -s -X POST "$BASE/v1/instances/$USER_ID/integrations" \
   -H "Content-Type: application/json" \
   -d '{
     "provider": "gmail",
-    "mcpUrl": "https://mcp.composio.dev/composio/server/<connection-id>/mcp",
-    "mcpToken": "ck_live_xxx"
+    "mcpUrl": "https://backend.composio.dev/v3/mcp/<server-uuid>?user_id='"$USER_ID"'"
   }'
 ```
 
@@ -149,7 +148,7 @@ Valid `provider` values:
 | `outlook` | Microsoft Outlook (Mail) |
 | `outlook_calendar` | Microsoft Outlook Calendar |
 
-`mcpToken` is optional — omit it if Composio bakes auth into the URL.
+**Don't pass `mcpToken` for Composio URLs.** The orchestrator holds the org-wide `COMPOSIO_API_KEY` server-side and injects `x-api-key: <key>` as a header on every MCP HTTP call. Per-user scoping is via the `?user_id=` query param in the URL. Outlook & Outlook Calendar share one Composio toolkit — POST twice with the same `mcpUrl` (once for `outlook`, once for `outlook_calendar`) and we'll track them as two providers.
 
 Poll until `connected`:
 
@@ -384,8 +383,7 @@ set -euo pipefail
 BASE="https://orchestrator-production-35d4.up.railway.app"
 TOKEN="$ORCHESTRATOR_TOKEN"  # export beforehand
 USER_ID="019e17e9-9092-75fb-a36a-fc6587f2eb89"
-GMAIL_MCP_URL="https://mcp.composio.dev/composio/server/<your-connection-id>/mcp"
-GMAIL_MCP_TOKEN="ck_live_xxx"
+GMAIL_MCP_URL="https://backend.composio.dev/v3/mcp/<server-uuid>?user_id=$USER_ID"
 
 curl_v1() { curl -fsS -H "Authorization: Bearer $TOKEN" "$@"; }
 
@@ -408,7 +406,7 @@ if [ "$ONBOARDED_AT" = "null" ]; then
   echo "== connect gmail =="
   curl_v1 -X POST "$BASE/v1/instances/$USER_ID/integrations" \
     -H "Content-Type: application/json" \
-    -d "{\"provider\":\"gmail\",\"mcpUrl\":\"$GMAIL_MCP_URL\",\"mcpToken\":\"$GMAIL_MCP_TOKEN\"}" | jq -c
+    -d "{\"provider\":\"gmail\",\"mcpUrl\":\"$GMAIL_MCP_URL\"}" | jq -c
 
   echo "== wait for gmail connected =="
   while :; do

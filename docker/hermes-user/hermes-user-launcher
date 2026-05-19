@@ -50,7 +50,11 @@ cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
 # ---- 2b. MCP servers (HTTP-based, from OAuth broker) ----
 # MCP_SERVERS_JSON is set by the orchestrator when the user has connected
 # integrations (Gmail, Outlook, Calendar, etc.). Shape:
-#   [{"name":"gmail","url":"https://mcp.composio.dev/...","token":"ck_..."}]
+#   [{"name":"gmail",
+#     "url":"https://backend.composio.dev/v3/mcp/<id>?user_id=<u>",
+#     "headers":{"x-api-key":"ak_..."}}]
+# Headers is a free-form string→string map; the orchestrator decides what
+# auth scheme to attach (Composio = x-api-key, future brokers = whatever).
 # We append a `mcp_servers:` block to config.yaml so Hermes loads them on
 # gateway start. Restart the machine to pick up changes after add/remove.
 if [ -n "${MCP_SERVERS_JSON-}" ] && [ "$MCP_SERVERS_JSON" != "[]" ]; then
@@ -60,8 +64,11 @@ if [ -n "${MCP_SERVERS_JSON-}" ] && [ "$MCP_SERVERS_JSON" != "[]" ]; then
       "  - name: \(.name)\n" +
       "    transport: streamable_http\n" +
       "    url: \(.url)\n" +
-      (if (.token // "") != "" then
-        "    headers:\n      Authorization: \"Bearer \(.token)\"\n"
+      (if (.headers // {}) | length > 0 then
+        "    headers:\n" +
+        ([(.headers | to_entries[]) |
+          "      \(.key): \"\(.value | tostring | gsub("\""; "\\\""))\"\n"
+        ] | join(""))
        else "" end)
     ] | join(""))
   ' 2>/dev/null || true)

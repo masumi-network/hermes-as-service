@@ -17,3 +17,4 @@ coverage/
 prisma/migrations/dev.db*
 .turbo/
 .next/
+.claude/
