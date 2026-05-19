@@ -196,19 +196,53 @@ export class FlyClient {
   }
 
   /**
-   * Restart a machine. Faster than stop+start (Fly preserves the disk + IP
-   * and just bounces the process). Takes ~3–6 seconds for our image.
+   * Restart a machine, state-aware. Fly's POST /restart 412s when the
+   * machine is in any state other than `started` or `stopped` (in particular
+   * `suspended`, which is where idle Fly machines end up by default). We
+   * dispatch on the current state so this always succeeds when the machine
+   * exists at all:
+   *
+   *   started    → stop → wait → start
+   *   stopped    → start
+   *   suspended  → start
+   *   starting   → wait for terminal → recurse once
+   *   stopping   → wait for stopped → start
+   *   created    → start (machine was never started; rare race)
    */
   async restartMachine(appName: string, machineId: string): Promise<void> {
-    const res = await this.raw(
-      'POST',
-      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/restart`,
-    );
-    if (!res.ok && res.status !== 404) {
-      throw upstream(undefined, `restartMachine failed: ${res.status}`, {
-        body: await res.text().catch(() => null),
-      });
+    const m = await this.getMachine(appName, machineId);
+    if (!m) {
+      throw upstream(undefined, `restartMachine: machine ${machineId} not found`);
     }
+    const state = m.state;
+    if (state === 'started') {
+      await this.stopMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'stopped', 30);
+      await this.startMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'started', 60);
+      return;
+    }
+    if (state === 'stopped' || state === 'suspended' || state === 'created') {
+      await this.startMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'started', 60);
+      return;
+    }
+    if (state === 'stopping') {
+      await this.waitForState(appName, machineId, 'stopped', 30);
+      await this.startMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'started', 60);
+      return;
+    }
+    if (state === 'starting') {
+      await this.waitForState(appName, machineId, 'started', 60);
+      // Already started — caller wanted a restart, so bounce it.
+      await this.stopMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'stopped', 30);
+      await this.startMachine(appName, machineId);
+      await this.waitForState(appName, machineId, 'started', 60);
+      return;
+    }
+    throw upstream(undefined, `restartMachine: machine ${machineId} in unsupported state '${state}'`);
   }
 
   async stopMachine(appName: string, machineId: string): Promise<void> {

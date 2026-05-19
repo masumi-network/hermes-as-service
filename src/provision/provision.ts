@@ -6,7 +6,7 @@ import { encryptSecret, decryptSecret, generateApiServerKey } from '../crypto.js
 import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { runReturningUserBoot } from './onboarding.js';
-import { buildMcpServersJsonForUser } from '../integrations/manager.js';
+import { buildMcpServersJsonForUser, markPendingIntegrationsConnected } from '../integrations/manager.js';
 
 export interface ProvisionInput {
   userId: string;
@@ -196,7 +196,13 @@ async function runFlyPipeline(
             ],
             protocol: 'tcp',
             internal_port: 8642,
-            // Always-on: no auto-stop. The whole point of moving off Sprites.
+            // Always-on. Fly's default for new services is auto-stop after
+            // a few minutes of idle traffic, which (a) breaks Hermes' built-in
+            // cron and (b) makes /machines/:id/restart return 412 because
+            // the machine ends up in `suspended` state. Pin everything to on.
+            auto_stop_machines: 'off',
+            auto_start_machines: false,
+            min_machines_running: 1,
           },
         ],
         restart: { policy: 'always' },
@@ -216,6 +222,10 @@ async function runFlyPipeline(
 
     log.info({ machineId: machine.id }, 'waiting for machine to reach started state');
     await fly.waitForState(row.spriteName, machine.id, 'started', 180);
+
+    // Pending integrations baked into the machine's MCP_SERVERS_JSON above
+    // are now live — flip them connected so Sokosumi sees green checkmarks.
+    await markPendingIntegrationsConnected(row.userId);
 
     // Returning vs new user — decided by whether onboardedAt is set on this
     // HermesInstance row (which survives Fly destroy/re-create since the row
@@ -274,7 +284,9 @@ async function runFlyPipeline(
 
 export async function getInstance(userId: string): Promise<InstanceView> {
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
-  if (!row) throw notFound(userId);
+  // Treat soft-deleted as not-found for the public API. The brief documents
+  // 404 after DELETE; consumers should re-POST /v1/instances to revive.
+  if (!row || row.destroyedAt) throw notFound(userId);
   return toView(row);
 }
 

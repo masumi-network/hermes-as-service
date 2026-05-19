@@ -119,11 +119,18 @@ Valid `provider` values: `gmail`, `google_calendar`, `outlook`, `outlook_calenda
 ```json
 {
   "provider": "gmail",
-  "status": "connecting"
+  "status": "pending",
+  "connectedAt": null,
+  "lastError": null
 }
 ```
 
-Poll `GET /v1/instances/:userId/integrations` (or the parent instance endpoint) until `status: "connected"`. Typical time: 8–15 seconds.
+Status values: `pending` (queued — instance has no Fly machine yet, will be applied at next provision/boot) · `connecting` (live patch in progress) · `connected` · `error` (`lastError` populated) · `disconnected`.
+
+**Two regimes:**
+
+- **Pre-provision / mid-provision / re-provision** — the Hermes machine isn't running yet (no `spriteId`, or instance still `provisioning`, or just been destroyed by Sokosumi). The integration is persisted as `pending`. No Fly traffic, no restart. The next provision pipeline bakes it into `MCP_SERVERS_JSON` and flips it to `connected` once the machine reaches `started`. **This is the path Sokosumi's UI uses by default.**
+- **Live machine** — patch the Fly machine env in place + restart (`connecting` → `connected`). Typical time: 8–15 seconds.
 
 ### 3.4 `POST /v1/instances/:userId/onboard` (NEW)
 

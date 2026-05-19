@@ -36,32 +36,74 @@ export interface IntegrationView {
 }
 
 /**
- * Connect an integration: persist (encrypted) + push the new MCP_SERVERS_JSON
- * blob into the Fly machine and restart it so Hermes picks up the new
- * mcp_servers entry on next boot.
+ * Connect an integration. Two paths:
+ *
+ *   1. Machine ready (status in {ready, infrastructure_ready, suspended}
+ *      AND spriteId set) — persist + patchMachineEnv + restartMachine.
+ *      Status: connecting → connected, or → error on failure.
+ *
+ *   2. Machine NOT ready (no instance row, no spriteId, or instance is
+ *      provisioning/destroyed/error) — persist with status=pending and
+ *      skip the Fly side entirely. The next provision pipeline bakes
+ *      pending integrations into MCP_SERVERS_JSON at machine-create time
+ *      and flips them to connected once the machine is started.
+ *
+ *      This is the path Sokosumi's UI uses: users click Connect Gmail on
+ *      the onboarding screen BEFORE the Hermes machine is fully ready,
+ *      and again on session-2 after we've destroyed the prior machine.
  *
  * Idempotent on (userId, provider) — re-adding the same provider replaces
  * the previous URL/token.
  *
- * Returns the integration row view. Status starts at "connecting" and flips
- * to "connected" once the machine restart completes. On any error the row
- * is left at status="failed" with lastError populated.
+ * If the user has no HermesInstance row yet, we throw 404 — Sokosumi must
+ * still call POST /v1/instances first to materialize the row (cheap;
+ * doesn't block on Fly).
  */
 export async function addIntegration(input: AddIntegrationInput): Promise<IntegrationView> {
   const instance = await prisma.hermesInstance.findUnique({ where: { userId: input.userId } });
   if (!instance) throw notFound(input.userId);
-  if (instance.status === 'provisioning' || instance.status === 'error') {
-    throw conflict(input.userId, `Instance not ready for integration (status=${instance.status})`);
-  }
-  if (!instance.spriteId) {
-    throw conflict(input.userId, 'Instance has no machine yet');
-  }
 
   const encUrl = await encryptSecret(input.mcpUrl);
   const encToken = await encryptSecret(input.mcpToken ?? '');
 
-  // Upsert the row in "connecting" status. The Fly restart is the gating
-  // operation; we'll flip to "connected" once it returns.
+  const machineReady =
+    instance.spriteId !== null &&
+    instance.destroyedAt === null &&
+    (instance.status === 'ready' ||
+      instance.status === 'infrastructure_ready' ||
+      instance.status === 'running' ||
+      instance.status === 'suspended');
+
+  // Path 2: queue as pending. No Fly work.
+  if (!machineReady) {
+    const row = await prisma.integration.upsert({
+      where: { userId_provider: { userId: input.userId, provider: input.provider } },
+      create: {
+        instanceId: instance.id,
+        userId: input.userId,
+        provider: input.provider,
+        mcpUrl: encUrl,
+        mcpToken: encToken,
+        status: 'pending',
+      },
+      update: {
+        mcpUrl: encUrl,
+        mcpToken: encToken,
+        status: 'pending',
+        lastError: null,
+        instanceId: instance.id,
+      },
+    });
+    await recordEvent({
+      userId: input.userId,
+      instanceId: instance.id,
+      event: 'integration_connecting',
+      detail: { provider: input.provider, queued: true, reason: `instance.status=${instance.status}` },
+    });
+    return toView(row);
+  }
+
+  // Path 1: machine ready. Upsert in "connecting" and apply.
   const row = await prisma.integration.upsert({
     where: { userId_provider: { userId: input.userId, provider: input.provider } },
     create: {
@@ -88,16 +130,13 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     detail: { provider: input.provider },
   });
 
-  // Push to Fly + restart. Failures mark the row as failed but don't
-  // tear down the instance.
   try {
     const mcpJson = await buildMcpServersJsonForUser(input.userId);
     const fly = new FlyClient();
-    await fly.patchMachineEnv(instance.spriteName, instance.spriteId, {
+    await fly.patchMachineEnv(instance.spriteName, instance.spriteId!, {
       MCP_SERVERS_JSON: mcpJson,
     });
-    await fly.restartMachine(instance.spriteName, instance.spriteId);
-    await fly.waitForState(instance.spriteName, instance.spriteId, 'started', 60);
+    await fly.restartMachine(instance.spriteName, instance.spriteId!);
 
     const updated = await prisma.integration.update({
       where: { id: row.id },
@@ -118,7 +157,8 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     );
     const updated = await prisma.integration.update({
       where: { id: row.id },
-      data: { status: 'failed', lastError: message.slice(0, 1000) },
+      // Use "error" not "failed" — matches the documented enum.
+      data: { status: 'error', lastError: message.slice(0, 1000) },
     });
     await recordEvent({
       userId: input.userId,
@@ -163,6 +203,18 @@ export async function removeIntegration(userId: string, provider: string): Promi
   });
 }
 
+/**
+ * Called by runFlyPipeline once the new machine has reached `started`.
+ * Flips every pending/connecting integration to `connected`, because the
+ * machine boots with MCP_SERVERS_JSON containing all of them. Idempotent.
+ */
+export async function markPendingIntegrationsConnected(userId: string): Promise<void> {
+  await prisma.integration.updateMany({
+    where: { userId, status: { in: ['pending', 'connecting'] } },
+    data: { status: 'connected', connectedAt: new Date(), lastError: null },
+  });
+}
+
 export async function listIntegrations(userId: string): Promise<IntegrationView[]> {
   const rows = await prisma.integration.findMany({
     where: { userId },
@@ -185,7 +237,7 @@ export async function listIntegrations(userId: string): Promise<IntegrationView[
  */
 export async function buildMcpServersJsonForUser(userId: string): Promise<string> {
   const rows = await prisma.integration.findMany({
-    where: { userId, status: { in: ['connected', 'connecting'] } },
+    where: { userId, status: { in: ['connected', 'connecting', 'pending'] } },
     orderBy: { createdAt: 'asc' },
   });
   if (rows.length === 0) return '[]';

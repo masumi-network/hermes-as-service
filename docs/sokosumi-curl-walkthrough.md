@@ -133,11 +133,18 @@ Response (HTTP 202):
 ```json
 {
   "provider": "gmail",
-  "status": "connecting",
+  "status": "pending",
   "connectedAt": null,
   "lastError": null
 }
 ```
+
+Possible status values: `pending` · `connecting` · `connected` · `error` (with `lastError` populated) · `disconnected`.
+
+- `pending` — Hermes machine not yet running (or has been destroyed). We saved the integration; it'll be live as soon as the next machine boots.
+- `connecting` → `connected` — live machine; we patched the env + restarted.
+
+You can call `POST /v1/instances/:userId/integrations` *before* the machine is ready (even before `infrastructure_ready`). They queue. As long as `POST /v1/instances/:userId` has been called for this user at least once (so an instance row exists), integrations can be added at any point.
 
 Valid `provider` values:
 
@@ -150,7 +157,7 @@ Valid `provider` values:
 
 **Don't pass `mcpToken` for Composio URLs.** The orchestrator holds the org-wide `COMPOSIO_API_KEY` server-side and injects `x-api-key: <key>` as a header on every MCP HTTP call. Per-user scoping is via the `?user_id=` query param in the URL. Outlook & Outlook Calendar share one Composio toolkit — POST twice with the same `mcpUrl` (once for `outlook`, once for `outlook_calendar`) and we'll track them as two providers.
 
-Poll until `connected`:
+Poll until `connected` (or `error`):
 
 ```bash
 while :; do
@@ -158,7 +165,7 @@ while :; do
     -H "Authorization: Bearer $TOKEN" \
     | jq -r '.integrations[] | select(.provider=="gmail") | .status')
   echo "gmail status=$S"
-  case "$S" in connected|failed) break ;; esac
+  case "$S" in connected|error|pending) break ;; esac
   sleep 2
 done
 ```
@@ -166,7 +173,7 @@ done
 Typical time: 8–15 seconds (we patch the Fly machine env + restart it so
 Hermes loads the new MCP at boot).
 
-If `failed`, check `lastError`:
+If `error`, check `lastError`:
 
 ```bash
 curl -s "$BASE/v1/instances/$USER_ID/integrations" \
@@ -349,6 +356,10 @@ This soft-deletes: Fly app/machine/volume gone, but the user's profile
 the next `POST /v1/instances` for the same userId, we replay everything
 into a fresh Fly app and skip the onboarding screen.
 
+**After DELETE, `GET /v1/instances/:userId` returns 404** (the soft-delete
+is internal — we hide destroyed rows from the public API). Re-POST
+`/v1/instances` to revive.
+
 ---
 
 ## 10. Errors you might see
@@ -413,7 +424,7 @@ if [ "$ONBOARDED_AT" = "null" ]; then
     s=$(curl_v1 "$BASE/v1/instances/$USER_ID/integrations" \
       | jq -r '.integrations[] | select(.provider=="gmail") | .status')
     echo "  gmail=$s"
-    case "$s" in connected|failed) break ;; esac
+    case "$s" in connected|error|pending) break ;; esac
     sleep 2
   done
 
