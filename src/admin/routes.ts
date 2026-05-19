@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { prisma } from '../db.js';
 import { SpritesClient } from '../sprites/client.js';
 import { esc, layout, relTime, statCard, statusPill } from './html.js';
@@ -362,6 +363,35 @@ router.post('/admin/instances/:userId/destroy', async (c) => {
   }
   return c.redirect('/admin/instances');
 });
+
+/**
+ * Hard reset: destroy the Fly app + remove all DB rows for this user
+ * (HermesInstance, Integration, ChatMessage, OutboxMessage, ScheduledTask
+ * all cascade off the HermesInstance delete). Next POST /v1/instances
+ * is treated as a fresh first-time provision — no inherited onboardedAt,
+ * no preserved integrations.
+ *
+ * For testing / dev only. Accepts POST + GET for convenience from a
+ * browser address bar.
+ */
+const hardReset = async (c: Context) => {
+  const userId = c.req.param('userId');
+  const { prisma } = await import('../db.js');
+  const { FlyClient } = await import('../fly/client.js');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ ok: true, userId, note: 'no row to delete' });
+  if (row.spriteName) {
+    try {
+      await new FlyClient().deleteApp(row.spriteName);
+    } catch (err) {
+      logger.warn({ err, userId, appName: row.spriteName }, 'admin_hard_reset_fly_delete_failed');
+    }
+  }
+  await prisma.hermesInstance.delete({ where: { id: row.id } });
+  return c.json({ ok: true, userId, appDeleted: row.spriteName });
+};
+router.post('/admin/instances/:userId/hard-reset', hardReset);
+router.get('/admin/instances/:userId/hard-reset', hardReset);
 
 router.post('/admin/instances/:userId/sync-config', async (c) => {
   const userId = c.req.param('userId');
