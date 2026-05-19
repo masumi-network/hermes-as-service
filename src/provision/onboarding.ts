@@ -3,77 +3,241 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 import { recordEvent } from '../audit.js';
+import { listIntegrations } from '../integrations/manager.js';
+
+/** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
+export interface OnboardingStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface OnboardOptions {
+  /** "deep" uses connected MCPs for inbox-scan; "light" only does web research. */
+  researchDepth?: 'light' | 'deep';
+}
 
 /**
- * Drives the post-provision onboarding:
- *   1. Welcome message → outbox (immediate)
- *   2. Boot prompt → Hermes (memory write + daily-suggestions cron registration)
- *   3. Research prompt → Hermes, response captured + pushed to outbox as
- *      kind="research_intro" (synchronous, so result is guaranteed to land
- *      regardless of how soon Sokosumi destroys the instance afterward)
+ * Phase 2 of provision: user has clicked "Let's go" on the onboarding screen.
  *
- * Called async from the provision pipeline after the machine reaches
- * `started` + Hermes' API server is responsive.
+ * Steps tracked in HermesInstance.onboardingSteps so Sokosumi can poll
+ * GET /v1/instances/:userId/onboarding for live progress:
+ *   1. memory       — boot prompt (memory write + daily cron registration)
+ *   2. inbox_scan   — read connected MCPs (Gmail/Outlook inbox + calendar)
+ *   3. web_research — public-web pass on name/email
+ *   4. intro_draft  — assemble + push research-intro to outbox
+ *
+ * inbox_scan + web_research run sequentially (single Hermes turn each) so
+ * the progress UI feels alive. Once intro_draft pushes the outbox message,
+ * status flips to "ready" and onboardedAt is set.
  */
-export async function runOnboarding(instanceId: string): Promise<void> {
+export async function runOnboarding(
+  instanceId: string,
+  opts: OnboardOptions = {},
+): Promise<void> {
   const row = await prisma.hermesInstance.findUniqueOrThrow({ where: { id: instanceId } });
   const log = logger.child({ instanceId, userId: row.userId, fn: 'onboarding' });
-  const apiKey = await decryptSecret(row.apiServerKey);
   if (!row.endpointUrl) {
     log.warn('no endpointUrl yet — skipping onboarding');
     return;
   }
+  const apiKey = await decryptSecret(row.apiServerKey);
+  const integrations = await listIntegrations(row.userId);
+  const connectedProviders = integrations
+    .filter((i) => i.status === 'connected' || i.status === 'connecting')
+    .map((i) => i.provider);
+  const researchDepth = opts.researchDepth ?? 'deep';
+  const hasInbox = researchDepth === 'deep' && connectedProviders.length > 0;
 
-  // ---- 1. Welcome message ----
-  const welcome = welcomeMessage(row.name, row.email);
-  await enqueueOutboxMessage({
-    instanceId: row.id,
-    userId: row.userId,
-    content: welcome,
-    kind: 'welcome',
-  }).catch((err) => log.warn({ err }, 'welcome_enqueue_failed'));
+  const steps: OnboardingStep[] = [
+    { id: 'memory', label: 'Saving your details', status: 'pending' },
+    {
+      id: 'inbox_scan',
+      label: hasInbox ? 'Reading your inbox' : 'Inbox not connected',
+      status: hasInbox ? 'pending' : 'skipped',
+    },
+    { id: 'web_research', label: 'Checking your public profile', status: 'pending' },
+    { id: 'intro_draft', label: 'Drafting your intro', status: 'pending' },
+  ];
+
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { status: 'onboarding', onboardingSteps: steps as object },
+  });
   await recordEvent({
     userId: row.userId,
     instanceId,
-    event: 'chat_proxied',
-    detail: { source: 'onboarding_welcome' },
+    event: 'onboarding_started',
+    detail: { providers: connectedProviders, researchDepth },
   });
 
-  // ---- 2. Boot prompt (memory + daily cron) ----
-  const bootPrompt = buildBootPrompt(row.name, row.email);
+  // ---- 1. memory + boot prompt ----
+  await markStep(instanceId, 'memory', 'running');
   try {
-    await callHermes(row.endpointUrl, apiKey, bootPrompt, 5 * 60_000);
-    log.info('boot prompt sent');
+    await callHermes(
+      row.endpointUrl,
+      apiKey,
+      buildBootPrompt(row.name, row.email),
+      5 * 60_000,
+    );
+    await markStep(instanceId, 'memory', 'done');
   } catch (err) {
     log.error({ err }, 'boot_prompt_failed');
+    await markStep(instanceId, 'memory', 'failed');
   }
 
-  // ---- 3. Research-intro (synchronous, only if we have name or email) ----
-  if (!row.name && !row.email) return;
+  // ---- 2. inbox scan (only if integrations connected) ----
+  let inboxSummary = '';
+  if (hasInbox) {
+    await markStep(instanceId, 'inbox_scan', 'running');
+    try {
+      inboxSummary = await callHermes(
+        row.endpointUrl,
+        apiKey,
+        buildInboxScanPrompt(connectedProviders, row.name),
+        4 * 60_000,
+      );
+      await markStep(instanceId, 'inbox_scan', 'done');
+    } catch (err) {
+      log.error({ err }, 'inbox_scan_failed');
+      await markStep(instanceId, 'inbox_scan', 'failed');
+    }
+  }
 
-  const researchPrompt = buildResearchPrompt(row.name, row.email);
+  // ---- 3. web research ----
+  let webSummary = '';
+  await markStep(instanceId, 'web_research', 'running');
   try {
-    const text = await callHermes(row.endpointUrl, apiKey, researchPrompt, 6 * 60_000);
-    if (text && text.trim().length > 30) {
+    webSummary = await callHermes(
+      row.endpointUrl,
+      apiKey,
+      buildWebResearchPrompt(row.name, row.email),
+      4 * 60_000,
+    );
+    await markStep(instanceId, 'web_research', 'done');
+  } catch (err) {
+    log.error({ err }, 'web_research_failed');
+    await markStep(instanceId, 'web_research', 'failed');
+  }
+
+  // ---- 4. intro draft ----
+  await markStep(instanceId, 'intro_draft', 'running');
+  try {
+    const intro = await callHermes(
+      row.endpointUrl,
+      apiKey,
+      buildIntroDraftPrompt(row.name, row.email, inboxSummary, webSummary, connectedProviders),
+      4 * 60_000,
+    );
+    if (intro && intro.trim().length > 30) {
       await enqueueOutboxMessage({
         instanceId: row.id,
         userId: row.userId,
-        content: text,
+        content: intro,
         kind: 'research_intro',
       });
-      await recordEvent({
-        userId: row.userId,
-        instanceId,
-        event: 'chat_proxied',
-        detail: { source: 'onboarding_research' },
-      });
-      log.info('research-intro delivered to outbox');
+      await markStep(instanceId, 'intro_draft', 'done');
     } else {
-      log.warn({ length: text?.length }, 'research-intro response too short, skipping');
+      // Fall back to a generic welcome — we still don't want a blank chat.
+      await enqueueOutboxMessage({
+        instanceId: row.id,
+        userId: row.userId,
+        content: fallbackWelcome(row.name),
+        kind: 'welcome',
+      });
+      await markStep(instanceId, 'intro_draft', 'done');
     }
   } catch (err) {
-    log.error({ err }, 'research_prompt_failed');
+    log.error({ err }, 'intro_draft_failed');
+    await markStep(instanceId, 'intro_draft', 'failed');
+    await enqueueOutboxMessage({
+      instanceId: row.id,
+      userId: row.userId,
+      content: fallbackWelcome(row.name),
+      kind: 'welcome',
+    });
   }
+
+  // ---- finalize ----
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { status: 'ready', onboardedAt: new Date(), lastActivityAt: new Date() },
+  });
+  await recordEvent({
+    userId: row.userId,
+    instanceId,
+    event: 'onboarding_done',
+    detail: { connectedProviders },
+  });
+  log.info('onboarding complete');
+}
+
+/**
+ * Returning-user boot: short welcome-back message, no fresh research pass.
+ * Called from runFlyPipeline when onboardedAt is already set on the row.
+ */
+export async function runReturningUserBoot(instanceId: string): Promise<void> {
+  const row = await prisma.hermesInstance.findUniqueOrThrow({ where: { id: instanceId } });
+  const log = logger.child({ instanceId, userId: row.userId, fn: 'returning_user_boot' });
+  if (!row.endpointUrl) return;
+  const apiKey = await decryptSecret(row.apiServerKey);
+
+  // Refresh memory + nudge Hermes to consult its memory before greeting.
+  // We discard the response; only the outbox message below is user-visible.
+  try {
+    await callHermes(
+      row.endpointUrl,
+      apiKey,
+      buildReturningBootPrompt(row.name, row.email),
+      3 * 60_000,
+    );
+  } catch (err) {
+    log.warn({ err }, 'returning_boot_prompt_failed');
+  }
+
+  await enqueueOutboxMessage({
+    instanceId: row.id,
+    userId: row.userId,
+    content: returningWelcome(row.name),
+    kind: 'welcome',
+  });
+  log.info('returning-user welcome pushed');
+}
+
+async function markStep(
+  instanceId: string,
+  id: string,
+  status: OnboardingStep['status'],
+): Promise<void> {
+  const row = await prisma.hermesInstance.findUniqueOrThrow({
+    where: { id: instanceId },
+    select: { onboardingSteps: true, userId: true },
+  });
+  const steps = ((row.onboardingSteps as OnboardingStep[] | null) ?? []).map((s) =>
+    s.id === id
+      ? {
+          ...s,
+          status,
+          startedAt: status === 'running' ? new Date().toISOString() : s.startedAt,
+          finishedAt:
+            status === 'done' || status === 'failed' || status === 'skipped'
+              ? new Date().toISOString()
+              : s.finishedAt,
+        }
+      : s,
+  );
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { onboardingSteps: steps as object },
+  });
+  await recordEvent({
+    userId: row.userId,
+    instanceId,
+    event: 'onboarding_step',
+    detail: { step: id, status },
+  });
 }
 
 async function callHermes(
@@ -105,47 +269,15 @@ async function callHermes(
   return json.choices?.[0]?.message?.content ?? '';
 }
 
-function welcomeMessage(name: string | null, email: string | null): string {
-  const greeting = name ? `Hey ${firstName(name)},` : 'Hey,';
-  const haveIdentity = Boolean(name || email);
-  const researchLine = haveIdentity
-    ? "I'll do a quick read on you in the next minute or two and ping you with a few starting points tailored to what I find."
-    : "Tell me a bit about you (name, what you do, what you're working on) and I'll personalize from there.";
-  return `${greeting}
-
-I'm Hermes — your private agent. I'm not a chatbot; I do things. I run \
-inside your own microVM with persistent memory, web search, code execution, \
-a real browser, and scheduled tasks. Anything you tell me I'll remember next \
-session.
-
-${researchLine}
-
-A few things to try right now:
-
-- **Daily morning brief** — say "give me a daily brief on [topic] at 9am" \
-and I'll schedule it.
-- **Marketing work** — I have a deep library of marketing skills (CRO, \
-copywriting, paid ads, SEO, lifecycle). Try "write me 3 ad hooks for \
-[product]" or "audit my landing page at [url]".
-- **Research on demand** — "what's new in [topic]?" or "compare X vs Y".
-- **Connect a tool** — for now via API keys / app passwords (Gmail, Linear, \
-GitHub, etc.). Ask me what's possible.
-
-Or just chat. What's on your mind?`;
-}
-
-function firstName(full: string): string {
-  return full.trim().split(/\s+/)[0] || full.trim();
-}
+// ---------- prompts ----------
 
 function buildBootPrompt(name: string | null, email: string | null): string {
   const identityLine = name || email
     ? `The user's name is "${name ?? ''}"${email ? ` and their email is "${email}"` : ''}. Save this to your memory so you remember them next time.`
     : 'The user has not given a name yet.';
 
-  return `Onboarding setup. Treat this message as orchestration, not a \
-user-visible chat. Do the following silently — your response back to me is \
-discarded.
+  return `Onboarding setup. This message is orchestration, not a user-visible \
+chat. Your response is discarded — do not greet me.
 
 1. **Memory** — ${identityLine}
 
@@ -156,32 +288,135 @@ and deliver to "local". Prompt content:
    <prompt>
    Review what you know about this user from your memory and recent \
    conversations. Suggest 2–3 specific actions they could take today: \
-   try a new skill, install a new skill from the skill library or a \
-   public source you can research, set up a new automation, connect a \
-   tool they haven't yet. Be concrete (one paragraph each, include the \
-   exact prompt the user could send you). If you don't know enough \
-   about them yet, suggest things that would help YOU learn more about \
-   them. Skip vague platitudes.
+   try a new skill, install a new skill, set up a new automation, or \
+   draft something they could use. Be concrete (one paragraph each, \
+   include the exact prompt the user could send you).
    </prompt>
 
-Run the cronjob.create call now. Once created, just reply "ok".`;
+Run the cronjob.create call now. Once created, reply "ok".`;
 }
 
-function buildResearchPrompt(name: string | null, email: string | null): string {
-  return `Do a brief public-web research pass on the user. Their name is \
-${name ?? '(unknown)'}${email ? ` and email is ${email}` : ''}. Use \
-web_search to find their LinkedIn / company / public profile / public \
-projects. Be honest if you can't find them — don't invent details.
+function buildInboxScanPrompt(providers: string[], name: string | null): string {
+  const list = providers.join(', ');
+  return `Internal task — your response will be passed verbatim to the next \
+step, NOT shown to the user. Do not greet, do not format as a chat reply.
 
-Write a friendly message in markdown directly to the user containing:
-- 2–4 things you learned that you're reasonably confident about (with sources)
-- 3–5 concrete suggestions for things they could ask you to do, tailored \
-to what you found
-- One specific skill (from your installed library or one you could install) \
-you think they'd benefit from
+Use your connected MCPs (${list}) to scan the user's recent activity. \
+Specifically:
 
-Tone: direct, helpful, no flattery. Address them by first name. Your reply \
-content here will be shown VERBATIM to the user as a message from you, so \
-write it that way — no meta-commentary about doing research, no "Here's \
-what I'll do", just the message itself.`;
+- For Gmail / Outlook (mail): read the most recent ~30 messages they have \
+sent or received. Identify the 3–5 most relevant ongoing threads or topics. \
+Note people they correspond with often.
+- For calendar (Google / Outlook): read upcoming events for the next 14 days \
+plus the last 7. Identify recurring meetings, time-blocked focus work, and \
+any notable upcoming events.
+
+Output a tight prose summary (300–500 words) in the structure:
+
+  ## Current focus
+  ...
+  ## Recurring threads / people
+  ...
+  ## Upcoming
+  ...
+  ## Signals
+  (anything unusual or worth surfacing — e.g., a partner thread that's gone \
+   quiet, a deadline approaching, a new connection)
+
+Be honest if a tool fails or returns nothing — don't invent. The user's \
+name${name ? ` is "${name}"` : ' is unknown'}; use that as a focal point for whose mailbox you're reading.`;
+}
+
+function buildWebResearchPrompt(name: string | null, email: string | null): string {
+  return `Internal task — response feeds the next step, not the user. No \
+greeting, no chat framing.
+
+Do a brief public-web pass on the user. Name: ${name ?? '(unknown)'}${email ? ` Email: ${email}` : ''}.
+
+Use web_search to find: LinkedIn, company, public projects, recent talks / \
+posts / press. 4–8 search queries max. Be honest about what you can't \
+verify — do not invent.
+
+Return a tight summary (200–400 words):
+
+  ## Role
+  ## Company / projects
+  ## Public footprint
+  ## Sources
+  (URLs you actually opened)`;
+}
+
+function buildIntroDraftPrompt(
+  name: string | null,
+  email: string | null,
+  inboxSummary: string,
+  webSummary: string,
+  providers: string[],
+): string {
+  const firstNameStr = name ? firstName(name) : null;
+  const greeting = firstNameStr ? `Hey ${firstNameStr},` : 'Hey,';
+  const connectedLine =
+    providers.length > 0
+      ? `Connected integrations: ${providers.join(', ')}.`
+      : 'No integrations connected yet.';
+
+  return `Write the user's first message from Hermes. The text you produce \
+will be shown VERBATIM to the user as the chat-opening message — no meta, \
+no "Here is the draft", no JSON. Just the message body.
+
+Context you have:
+- Name: ${name ?? '(unknown)'}, Email: ${email ?? '(unknown)'}
+- ${connectedLine}
+
+Inbox scan summary (may be empty):
+"""
+${inboxSummary.slice(0, 4000) || '(nothing — inbox not connected or scan failed)'}
+"""
+
+Public-web research summary (may be empty):
+"""
+${webSummary.slice(0, 3000) || '(nothing — no public footprint found)'}
+"""
+
+Write the message:
+- Open with "${greeting}"
+- 2–3 short paragraphs.
+- If you have inbox context, lead with what's on their plate right now \
+  (specific, concrete — name a thread, a meeting, a project). One sentence.
+- 3–4 concrete suggestions for what they could ask you to do *next*, each \
+  with the EXACT prompt they could paste. Pull from inbox/web context where \
+  possible. Use a markdown bulleted list with bold leads.
+- Close with one specific recurring task you could schedule for them \
+  (cronjob) if they want.
+- Tone: direct, helpful, no flattery, no "I'm your AI assistant" boilerplate.
+- Address them by first name only. No sign-off, no "Best, Hermes".
+
+Length: 150–250 words. Markdown OK.`;
+}
+
+function buildReturningBootPrompt(name: string | null, email: string | null): string {
+  return `Internal — your reply is discarded. Briefly re-read your memory. \
+The user${name ? ` (${name})` : ''}${email ? `, email ${email}` : ''} is \
+returning for a new session. The Fly machine is fresh, so any in-flight \
+state from last time is gone; only your memory file survived. Reply "ok".`;
+}
+
+function returningWelcome(name: string | null): string {
+  const greeting = name ? `Hey ${firstName(name)},` : 'Hey,';
+  return `${greeting}
+
+Welcome back. Picking up where we left off — what's on your mind?`;
+}
+
+function fallbackWelcome(name: string | null): string {
+  const greeting = name ? `Hey ${firstName(name)},` : 'Hey,';
+  return `${greeting}
+
+I'm Hermes — your private agent. I had trouble reading your inbox / public \
+profile just now, but I'm ready to help. Tell me what you're working on and \
+I'll take it from there.`;
+}
+
+function firstName(full: string): string {
+  return full.trim().split(/\s+/)[0] || full.trim();
 }

@@ -5,7 +5,8 @@ import { FlyClient } from '../fly/client.js';
 import { encryptSecret, decryptSecret, generateApiServerKey } from '../crypto.js';
 import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
-import { runOnboarding } from './onboarding.js';
+import { runReturningUserBoot } from './onboarding.js';
+import { buildMcpServersJsonForUser } from '../integrations/manager.js';
 
 export interface ProvisionInput {
   userId: string;
@@ -22,6 +23,7 @@ export interface InstanceView {
   status: string;
   endpointUrl: string | null;
   lastActivityAt: Date;
+  onboardedAt: Date | null;
 }
 
 /**
@@ -35,7 +37,9 @@ export interface InstanceView {
 export async function provision(input: ProvisionInput): Promise<InstanceView> {
   const cfg = loadConfig();
   const existing = await prisma.hermesInstance.findUnique({ where: { userId: input.userId } });
-  if (existing) return toView(existing);
+
+  // Live row (Fly app exists) — return as-is, idempotent.
+  if (existing && !existing.destroyedAt) return toView(existing);
 
   const appName = generateAppName(input.userId);
   const region = input.region ?? cfg.FLY_REGION;
@@ -45,26 +49,57 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
   const encryptedLlmToken = await encryptSecret(plaintextLlmToken);
   const encryptedOpenRouter = await encryptSecret(cfg.OPENROUTER_API_KEY);
 
-  const row = await prisma.hermesInstance.create({
-    data: {
-      userId: input.userId,
-      spriteName: appName,
-      region,
-      apiServerKey: encryptedApiKey,
-      llmProxyToken: encryptedLlmToken,
-      openRouterKey: encryptedOpenRouter,
-      name: input.name?.slice(0, 200) ?? null,
-      email: input.email?.slice(0, 254) ?? null,
-      status: 'provisioning',
-    },
-  });
-
-  await recordEvent({
-    userId: row.userId,
-    instanceId: row.id,
-    event: 'created',
-    detail: { appName, region, host: 'fly' },
-  });
+  let row;
+  if (existing && existing.destroyedAt) {
+    // Re-provision in place: keep the row + onboardedAt + integrations,
+    // mint new Fly resources. Integration rows still point at this
+    // instanceId so they replay automatically via buildMcpServersJsonForUser.
+    row = await prisma.hermesInstance.update({
+      where: { id: existing.id },
+      data: {
+        spriteName: appName,
+        spriteId: null,
+        endpointUrl: null,
+        flyVolumeId: null,
+        region,
+        apiServerKey: encryptedApiKey,
+        llmProxyToken: encryptedLlmToken,
+        openRouterKey: encryptedOpenRouter,
+        name: input.name?.slice(0, 200) ?? existing.name,
+        email: input.email?.slice(0, 254) ?? existing.email,
+        status: 'provisioning',
+        destroyedAt: null,
+        errorMessage: null,
+        lastActivityAt: new Date(),
+      },
+    });
+    await recordEvent({
+      userId: row.userId,
+      instanceId: row.id,
+      event: 'created',
+      detail: { appName, region, host: 'fly', reprovision: true, onboardedAt: existing.onboardedAt },
+    });
+  } else {
+    row = await prisma.hermesInstance.create({
+      data: {
+        userId: input.userId,
+        spriteName: appName,
+        region,
+        apiServerKey: encryptedApiKey,
+        llmProxyToken: encryptedLlmToken,
+        openRouterKey: encryptedOpenRouter,
+        name: input.name?.slice(0, 200) ?? null,
+        email: input.email?.slice(0, 254) ?? null,
+        status: 'provisioning',
+      },
+    });
+    await recordEvent({
+      userId: row.userId,
+      instanceId: row.id,
+      event: 'created',
+      detail: { appName, region, host: 'fly' },
+    });
+  }
 
   // Kick off async pipeline.
   void runFlyPipeline(row.id, plaintextApiKey, plaintextLlmToken).catch((err) => {
@@ -112,6 +147,11 @@ async function runFlyPipeline(
 
     log.info({ image: cfg.FLY_MACHINE_IMAGE }, 'creating machine');
     const endpointUrl = `https://${row.spriteName}.fly.dev`;
+
+    // Re-inject any existing integrations (returning users: their Composio
+    // MCP URLs survive instance destroy because they're persisted by userId).
+    const mcpServersJson = await buildMcpServersJsonForUser(row.userId);
+
     const machine = await fly.createMachine(row.spriteName, {
       region: row.region,
       config: {
@@ -139,6 +179,9 @@ async function runFlyPipeline(
           GATEWAY_ALLOW_ALL_USERS: 'true',
           // Tools
           EXA_API_KEY: cfg.EXA_API_KEY,
+          // MCP servers (Composio etc.) — empty array if user hasn't connected anything.
+          // Hot-reloadable via patchMachineEnv + restart from integrations/manager.ts.
+          MCP_SERVERS_JSON: mcpServersJson,
           // Bridge: cron output → orchestrator outbox (used by the
           // post_llm_call shell hook baked into the image)
           ORCHESTRATOR_BASE: cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, ''),
@@ -174,28 +217,45 @@ async function runFlyPipeline(
     log.info({ machineId: machine.id }, 'waiting for machine to reach started state');
     await fly.waitForState(row.spriteName, machine.id, 'started', 180);
 
-    log.info({ endpointUrl }, 'instance ready');
-    await prisma.hermesInstance.update({
-      where: { id: instanceId },
-      data: { status: 'running', lastActivityAt: new Date(), errorMessage: null },
-    });
-    await recordEvent({
-      userId: row.userId,
-      instanceId,
-      event: 'ready',
-      detail: { endpointUrl },
-    });
-
-    // Onboarding: welcome message + boot prompt that sets up research +
-    // daily cron. Runs after status flips to running so a slow Hermes
-    // boot or research call doesn't keep the provision in "provisioning".
-    // Wait a few seconds for Hermes' API server to actually be listening
-    // (machine "started" doesn't mean Python is fully up).
-    setTimeout(() => {
-      void runOnboarding(instanceId).catch((err) =>
-        log.error({ err }, 'onboarding_failed'),
-      );
-    }, 15_000);
+    // Returning vs new user — decided by whether onboardedAt is set on this
+    // HermesInstance row (which survives Fly destroy/re-create since the row
+    // is keyed on userId, not Fly app id).
+    const isReturning = row.onboardedAt !== null;
+    if (isReturning) {
+      log.info({ endpointUrl }, 'returning user: skipping onboarding screen');
+      await prisma.hermesInstance.update({
+        where: { id: instanceId },
+        data: { status: 'ready', lastActivityAt: new Date(), errorMessage: null },
+      });
+      await recordEvent({
+        userId: row.userId,
+        instanceId,
+        event: 'returning_user_resumed',
+        detail: { endpointUrl },
+      });
+      // Push a short welcome-back message. Cheap path — no fresh research.
+      setTimeout(() => {
+        void runReturningUserBoot(instanceId).catch((err) =>
+          log.error({ err }, 'returning_user_boot_failed'),
+        );
+      }, 8_000);
+    } else {
+      log.info({ endpointUrl }, 'new user: infrastructure ready, waiting for /onboard call');
+      await prisma.hermesInstance.update({
+        where: { id: instanceId },
+        data: {
+          status: 'infrastructure_ready',
+          lastActivityAt: new Date(),
+          errorMessage: null,
+        },
+      });
+      await recordEvent({
+        userId: row.userId,
+        instanceId,
+        event: 'infrastructure_ready',
+        detail: { endpointUrl },
+      });
+    }
   } catch (err) {
     log.error({ err }, 'provision failed');
     const message = err instanceof Error ? err.message : String(err);
@@ -250,6 +310,7 @@ export async function suspendInstance(userId: string): Promise<InstanceView> {
 export async function destroyInstance(userId: string): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) throw notFound(userId);
+  if (row.destroyedAt) return; // idempotent
   const fly = new FlyClient();
   try {
     // Deleting the app removes the machine + volume + DNS.
@@ -257,8 +318,19 @@ export async function destroyInstance(userId: string): Promise<void> {
   } catch (err) {
     logger.error({ err, userId, appName: row.spriteName }, 'fly_app_delete_failed');
   }
+  // Soft-delete: keep the row so onboardedAt + integrations survive into the
+  // next provision. The Fly app is gone, so endpointUrl/spriteId are stale.
+  await prisma.hermesInstance.update({
+    where: { id: row.id },
+    data: {
+      destroyedAt: new Date(),
+      status: 'destroyed',
+      endpointUrl: null,
+      spriteId: null,
+      flyVolumeId: null,
+    },
+  });
   await recordEvent({ userId: row.userId, instanceId: row.id, event: 'destroyed' });
-  await prisma.hermesInstance.delete({ where: { id: row.id } });
 }
 
 export async function setSecret(userId: string, key: string, value: string): Promise<void> {
@@ -313,6 +385,7 @@ function toView(row: {
   status: string;
   endpointUrl: string | null;
   lastActivityAt: Date;
+  onboardedAt: Date | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -320,6 +393,7 @@ function toView(row: {
     status: row.status,
     endpointUrl: row.endpointUrl,
     lastActivityAt: row.lastActivityAt,
+    onboardedAt: row.onboardedAt,
   };
 }
 

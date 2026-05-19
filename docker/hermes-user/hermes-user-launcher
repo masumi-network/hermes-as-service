@@ -25,7 +25,8 @@ mkdir -p "$HERMES_HOME"
       HERMES_HOME TERMINAL_ENV HERMES_QUIET \
       GATEWAY_ALLOW_ALL_USERS \
       EXA_API_KEY \
-      ORCHESTRATOR_BASE INSTANCE_ID ORCHESTRATOR_OUTBOX_TOKEN; do
+      ORCHESTRATOR_BASE INSTANCE_ID ORCHESTRATOR_OUTBOX_TOKEN \
+      MCP_SERVERS_JSON; do
     val="${!var-}"
     if [ -n "$val" ]; then
       if [[ "$val" =~ [[:space:]\#\"] ]]; then
@@ -45,6 +46,29 @@ chmod 0600 "$HERMES_HOME/.env"
 # boot via the upstream entrypoint; we override that here.
 cp -f /opt/hermes-user-config/SOUL.md  "$HERMES_HOME/SOUL.md"
 cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
+
+# ---- 2b. MCP servers (HTTP-based, from OAuth broker) ----
+# MCP_SERVERS_JSON is set by the orchestrator when the user has connected
+# integrations (Gmail, Outlook, Calendar, etc.). Shape:
+#   [{"name":"gmail","url":"https://mcp.composio.dev/...","token":"ck_..."}]
+# We append a `mcp_servers:` block to config.yaml so Hermes loads them on
+# gateway start. Restart the machine to pick up changes after add/remove.
+if [ -n "${MCP_SERVERS_JSON-}" ] && [ "$MCP_SERVERS_JSON" != "[]" ]; then
+  yaml_block=$(printf '%s' "$MCP_SERVERS_JSON" | jq -r '
+    "\nmcp_servers:\n" +
+    ([.[] |
+      "  - name: \(.name)\n" +
+      "    transport: streamable_http\n" +
+      "    url: \(.url)\n" +
+      (if (.token // "") != "" then
+        "    headers:\n      Authorization: \"Bearer \(.token)\"\n"
+       else "" end)
+    ] | join(""))
+  ' 2>/dev/null || true)
+  if [ -n "$yaml_block" ]; then
+    printf '%s' "$yaml_block" >> "$HERMES_HOME/config.yaml"
+  fi
+fi
 
 # Skills: ensure curated skill packs are present. We use a simple
 # "copy if missing or older" rule — preserves any user-added skills.

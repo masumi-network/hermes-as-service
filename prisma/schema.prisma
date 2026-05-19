@@ -31,6 +31,21 @@ model HermesInstance {
   /// research pass and personalize daily suggestions.
   email          String?
   status         String
+  /// Set the first time onboarding completes for this user. Persists across
+  /// instance destroy/re-create cycles (HermesInstance is keyed by userId).
+  /// When non-null, provision goes directly to status=ready without showing
+  /// the integration screen again.
+  onboardedAt    DateTime?
+  /// Step-by-step progress for the onboarding loader UI. JSON array of
+  /// `{ id, label, status: pending|running|done|failed }`. Updated as
+  /// runOnboarding progresses so Sokosumi can render a real progress bar.
+  onboardingSteps Json?
+  /// Soft-delete marker. When set, the Fly app/machine/volume is gone but
+  /// we keep the user's profile (name, email, onboardedAt) + integrations
+  /// for re-provision on the next session. A new POST /v1/instances for
+  /// the same userId re-uses this row (clearing destroyedAt + regenerating
+  /// spriteName/keys) so onboardedAt persists across destroy/re-create.
+  destroyedAt    DateTime?
   lastActivityAt DateTime @default(now())
   errorMessage   String?
   createdAt      DateTime @default(now())
@@ -41,9 +56,38 @@ model HermesInstance {
   llmUsage         LlmUsage[]
   schedules        ScheduledTask[]
   outbox           OutboxMessage[]
+  integrations     Integration[]
 
   @@index([status])
   @@index([lastActivityAt])
+}
+
+/// Per-user OAuth-broker MCP connections (Composio, Arcade, etc.).
+/// Survives instance destroy/re-create — on every fresh provision we replay
+/// these into the new Fly machine's MCP_SERVERS_JSON env.
+model Integration {
+  id          String   @id @default(uuid())
+  instanceId  String
+  userId      String
+  /// "gmail" | "google_calendar" | "outlook" | "outlook_calendar" | ...
+  provider    String
+  /// Encrypted MCP HTTP endpoint (e.g., Composio's per-user MCP URL).
+  mcpUrl      String
+  /// Encrypted bearer/API token used by Hermes to call the MCP. Can be
+  /// empty if the broker bakes auth into the URL.
+  mcpToken    String   @default("")
+  /// "connecting" | "connected" | "failed" | "disconnected"
+  status      String   @default("connecting")
+  lastError   String?
+  connectedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([instanceId])
+  @@index([status])
 }
 
 model LlmUsage {

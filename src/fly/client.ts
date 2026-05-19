@@ -6,6 +6,7 @@ import type {
   CreateVolumeRequest,
   FlyApp,
   FlyMachine,
+  FlyMachineConfig,
   FlyVolume,
 } from './types.js';
 
@@ -162,6 +163,52 @@ export class FlyClient {
     await post(mutation, { input: { appId: appName, type: 'v6' } });
     // Suppress unused config var warning if cfg isn't used elsewhere
     void cfg;
+  }
+
+  /**
+   * Patch a machine's config in-place. Fly's POST /machines/:id replaces the
+   * whole machine spec (image, guest, env, mounts, services). We fetch the
+   * current machine, merge the supplied env patch, and PUT it back.
+   *
+   * Returns the new machine object (post-update, may include a `nonce` Fly
+   * uses to detect drift if you do follow-up writes).
+   */
+  async patchMachineEnv(
+    appName: string,
+    machineId: string,
+    envPatch: Record<string, string | null>,
+  ): Promise<FlyMachine> {
+    const current = await this.getMachine(appName, machineId);
+    if (!current) {
+      throw upstream(undefined, `patchMachineEnv: machine ${machineId} not found`);
+    }
+    const nextEnv: Record<string, string> = { ...(current.config.env ?? {}) };
+    for (const [k, v] of Object.entries(envPatch)) {
+      if (v === null) delete nextEnv[k];
+      else nextEnv[k] = v;
+    }
+    const nextConfig: FlyMachineConfig = { ...current.config, env: nextEnv };
+    return this.json<FlyMachine>(
+      'POST',
+      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}`,
+      { body: { config: nextConfig } },
+    );
+  }
+
+  /**
+   * Restart a machine. Faster than stop+start (Fly preserves the disk + IP
+   * and just bounces the process). Takes ~3–6 seconds for our image.
+   */
+  async restartMachine(appName: string, machineId: string): Promise<void> {
+    const res = await this.raw(
+      'POST',
+      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/restart`,
+    );
+    if (!res.ok && res.status !== 404) {
+      throw upstream(undefined, `restartMachine failed: ${res.status}`, {
+        body: await res.text().catch(() => null),
+      });
+    }
   }
 
   async stopMachine(appName: string, machineId: string): Promise<void> {
