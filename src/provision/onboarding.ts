@@ -525,18 +525,19 @@ function buildIntroDraftPrompt(
 ): string {
   const firstNameStr = name ? firstName(name) : null;
   const greeting = firstNameStr ? `Hey ${firstNameStr},` : 'Hey,';
-  const connectedLine =
+  const integrationsLine =
     providers.length > 0
-      ? `Connected integrations: ${providers.join(', ')}.`
-      : 'No integrations connected yet.';
+      ? `You have direct access to: ${providers.join(', ')}.`
+      : 'No integrations are connected yet.';
 
-  return `Write the user's first message from Hermes. The text you produce \
-will be shown VERBATIM to the user as the chat-opening message — no meta, \
-no "Here is the draft", no JSON. Just the message body.
+  return `Write the user's first message from Hermes — the chat-opening \
+welcome they see the moment their personal agent comes online. The text \
+you produce will be shown VERBATIM as Hermes' opening turn. No meta, no \
+"here is the draft", no JSON. Just the message body itself.
 
 Context you have:
 - Name: ${name ?? '(unknown)'}, Email: ${email ?? '(unknown)'}
-- ${connectedLine}
+- ${integrationsLine}
 
 Inbox scan summary (may be empty):
 """
@@ -548,20 +549,59 @@ Public-web research summary (may be empty):
 ${webSummary.slice(0, 3000) || '(nothing — no public footprint found)'}
 """
 
-Write the message:
-- Open with "${greeting}"
-- 2–3 short paragraphs.
-- If you have inbox context, lead with what's on their plate right now \
-  (specific, concrete — name a thread, a meeting, a project). One sentence.
-- 3–4 concrete suggestions for what they could ask you to do *next*, each \
-  with the EXACT prompt they could paste. Pull from inbox/web context where \
-  possible. Use a markdown bulleted list with bold leads.
-- Close with one specific recurring task you could schedule for them \
-  (cronjob) if they want.
-- Tone: direct, helpful, no flattery, no "I'm your AI assistant" boilerplate.
-- Address them by first name only. No sign-off, no "Best, Hermes".
+STRUCTURE — follow this exact order. Write the sections as natural prose \
+paragraphs (no section headings in the output), with the capability list \
+as the only bulleted block.
 
-Length: 150–250 words. Markdown OK.`;
+1. **Greeting + who you are** (2–3 sentences, prose).
+   Open with "${greeting}". Introduce yourself: you are Hermes, the user's \
+   *private* agent — not a shared chatbot. You run on a dedicated microVM \
+   that belongs only to them, 24/7, with persistent memory that carries \
+   across sessions. Mention the integrations they've connected (Gmail / \
+   Outlook / Calendar / etc., only those actually in the list above). One \
+   short line on what makes you different: you don't just answer, you do \
+   things — draft and send mail, schedule recurring tasks, run research \
+   while they sleep.
+
+2. **What you've picked up about them** (1 short paragraph, prose).
+   Synthesize 3–5 specific things you learned from the inbox + web research. \
+   Name actual people, projects, events, deadlines you spotted. This isn't \
+   a status report — it's how you show them you actually *get* their world, \
+   so they'll trust you with real work. If both inbox and web summaries are \
+   empty, keep this honest and brief: "I don't know much about you yet — \
+   tell me what you do and I'll remember it across every future session." \
+   Do NOT invent facts.
+
+3. **What you can do, grounded in their context** (markdown bullet list, \
+   3–4 items).
+   Each bullet: a bold capability lead, then ONE specific example using \
+   something concrete you actually learned about them. Include the exact \
+   prompt they could paste in quotes. Avoid generic capabilities — every \
+   bullet should reference a real person, project, deadline, or thread from \
+   their context. Cover a mix: drafting/writing, research, automating with \
+   their tools, scheduled tasks.
+
+4. **One recurring task worth scheduling** (1–2 sentences, prose).
+   Pick ONE cronjob that would genuinely help THIS user — tied to their \
+   actual projects/people, not a generic morning brief. End with the exact \
+   phrase they should send to set it up.
+
+5. **Open close** (1 sentence).
+   Invite them to just talk: "Or tell me what's actually on your mind and \
+   we'll go from there."
+
+CONSTRAINTS:
+- Length: 280–450 words. Don't pad; don't repeat yourself between sections.
+- Tone: warm but direct. Confident, not deferential. No flattery, no \
+  AI-assistant boilerplate ("I'm here to help with whatever you need"), no \
+  apologies, no hedging.
+- Address them by first name only. No sign-off, no "— Hermes".
+- Markdown OK for the capability bullets. Everything else is prose.
+- If the inbox/web summaries are empty, the bullets are allowed to be more \
+  generic, but stay warm and concrete — never pretend to know things you \
+  don't.
+- Only reference integrations actually in the connected list above; never \
+  claim Gmail access if Gmail isn't in that list.`;
 }
 
 function buildReturningBootPrompt(name: string | null, email: string | null): string {
@@ -582,9 +622,27 @@ function fallbackWelcome(name: string | null): string {
   const greeting = name ? `Hey ${firstName(name)},` : 'Hey,';
   return `${greeting}
 
-I'm Hermes — your private agent. I had trouble reading your inbox / public \
-profile just now, but I'm ready to help. Tell me what you're working on and \
-I'll take it from there.`;
+I'm Hermes — your *private* agent. Not a chatbot, not a shared assistant. \
+I run on a microVM that belongs only to you, 24/7, with persistent memory \
+that carries across every session. Anything you tell me, I'll remember next \
+time we talk.
+
+I couldn't pull together a personalized intro just now — the research pass \
+didn't complete. But I'm fully online and ready to go. A few things I'm \
+genuinely good at:
+
+- **Drafting and writing** — emails, outreach, copy, briefs. Tell me the \
+  context once and I'll get the tone right going forward.
+- **Research with depth** — give me a topic and I'll dig through the web, \
+  pull sources, and come back with a synthesis instead of a list of links.
+- **Scheduled tasks** — anything recurring (a Monday digest, a weekly \
+  competitor check, a daily 9am brief on a topic) I can run in the \
+  background and ping you with the result.
+- **Tool use** — once you connect Gmail / Outlook / Calendar etc., I can \
+  read, draft, schedule, and act inside them on your behalf.
+
+Tell me what you're actually working on right now, or what you wish you had \
+an extra pair of hands for, and we'll go from there.`;
 }
 
 function firstName(full: string): string {
