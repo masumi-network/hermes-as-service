@@ -41,6 +41,9 @@ const integrationBody = z.object({
   provider: z.enum(SUPPORTED_PROVIDERS),
   mcpUrl: z.string().url().max(2000),
   mcpToken: z.string().max(2000).optional(),
+  /** "read" (default — safe) or "write". When "read", our MCP proxy strips
+   *  write-tools (SEND_*, CREATE_*, etc.) from Hermes' tool catalog. */
+  mode: z.enum(['read', 'write']).optional(),
 });
 
 const onboardBody = z.object({
@@ -75,6 +78,14 @@ router.get('/v1/instances/:userId', async (c) => {
   try {
     const view = await getInstance(userId);
     const integrations = await listIntegrations(userId);
+    // `transitioning: true` when any integration is mid-apply OR the
+    // instance lifecycle is itself unsettled. Sokosumi gates the
+    // "Hermes is applying your change…" banner on this so the chat is
+    // never offered while a Fly machine replace is in progress.
+    const transitioning =
+      integrations.some((i) => i.status === 'connecting' || i.status === 'pending') ||
+      view.status === 'provisioning' ||
+      view.status === 'onboarding';
     return c.json({
       instanceId: view.instanceId,
       userId: view.userId,
@@ -84,9 +95,11 @@ router.get('/v1/instances/:userId', async (c) => {
       onboardedAt: view.onboardedAt?.toISOString() ?? null,
       welcomeMessage: view.welcomeMessage,
       welcomeKind: view.welcomeKind,
+      transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,
         status: i.status,
+        mode: i.mode,
         connectedAt: i.connectedAt?.toISOString() ?? null,
         lastError: i.lastError,
       })),
@@ -118,11 +131,13 @@ router.post('/v1/instances/:userId/integrations', async (c) => {
       provider: parsed.data.provider,
       mcpUrl: parsed.data.mcpUrl,
       mcpToken: parsed.data.mcpToken,
+      mode: parsed.data.mode,
     });
     return c.json(
       {
         provider: view.provider,
         status: view.status,
+        mode: view.mode,
         connectedAt: view.connectedAt?.toISOString() ?? null,
         lastError: view.lastError,
       },
@@ -152,6 +167,7 @@ router.get('/v1/instances/:userId/integrations', async (c) => {
       integrations: list.map((i) => ({
         provider: i.provider,
         status: i.status,
+        mode: i.mode,
         connectedAt: i.connectedAt?.toISOString() ?? null,
         lastError: i.lastError,
       })),

@@ -26,11 +26,14 @@ export interface AddIntegrationInput {
   mcpUrl: string;
   /** Plaintext bearer token, optional if auth is baked into the URL. */
   mcpToken?: string;
+  /** "read" (default) or "write". See Integration.mode in schema. */
+  mode?: 'read' | 'write';
 }
 
 export interface IntegrationView {
   provider: string;
   status: string;
+  mode: string;
   connectedAt: Date | null;
   lastError: string | null;
 }
@@ -92,6 +95,7 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
   }
 
   // Path 2: queue as pending. No Fly work.
+  const mode = input.mode ?? 'read';
   if (!machineReady) {
     const row = await prisma.integration.upsert({
       where: { userId_provider: { userId: input.userId, provider: input.provider } },
@@ -101,11 +105,13 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
         provider: input.provider,
         mcpUrl: encUrl,
         mcpToken: encToken,
+        mode,
         status: 'pending',
       },
       update: {
         mcpUrl: encUrl,
         mcpToken: encToken,
+        mode,
         status: 'pending',
         lastError: null,
         instanceId: instance.id,
@@ -120,6 +126,27 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     return toView(row);
   }
 
+  // O4 short-circuit: if there's already a connected row with the same
+  // URL + mode, this POST is a no-op (Sokosumi retry, double-click).
+  // Skip the patch+restart cycle entirely.
+  const existing = await prisma.integration.findUnique({
+    where: { userId_provider: { userId: input.userId, provider: input.provider } },
+  });
+  if (existing && existing.status === 'connected' && existing.mode === mode) {
+    try {
+      const existingUrlPlain = await decryptSecret(existing.mcpUrl);
+      if (existingUrlPlain === input.mcpUrl) {
+        logger.info(
+          { userId: input.userId, provider: input.provider },
+          'integration_noop_skip',
+        );
+        return toView(existing);
+      }
+    } catch {
+      // Decrypt failure → treat as if no match, fall through.
+    }
+  }
+
   // Path 1: machine ready. Upsert in "connecting" and apply.
   const row = await prisma.integration.upsert({
     where: { userId_provider: { userId: input.userId, provider: input.provider } },
@@ -129,11 +156,13 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
       provider: input.provider,
       mcpUrl: encUrl,
       mcpToken: encToken,
+      mode,
       status: 'connecting',
     },
     update: {
       mcpUrl: encUrl,
       mcpToken: encToken,
+      mode,
       status: 'connecting',
       lastError: null,
       instanceId: instance.id,
@@ -165,6 +194,10 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
       where: { id: row.id },
       data: { status: 'connected', connectedAt: new Date(), lastError: null },
     });
+    // Any OTHER integrations that were stuck in 'pending' (because a prior
+    // rapid-fire connect raced with this machine restart) physically live
+    // in the new machine's MCP_SERVERS_JSON now — reconcile their status.
+    await markPendingIntegrationsConnected(input.userId);
     await recordEvent({
       userId: input.userId,
       instanceId: instance.id,
@@ -208,7 +241,10 @@ export async function removeIntegration(userId: string, provider: string): Promi
       await fly.patchMachineEnv(instance.spriteName, instance.spriteId, {
         MCP_SERVERS_JSON: mcpJson || '[]',
       });
-      await fly.restartMachine(instance.spriteName, instance.spriteId);
+      // patchMachineEnv already triggers Fly's replace+restart. Wait for
+      // settle, then reconcile any pending integrations.
+      await fly.waitForState(instance.spriteName, instance.spriteId, 'started', 90);
+      await markPendingIntegrationsConnected(userId);
     } catch (err) {
       logger.error(
         { err, userId, provider },
@@ -306,12 +342,14 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
 function toView(row: {
   provider: string;
   status: string;
+  mode: string;
   connectedAt: Date | null;
   lastError: string | null;
 }): IntegrationView {
   return {
     provider: row.provider,
     status: row.status,
+    mode: row.mode,
     connectedAt: row.connectedAt,
     lastError: row.lastError,
   };

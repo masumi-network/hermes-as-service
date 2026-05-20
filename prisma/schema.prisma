@@ -88,8 +88,14 @@ model Integration {
   /// Encrypted bearer/API token used by Hermes to call the MCP. Can be
   /// empty if the broker bakes auth into the URL.
   mcpToken    String   @default("")
-  /// "connecting" | "connected" | "failed" | "disconnected"
+  /// "connecting" | "connected" | "failed" | "disconnected" | "pending" | "error"
   status      String   @default("connecting")
+  /// "read" (default — safest) or "write". Drives the MCP proxy's
+  /// tool-list filter: when "read", write-tools (SEND_*, CREATE_*,
+  /// DELETE_*, etc.) are stripped from the catalog Hermes sees. Defense
+  /// in depth: the OAuth scope from Composio should ALSO be read-only,
+  /// but we don't rely on that as the only barrier.
+  mode        String   @default("read")
   lastError   String?
   connectedAt DateTime?
   createdAt   DateTime @default(now())

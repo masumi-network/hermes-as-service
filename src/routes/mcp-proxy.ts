@@ -135,6 +135,11 @@ async function forward(c: Context): Promise<Response> {
   const hasBody = method !== 'GET' && method !== 'HEAD';
   const bodyText = hasBody ? await c.req.text() : undefined;
 
+  // Detect tools/list requests up front so we know to buffer + filter the
+  // response when the integration is read-only.
+  const isToolsList = isToolsListRequest(bodyText);
+  const isReadOnly = integration.mode !== 'write'; // default to read
+
   let upstream: Response;
   try {
     upstream = await fetch(upstreamUrl, {
@@ -147,14 +152,152 @@ async function forward(c: Context): Promise<Response> {
     return jsonResponse(502, { error: { message: 'upstream fetch failed' } });
   }
 
-  // Stream the response back. content-type matters (application/json vs
-  // text/event-stream). mcp-session-id matters for stateful transports.
   const outHeaders: Record<string, string> = {};
   for (const h of ['content-type', 'cache-control', 'mcp-session-id', 'mcp-protocol-version']) {
     const v = upstream.headers.get(h);
     if (v) outHeaders[h] = v;
   }
+
+  // Filter the tool catalog for read-only integrations. Buffer the body
+  // (tools/list responses are small — single JSON or one SSE frame), parse,
+  // strip write-tools, return modified. Anything we can't safely parse,
+  // we pass through unchanged — Composio's OAuth-scope-level enforcement
+  // is the primary defense; this is belt-and-suspenders.
+  if (isToolsList && isReadOnly) {
+    try {
+      const upstreamText = await upstream.text();
+      const filtered = stripWriteTools(upstreamText, provider);
+      // Preserve original Content-Length if it was set (we recompute).
+      delete outHeaders['content-length'];
+      return new Response(filtered, { status: upstream.status, headers: outHeaders });
+    } catch (err) {
+      logger.warn({ err, instanceId, provider }, 'mcp_proxy_tools_filter_failed_passthrough');
+      // Already consumed body — return an error to Hermes; it'll re-list.
+      return jsonResponse(502, { error: { message: 'tool-list filter failed' } });
+    }
+  }
+
+  // Default: stream response back unchanged.
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+/**
+ * Detect a JSON-RPC `tools/list` request. Returns true if the body parses
+ * as JSON-RPC and method === 'tools/list'.
+ */
+function isToolsListRequest(bodyText: string | undefined): boolean {
+  if (!bodyText) return false;
+  try {
+    const parsed = JSON.parse(bodyText) as { method?: string };
+    return parsed?.method === 'tools/list';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verbs that imply state mutation. If a tool name contains any of these
+ * (case-insensitive, surrounded by word boundaries / underscores), it's
+ * stripped from the read-only catalog. Generic across providers — Composio
+ * uses a consistent VERB-style naming convention.
+ */
+const WRITE_VERBS = [
+  'SEND',
+  'CREATE',
+  'UPDATE',
+  'DELETE',
+  'PATCH',
+  'REPLY',
+  'FORWARD',
+  'MOVE',
+  'IMPORT',
+  'ARCHIVE',
+  'TRASH',
+  'REMOVE',
+  'ADD',
+  'INSERT',
+  'WRITE',
+  'EDIT',
+  'CANCEL',
+  'ACCEPT',
+  'DECLINE',
+  'RESPOND',
+  'STAR',
+  'UNSTAR',
+  'LABEL',
+  'UNLABEL',
+];
+const WRITE_VERB_REGEX = new RegExp(`(^|_)(${WRITE_VERBS.join('|')})(_|$)`, 'i');
+
+function isWriteToolName(name: string): boolean {
+  return WRITE_VERB_REGEX.test(name);
+}
+
+/**
+ * Parse upstream text (either bare JSON or SSE with one JSON event) and
+ * strip write-tools from any embedded tools/list result. Returns the
+ * re-serialized text in the same wire format. Throws on parse failure
+ * (caller logs + 502s).
+ */
+function stripWriteTools(upstreamText: string, provider: string): string {
+  // SSE form: typically a single `data: <json>` line (sometimes preceded
+  // by `event: message`). Detect by looking for a `data:` prefix.
+  const trimmed = upstreamText.trim();
+  if (trimmed.startsWith('event:') || trimmed.startsWith('data:')) {
+    const lines = upstreamText.split('\n');
+    const rebuilt: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('data:')) {
+        const jsonPart = line.slice(5).trim();
+        if (!jsonPart) {
+          rebuilt.push(line);
+          continue;
+        }
+        try {
+          const obj = JSON.parse(jsonPart) as JsonRpcMessage;
+          const filtered = filterToolsInJsonRpc(obj, provider);
+          rebuilt.push(`data: ${JSON.stringify(filtered)}`);
+        } catch {
+          rebuilt.push(line);
+        }
+      } else {
+        rebuilt.push(line);
+      }
+    }
+    return rebuilt.join('\n');
+  }
+
+  // Plain JSON.
+  const obj = JSON.parse(trimmed) as JsonRpcMessage;
+  const filtered = filterToolsInJsonRpc(obj, provider);
+  return JSON.stringify(filtered);
+}
+
+interface JsonRpcMessage {
+  jsonrpc?: string;
+  id?: number | string | null;
+  result?: { tools?: { name?: string }[] };
+}
+
+function filterToolsInJsonRpc(msg: JsonRpcMessage, provider: string): JsonRpcMessage {
+  const tools = msg?.result?.tools;
+  if (!Array.isArray(tools)) return msg;
+  const kept: { name?: string }[] = [];
+  let dropped = 0;
+  for (const t of tools) {
+    if (t?.name && isWriteToolName(t.name)) {
+      dropped++;
+      continue;
+    }
+    kept.push(t);
+  }
+  if (dropped > 0) {
+    logger.info({ provider, kept: kept.length, dropped }, 'mcp_proxy_filtered_write_tools');
+  }
+  return {
+    ...msg,
+    result: { ...(msg.result ?? {}), tools: kept },
+  };
 }
 
 // Two route shapes: with and without a sub-path. Hermes will hit the bare
