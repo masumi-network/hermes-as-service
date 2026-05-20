@@ -202,6 +202,7 @@ function isToolsListRequest(bodyText: string | undefined): boolean {
  * uses a consistent VERB-style naming convention.
  */
 const WRITE_VERBS = [
+  // mail / calendar
   'SEND',
   'CREATE',
   'UPDATE',
@@ -226,6 +227,25 @@ const WRITE_VERBS = [
   'UNSTAR',
   'LABEL',
   'UNLABEL',
+  // v2 — comms / dev / notes / CRM / social
+  'ASSIGN',
+  'CLOSE',
+  'MERGE',
+  'APPEND',
+  'INVITE',
+  'UNINVITE',
+  'FOLLOW',
+  'UNFOLLOW',
+  'MUTE',
+  'UNMUTE',
+  'BLOCK',
+  'UNBLOCK',
+  'RETWEET',
+  'UPLOAD',
+  'PUBLISH',
+  'UNPUBLISH',
+  'ENABLE',
+  'DISABLE',
 ];
 const WRITE_VERB_REGEX = new RegExp(`(^|_)(${WRITE_VERBS.join('|')})(_|$)`, 'i');
 

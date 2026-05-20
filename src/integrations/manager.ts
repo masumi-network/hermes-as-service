@@ -6,12 +6,23 @@ import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { loadConfig } from '../config.js';
 
-/** Providers supported in the v1 integration set. Keep this list authoritative. */
+/** Providers supported in the integration set. Keep this list authoritative.
+ *  v1 (mail/calendar) + v2 batch (comms / dev / notes / CRM / social).
+ *  Adding a new provider here: also update providerToolLabel() in onboarding.ts
+ *  and verify the write-verb regex in mcp-proxy.ts covers its tool names. */
 export const SUPPORTED_PROVIDERS = [
+  // v1 — mail + calendar (always read-only by default)
   'gmail',
   'google_calendar',
   'outlook',
   'outlook_calendar',
+  // v2 — comms / dev / notes / CRM / social
+  'slack',
+  'linear',
+  'github',
+  'notion',
+  'hubspot',
+  'twitter',
 ] as const;
 export type Provider = (typeof SUPPORTED_PROVIDERS)[number];
 

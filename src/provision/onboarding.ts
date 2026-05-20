@@ -405,6 +405,18 @@ function providerToolLabel(provider: string): string {
       return 'Outlook mail';
     case 'outlook_calendar':
       return 'Outlook Calendar';
+    case 'slack':
+      return 'Slack';
+    case 'linear':
+      return 'Linear';
+    case 'github':
+      return 'GitHub';
+    case 'notion':
+      return 'Notion';
+    case 'hubspot':
+      return 'HubSpot';
+    case 'twitter':
+      return 'X (Twitter)';
     default:
       return provider;
   }
