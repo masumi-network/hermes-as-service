@@ -46,6 +46,18 @@ model HermesInstance {
   /// the same userId re-uses this row (clearing destroyedAt + regenerating
   /// spriteName/keys) so onboardedAt persists across destroy/re-create.
   destroyedAt    DateTime?
+  /// The one-shot welcome message produced by onboarding (or
+  /// runReturningUserBoot). Surfaced inline in GET /v1/instances/:userId
+  /// so Sokosumi can render it the moment status flips to "ready" without
+  /// a separate inbox poll. Re-written on each provision cycle; cleared
+  /// when a fresh provision starts. The async inbox endpoint is for
+  /// post-ready pushes only (scheduled task results, daily suggestions).
+  welcomeMessage String?
+  /// Discriminator for welcomeMessage: "research_intro" (full Gmail-aware
+  /// intro), "welcome" (generic fallback when research failed), or
+  /// "returning" (short welcome-back on session 2+). Lets Sokosumi UI
+  /// pick a render style if useful.
+  welcomeKind    String?
   lastActivityAt DateTime @default(now())
   errorMessage   String?
   createdAt      DateTime @default(now())

@@ -82,6 +82,8 @@ router.get('/v1/instances/:userId', async (c) => {
       endpointUrl: view.endpointUrl,
       lastActivityAt: view.lastActivityAt.toISOString(),
       onboardedAt: view.onboardedAt?.toISOString() ?? null,
+      welcomeMessage: view.welcomeMessage,
+      welcomeKind: view.welcomeKind,
       integrations: integrations.map((i) => ({
         provider: i.provider,
         status: i.status,

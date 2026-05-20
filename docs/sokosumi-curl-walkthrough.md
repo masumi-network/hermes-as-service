@@ -248,41 +248,39 @@ Typical full onboarding time: **30–90s** (most variance is in the inbox scan).
 
 ---
 
-## 6. `status === "ready"` → fetch the opening message + open the chat
+## 6. `status === "ready"` → grab the welcome inline + open the chat
+
+The welcome message is now part of `GET /v1/instances/:userId` — you
+already have it from step 5's polling. Just read `welcomeMessage` off the
+response and render it as Hermes' first chat turn:
 
 ```bash
-curl -s "$BASE/v1/instances/$USER_ID/inbox" \
-  -H "Authorization: Bearer $TOKEN" | jq
+curl -s "$BASE/v1/instances/$USER_ID" \
+  -H "Authorization: Bearer $TOKEN" | jq '{welcomeMessage, welcomeKind}'
 ```
-
-Response:
 
 ```json
 {
-  "messages": [
-    {
-      "id": "<uuid>",
-      "content": "Hey Test,\n\nSaw on LinkedIn you're …",
-      "kind": "research_intro",
-      "createdAt": "..."
-    }
-  ]
+  "welcomeMessage": "Hey Patrick,\n\nSaw on LinkedIn you're working on…",
+  "welcomeKind": "research_intro"
 }
 ```
 
-Render the `research_intro` message as Hermes' first chat turn. Then ack
-it so we don't redeliver:
+`welcomeKind` values:
 
-```bash
-curl -s -X POST "$BASE/v1/instances/$USER_ID/inbox/ack" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "messageIds": ["<id-from-above>"] }'
-# 204 No Content
-```
+- `research_intro` — full Gmail-aware intro from a successful onboarding
+- `welcome` — generic fallback when research couldn't run (network, MCPs
+  didn't load, web search failed). Still a friendly opener; no inbox
+  context.
+- `returning` — short welcome-back on session 2+
 
-From here, the user is in the chat. Use your existing chat-proxy path —
-nothing in step 6+ changes from today's flow.
+No separate poll, no ack, no race with the inbox. The welcome is
+populated *before* `status` flips to `ready`, so the moment you see
+`ready` you already have the message in the same response body.
+
+The async `/v1/instances/:userId/inbox` endpoint is now for **post-ready
+pushes only** (scheduled task results from `cronjob`, daily suggestions,
+etc.) — see step 11 below if you want to surface those too.
 
 ---
 

@@ -79,10 +79,12 @@ Now returns the richer status:
 {
   "instanceId": "...",
   "userId": "...",
-  "status": "infrastructure_ready",
+  "status": "ready",
   "endpointUrl": "https://hermes-....fly.dev",
   "lastActivityAt": "...",
-  "onboardedAt": null,
+  "onboardedAt": "2026-05-20T08:42:11.000Z",
+  "welcomeMessage": "Hey Patrick,\n\nI saw on your inbox you're working on…",
+  "welcomeKind": "research_intro",
   "integrations": [
     { "provider": "gmail", "status": "connected", "connectedAt": "..." }
   ]
@@ -90,6 +92,10 @@ Now returns the richer status:
 ```
 
 Poll this every 2s while `status ∈ {provisioning, onboarding}`. Stop polling once `status ∈ {infrastructure_ready, ready, error}`.
+
+**`welcomeMessage` is the one-shot intro the user sees when the chat opens.** It's populated atomically before status flips to `ready` — no separate poll needed, no race with the inbox. Render it as Hermes' first turn directly. `welcomeKind` is one of `research_intro` (full Gmail-aware intro), `welcome` (generic fallback when research failed), or `returning` (short welcome-back on session 2+). Use it to pick a render style if you like. The field is cleared on each fresh provision and re-populated by onboarding/returning-user-boot.
+
+The async `GET /v1/instances/:userId/inbox` endpoint is for **post-ready pushes only** — scheduled task results, daily suggestions, cron output. The welcome no longer lands there.
 
 ### 3.3 `POST /v1/instances/:userId/integrations` (NEW)
 

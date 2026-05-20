@@ -1,7 +1,6 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
-import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
 
@@ -179,32 +178,17 @@ export async function runOnboarding(
       4 * 60_000,
     );
     if (intro && intro.trim().length > 30) {
-      await enqueueOutboxMessage({
-        instanceId: row.id,
-        userId: row.userId,
-        content: intro,
-        kind: 'research_intro',
-      });
+      await setWelcomeMessage(instanceId, intro, 'research_intro');
       await markStep(instanceId, 'intro_draft', 'done');
     } else {
       // Fall back to a generic welcome — we still don't want a blank chat.
-      await enqueueOutboxMessage({
-        instanceId: row.id,
-        userId: row.userId,
-        content: fallbackWelcome(row.name),
-        kind: 'welcome',
-      });
+      await setWelcomeMessage(instanceId, fallbackWelcome(row.name), 'welcome');
       await markStep(instanceId, 'intro_draft', 'done');
     }
   } catch (err) {
     log.error({ err }, 'intro_draft_failed');
     await markStep(instanceId, 'intro_draft', 'failed', errToMessage(err));
-    await enqueueOutboxMessage({
-      instanceId: row.id,
-      userId: row.userId,
-      content: fallbackWelcome(row.name),
-      kind: 'welcome',
-    });
+    await setWelcomeMessage(instanceId, fallbackWelcome(row.name), 'welcome');
   }
 
   // ---- finalize ----
@@ -244,13 +228,34 @@ export async function runReturningUserBoot(instanceId: string): Promise<void> {
     log.warn({ err }, 'returning_boot_prompt_failed');
   }
 
-  await enqueueOutboxMessage({
-    instanceId: row.id,
-    userId: row.userId,
-    content: returningWelcome(row.name),
-    kind: 'welcome',
+  await setWelcomeMessage(row.id, returningWelcome(row.name), 'returning');
+  log.info('returning-user welcome set');
+}
+
+/**
+ * Persist the one-shot welcome on the HermesInstance row. Replaces the
+ * old "enqueue to outbox with kind=welcome|research_intro" pattern —
+ * Sokosumi now reads this inline from GET /v1/instances/:userId, no
+ * polling race between status=ready and inbox drain.
+ *
+ * Clipped to 32 KB to match the old outbox cap, though research_intro
+ * outputs are typically <2 KB.
+ */
+async function setWelcomeMessage(
+  instanceId: string,
+  content: string,
+  kind: 'research_intro' | 'welcome' | 'returning',
+): Promise<void> {
+  const MAX_BYTES = 32 * 1024;
+  let clipped = content;
+  if (Buffer.byteLength(clipped, 'utf8') > MAX_BYTES) {
+    const buf = Buffer.from(clipped, 'utf8');
+    clipped = buf.subarray(0, MAX_BYTES - 32).toString('utf8') + '… [truncated]';
+  }
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { welcomeMessage: clipped, welcomeKind: kind },
   });
-  log.info('returning-user welcome pushed');
 }
 
 async function markStep(
