@@ -127,17 +127,20 @@ async function forward(c: Context): Promise<Response> {
     if (v) upstreamHeaders[h] = v;
   }
 
-  // Forward body for write methods.
+  // Forward body for write methods. Read as text — MCP JSON-RPC payloads
+  // are text, and string bodies don't hit the undici "detached ArrayBuffer"
+  // bug on redirect-following (which Composio does internally between
+  // regional endpoints).
   const method = c.req.method.toUpperCase();
   const hasBody = method !== 'GET' && method !== 'HEAD';
-  const body = hasBody ? await c.req.arrayBuffer() : undefined;
+  const bodyText = hasBody ? await c.req.text() : undefined;
 
   let upstream: Response;
   try {
     upstream = await fetch(upstreamUrl, {
       method,
       headers: upstreamHeaders,
-      body: body ? Buffer.from(body) : undefined,
+      body: bodyText,
     });
   } catch (err) {
     logger.error({ err, instanceId, provider }, 'mcp_proxy_upstream_failed');
