@@ -17,6 +17,8 @@ export interface ProvisionInput {
   region?: string;
   /** Which Sokosumi backend (dev/preprod/mainnet) this user lives in. */
   sokosumiEnv?: 'development' | 'preprod' | 'mainnet';
+  /** How much autonomy the agent gets ("low" | "medium" | "high"). */
+  autonomyLevel?: 'low' | 'medium' | 'high';
 }
 
 export interface InstanceView {
@@ -30,6 +32,7 @@ export interface InstanceView {
   welcomeKind: string | null;
   lastSokosumiSyncAt: Date | null;
   sokosumiEnv: string | null;
+  autonomyLevel: string;
 }
 
 /**
@@ -83,6 +86,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         welcomeMessage: null,
         welcomeKind: null,
         ...(input.sokosumiEnv ? { sokosumiEnv: input.sokosumiEnv } : {}),
+        ...(input.autonomyLevel ? { autonomyLevel: input.autonomyLevel } : {}),
       },
     });
     await recordEvent({
@@ -103,6 +107,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         name: input.name?.slice(0, 200) ?? null,
         email: input.email?.slice(0, 254) ?? null,
         sokosumiEnv: input.sokosumiEnv ?? null,
+        autonomyLevel: input.autonomyLevel ?? 'medium',
         status: 'provisioning',
       },
     });
@@ -415,6 +420,7 @@ function toView(row: {
   welcomeKind: string | null;
   lastSokosumiSyncAt: Date | null;
   sokosumiEnv: string | null;
+  autonomyLevel: string;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -427,6 +433,7 @@ function toView(row: {
     welcomeKind: row.welcomeKind,
     lastSokosumiSyncAt: row.lastSokosumiSyncAt,
     sokosumiEnv: row.sokosumiEnv,
+    autonomyLevel: row.autonomyLevel,
   };
 }
 

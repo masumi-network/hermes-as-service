@@ -76,6 +76,25 @@ model HermesInstance {
   /// inside the window. Multiple events in the same window get batched
   /// into a single message at the next eligible tick.
   lastUrgentInterruptAt DateTime?
+  /// Per-status watermarks for the urgent-interrupt cron's
+  /// completion/awaiting-input/failed scans. Separate from lastJobNoticeAt
+  /// (which tracks COMPLETED only) so a flood of completions doesn't
+  /// hide a new AWAITING_INPUT event from getting noticed.
+  lastAwaitingInputNoticeAt DateTime?
+  lastFailedJobNoticeAt DateTime?
+  /// HIGH-autonomy users get a hourly task-augmentation pass: Hermes
+  /// scans newly-created tasks since this watermark and adds enriching
+  /// comments where it has useful context (mail, memory, prior jobs).
+  lastTaskAugmentationAt DateTime?
+  /// How much autonomy Hermes has on this instance's workspace:
+  ///   "low"    — read only; never starts tasks/jobs, never comments
+  ///   "medium" — can do everything, but always asks the user first
+  ///              (Hermes drafts confirmation in chat; user replies; fires)
+  ///   "high"   — can act autonomously, including running tasks in the
+  ///              background and adding comments to existing tasks
+  /// Set at provision time. Default "medium". Changeable via
+  /// PATCH /v1/instances/:userId.
+  autonomyLevel String   @default("medium")
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's

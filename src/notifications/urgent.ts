@@ -43,10 +43,12 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
   if (!SokosumiClient.isConfigured(env)) return { fired: false, reason: 'no_sokosumi_key' };
 
-  // Cooldown check.
-  if (row.lastUrgentInterruptAt && row.lastUrgentInterruptAt.getTime() > Date.now() - COOLDOWN_MS) {
-    return { fired: false, reason: 'cooldown' };
-  }
+  // Cooldown check — but AWAITING_INPUT bypasses the cooldown because
+  // those events are time-critical (the user's job is paused). We still
+  // gate via Hermes' judgment below, just don't preemptively skip.
+  // (The hasAwaitingInput check happens after we list events; see below.)
+  const inCooldown =
+    !!row.lastUrgentInterruptAt && row.lastUrgentInterruptAt.getTime() > Date.now() - COOLDOWN_MS;
 
   const log = logger.child({ instanceId, userId: row.userId, fn: 'urgent_check' });
 
@@ -62,54 +64,89 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     return { fired: false, reason: 'list_orgs_failed' };
   }
 
-  const since = row.lastJobNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
+  // Three watermarks now — one per status we care about. Tracked
+  // separately so a flood of completions can't hide a fresh
+  // AWAITING_INPUT (which is much more urgent).
+  const sinceCompleted = row.lastJobNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
+  const sinceAwaiting = row.lastAwaitingInputNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
+  const sinceFailed = row.lastFailedJobNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
+
   const candidates: Array<{
     name: string;
     agentId: string;
-    completedAt: string;
+    timestamp: string;
     resultSnippet: string;
     orgId: string;
+    status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
+    jobId: string;
   }> = [];
 
   for (const org of orgs.slice(0, 5)) {
     const orgClient = client.withOrganization(org.id);
-    try {
-      const jobs = (await orgClient.listJobs({ status: 'COMPLETED', limit: 15 })) as Array<{
-        name?: string;
-        agentId?: string;
-        completedAt?: string;
-        result?: string;
-      }>;
-      for (const j of jobs) {
-        if (!j.completedAt) continue;
-        const done = new Date(j.completedAt);
-        if (isNaN(done.getTime())) continue;
-        if (done.getTime() <= since.getTime()) continue;
-        candidates.push({
-          name: j.name ?? '(unnamed job)',
-          agentId: j.agentId ?? '?',
-          completedAt: j.completedAt,
-          resultSnippet: (j.result ?? '').slice(0, 800).replace(/\s+/g, ' '),
-          orgId: org.id,
-        });
+    // For each watched status, list recent jobs and filter by watermark.
+    for (const status of ['COMPLETED', 'AWAITING_INPUT', 'FAILED'] as const) {
+      try {
+        const jobs = (await orgClient.listJobs({ status, limit: 15 })) as Array<{
+          id?: string;
+          name?: string;
+          agentId?: string;
+          completedAt?: string;
+          updatedAt?: string;
+          createdAt?: string;
+          result?: string;
+        }>;
+        const watermark =
+          status === 'COMPLETED' ? sinceCompleted : status === 'AWAITING_INPUT' ? sinceAwaiting : sinceFailed;
+        for (const j of jobs) {
+          // Use completedAt for COMPLETED, updatedAt for the others (which
+          // mark state transitions).
+          const stampStr =
+            status === 'COMPLETED' ? j.completedAt : j.updatedAt ?? j.createdAt;
+          if (!stampStr) continue;
+          const stamp = new Date(stampStr);
+          if (isNaN(stamp.getTime())) continue;
+          if (stamp.getTime() <= watermark.getTime()) continue;
+          candidates.push({
+            name: j.name ?? '(unnamed job)',
+            agentId: j.agentId ?? '?',
+            timestamp: stampStr,
+            resultSnippet: (j.result ?? '').slice(0, 800).replace(/\s+/g, ' '),
+            orgId: org.id,
+            status,
+            jobId: j.id ?? '?',
+          });
+        }
+      } catch (err) {
+        log.warn({ err, orgId: org.id, status }, 'urgent_check_list_jobs_failed');
       }
-    } catch (err) {
-      log.warn({ err, orgId: org.id }, 'urgent_check_list_jobs_failed');
     }
   }
 
   if (candidates.length === 0) {
-    // Still advance lastJobNoticeAt so we don't keep re-scanning the same window.
+    // Advance all three watermarks so we don't keep re-scanning the
+    // same empty window.
+    const now = new Date();
     await prisma.hermesInstance.update({
       where: { id: instanceId },
-      data: { lastJobNoticeAt: new Date() },
+      data: {
+        lastJobNoticeAt: now,
+        lastAwaitingInputNoticeAt: now,
+        lastFailedJobNoticeAt: now,
+      },
     });
     return { fired: false, reason: 'no_new_jobs' };
   }
 
   // Sort newest-first, cap.
-  candidates.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+  candidates.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const events = candidates.slice(0, MAX_EVENTS_TO_GATE);
+  const hasAwaitingInput = events.some((e) => e.status === 'AWAITING_INPUT');
+
+  // Now apply cooldown — but allow AWAITING_INPUT to override.
+  if (inCooldown && !hasAwaitingInput) {
+    // Don't advance watermarks; we'll re-evaluate next tick.
+    return { fired: false, reason: 'cooldown' };
+  }
 
   // Ask Hermes to gate.
   const apiKey = await decryptSecret(row.apiServerKey);
@@ -118,10 +155,19 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     return null;
   });
 
-  // Always advance the watermark to the newest event we considered.
+  // Advance per-status watermarks to the newest event we considered.
+  const newest = (status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED'): Date | undefined => {
+    const filtered = events.filter((e) => e.status === status);
+    if (filtered.length === 0) return undefined;
+    return new Date(filtered[0]!.timestamp);
+  };
   await prisma.hermesInstance.update({
     where: { id: instanceId },
-    data: { lastJobNoticeAt: new Date(events[0]!.completedAt) },
+    data: {
+      ...(newest('COMPLETED') ? { lastJobNoticeAt: newest('COMPLETED') } : {}),
+      ...(newest('AWAITING_INPUT') ? { lastAwaitingInputNoticeAt: newest('AWAITING_INPUT') } : {}),
+      ...(newest('FAILED') ? { lastFailedJobNoticeAt: newest('FAILED') } : {}),
+    },
   });
 
   if (!decision || decision.verdict === 'NO') {
@@ -185,31 +231,50 @@ interface GatingDecision {
 async function runGatingPrompt(
   endpointUrl: string,
   apiKey: string,
-  events: Array<{ name: string; agentId: string; completedAt: string; resultSnippet: string }>,
+  events: Array<{
+    name: string;
+    agentId: string;
+    timestamp: string;
+    resultSnippet: string;
+    status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
+    jobId: string;
+  }>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   log: any,
 ): Promise<GatingDecision | null> {
   const eventsBlock = events
     .map(
       (e, i) =>
-        `${i + 1}. Job "${e.name}" finished at ${e.completedAt} (agent=${e.agentId}). Result snippet: ${e.resultSnippet || '(empty)'}`,
+        `${i + 1}. [${e.status}] Job "${e.name}" (agent=${e.agentId}, job_id=${e.jobId}, ts=${e.timestamp}). Snippet: ${e.resultSnippet || '(empty)'}`,
     )
     .join('\n\n');
+
+  const hasAwaiting = events.some((e) => e.status === 'AWAITING_INPUT');
+  const hasFailed = events.some((e) => e.status === 'FAILED');
 
   const prompt = `Internal gating decision — your output is parsed by code, \
 not shown to the user directly unless you produce a notification.
 
-${events.length} Sokosumi job(s) just completed for your user. You decide \
-whether ANY of them are worth interrupting the user RIGHT NOW (vs. waiting \
-for tomorrow's morning brief). The bar is HIGH:
+${events.length} Sokosumi job event(s) just happened. You decide whether \
+ANY are worth interrupting the user RIGHT NOW (vs. waiting for tomorrow's \
+morning brief).
 
-Interrupt only if at least one of these is true for at least one event:
-  (a) The user is clearly waiting on this result (recent context, time-sensitive deadline, follow-up they explicitly asked for).
-  (b) Action needs to be taken before tomorrow morning (e.g., a meeting tonight, a partner thread that needs response in hours).
-  (c) The result contains a clear blocker or anomaly that costs the user money / breaks a plan if left unread.
+Status-specific bars:
 
-Default to NO. The morning brief covers everything anyway. Only fire YES \
-if you'd genuinely thank yourself for the ping.
+- AWAITING_INPUT — almost always YES. The user's job is paused and won't \
+  finish until they respond. If you have any AWAITING_INPUT event, the \
+  default is YES unless the user clearly doesn't care about this job.
+- FAILED — usually YES, especially if the user kicked it off recently or \
+  paid credits. Mention the failure + that they can request a refund \
+  ("just say 'refund job X' and I'll handle it"). Skip if it's an obviously \
+  trivial / abandoned job.
+- COMPLETED — HIGH bar. Only YES if (a) user is clearly waiting on this \
+  result, (b) action needs to be taken before morning, (c) the result \
+  contains a clear blocker or anomaly. Default NO; morning brief covers \
+  the rest.
+
+This batch contains:${hasAwaiting ? ' AWAITING_INPUT (likely fire)' : ''}${hasFailed ? ' FAILED (probably fire)' : ''} \
+${events.some((e) => e.status === 'COMPLETED') ? ' COMPLETED (high bar)' : ''}.
 
 Events:
 ${eventsBlock}
@@ -223,7 +288,9 @@ NO
 YES
 <one-sentence reason for the interrupt>
 <the actual notification message body — 1-3 sentences, warm but tight, \
-addressed to the user as Hermes' voice>
+addressed to the user as Hermes' voice. If multiple events warrant the \
+interrupt, you can mention them together. If FAILED, suggest the refund \
+flow. If AWAITING_INPUT, lead with what input the job needs.>
 
 End of instructions.`;
 

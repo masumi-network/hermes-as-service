@@ -5,11 +5,13 @@ import { loadConfig } from './config.js';
 import { runSokosumiDailySweep } from './sokosumi/sync.js';
 import { runInboxRefreshSweep } from './inbox/refresh.js';
 import { runUrgentInterruptSweep } from './notifications/urgent.js';
+import { runTaskAugmentationSweep } from './notifications/augment.js';
 
 let scheduled: cron.ScheduledTask | null = null;
 let sokosumiScheduled: cron.ScheduledTask | null = null;
 let inboxRefreshScheduled: cron.ScheduledTask | null = null;
 let urgentInterruptScheduled: cron.ScheduledTask | null = null;
+let taskAugmentationScheduled: cron.ScheduledTask | null = null;
 
 /**
  * Marks idle instances as suspended in the DB. Sprites itself releases compute
@@ -124,5 +126,35 @@ export function stopUrgentInterruptCron(): void {
   if (urgentInterruptScheduled) {
     urgentInterruptScheduled.stop();
     urgentInterruptScheduled = null;
+  }
+}
+
+/**
+ * Hourly cron — task augmentation for HIGH-autonomy users only. Picks up
+ * newly-created Sokosumi tasks since the user's lastTaskAugmentationAt,
+ * asks Hermes to evaluate each one and (if it has useful context) post
+ * a comment. Comments are free; LLM gating costs ~$0.001 per evaluated
+ * task. Skips users at low/medium autonomy entirely.
+ */
+export function startTaskAugmentationCron(): void {
+  if (taskAugmentationScheduled) return;
+  taskAugmentationScheduled = cron.schedule(
+    '45 * * * *', // 45 past every hour (staggered from urgent interrupts)
+    async () => {
+      try {
+        await runTaskAugmentationSweep();
+      } catch (err) {
+        logger.error({ err }, 'task_augmentation_sweep_threw');
+      }
+    },
+    { scheduled: true },
+  );
+  logger.info('task_augmentation_cron_started');
+}
+
+export function stopTaskAugmentationCron(): void {
+  if (taskAugmentationScheduled) {
+    taskAugmentationScheduled.stop();
+    taskAugmentationScheduled = null;
   }
 }

@@ -7,8 +7,8 @@
 # Build + push to Fly registry:
 #   docker login registry.fly.io -u x --password "$FLY_API_TOKEN"
 #   docker build --platform linux/amd64 -f Dockerfile.hermes-user \
-#       -t registry.fly.io/hermes-user-image:v12 .
-#   docker push registry.fly.io/hermes-user-image:v12
+#       -t registry.fly.io/hermes-user-image:v13 .
+#   docker push registry.fly.io/hermes-user-image:v13
 
 FROM nousresearch/hermes-agent:latest
 

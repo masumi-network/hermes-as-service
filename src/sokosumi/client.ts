@@ -125,6 +125,116 @@ export class SokosumiClient {
     return body.items ?? body.files ?? body.data ?? [];
   }
 
+  async getAgentInputSchema(agentId: string): Promise<unknown> {
+    const body = await this.get<{ data?: unknown } | unknown>(
+      `/agents/${encodeURIComponent(agentId)}/input-schema`,
+    );
+    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
+      return (body as { data: unknown }).data;
+    }
+    return body;
+  }
+
+  // ---------- writes ----------
+
+  /**
+   * Post a comment (and/or status transition) on a task. Sokosumi calls
+   * these "events" — same row holds both. Hermes uses this for the
+   * task-augmentation flow (HIGH autonomy) and ad-hoc commenting.
+   */
+  async addTaskEvent(taskId: string, args: { status?: string; comment?: string }): Promise<unknown> {
+    return this.post(`/tasks/${encodeURIComponent(taskId)}/events`, args);
+  }
+
+  /** Create a new task. Free — only the jobs spawned under it cost credits. */
+  async createTask(args: {
+    name: string;
+    description?: string | null;
+    coworkerId?: string | null;
+    status?: 'DRAFT' | 'READY';
+  }): Promise<unknown> {
+    return this.post('/tasks', args);
+  }
+
+  /**
+   * Kick off an agent job. COSTS CREDITS. Caller (Hermes) is responsible
+   * for cost-awareness checks per SOUL.md rules — orchestrator does not
+   * enforce a hard cap here.
+   *
+   * If taskId is provided, the job is created under that task
+   * (POST /tasks/:id/jobs). Otherwise it's created under the agent
+   * directly (POST /agents/:id/jobs).
+   */
+  async createJob(args: {
+    agentId: string;
+    inputSchema: unknown;
+    taskId?: string | null;
+    identifierFromPurchaser?: string;
+  }): Promise<unknown> {
+    if (args.taskId) {
+      return this.post(`/tasks/${encodeURIComponent(args.taskId)}/jobs`, {
+        agentId: args.agentId,
+        inputSchema: args.inputSchema,
+        identifierFromPurchaser: args.identifierFromPurchaser,
+      });
+    }
+    return this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
+      inputSchema: args.inputSchema,
+      identifierFromPurchaser: args.identifierFromPurchaser,
+    });
+  }
+
+  /**
+   * Provide input for a job in AWAITING_INPUT state. The eventId refers
+   * to the specific input-request event on the job (Hermes can find it
+   * via getJob → events array → find the awaiting-input event).
+   */
+  async provideJobInput(args: {
+    jobId: string;
+    eventId: string;
+    inputData: Record<string, unknown>;
+  }): Promise<unknown> {
+    return this.post(`/jobs/${encodeURIComponent(args.jobId)}/inputs`, {
+      eventId: args.eventId,
+      inputData: args.inputData,
+    });
+  }
+
+  /** Refund a FAILED job. */
+  async refundJob(jobId: string): Promise<unknown> {
+    return this.post(`/jobs/${encodeURIComponent(jobId)}/refund`, {});
+  }
+
+  // ---------- internal: POST helper ----------
+
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    const sokoCfg = getSokosumiConfig(this.env);
+    if (!sokoCfg) {
+      throw new Error(`Sokosumi env '${this.env ?? 'mainnet'}' not configured`);
+    }
+    const url = `${sokoCfg.baseUrl.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${sokoCfg.apiKey}`,
+      'X-Delegation-User-Id': this.userId,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    };
+    if (this.organizationId) {
+      headers['X-Delegation-Organization-Id'] = this.organizationId;
+    }
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      const respBody = await res.text().catch(() => '');
+      throw new Error(`sokosumi POST ${path} → ${res.status}: ${respBody.slice(0, 300)}`);
+    }
+    return (await res.json()) as T;
+  }
+
   // ---------- conversations ----------
 
   async listConversations(opts: { limit?: number } = {}): Promise<unknown[]> {

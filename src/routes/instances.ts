@@ -34,6 +34,18 @@ const provisionBody = z.object({
    *  step to the right API base + coworker key. Defaults to "mainnet"
    *  if omitted. */
   sokosumiEnv: z.enum(['development', 'preprod', 'mainnet']).optional(),
+  /** How much autonomy the agent gets on this user's workspace.
+   *  low    — read only
+   *  medium — can do anything but always asks first (Hermes-side gating)
+   *  high   — fully autonomous, including background task creation
+   *  Defaults to "medium". */
+  autonomyLevel: z.enum(['low', 'medium', 'high']).optional(),
+});
+
+const patchInstanceBody = z.object({
+  autonomyLevel: z.enum(['low', 'medium', 'high']).optional(),
+  name: z.string().min(1).max(200).optional(),
+  email: z.string().email().max(254).optional(),
 });
 
 const secretBody = z.object({
@@ -77,6 +89,37 @@ router.post('/v1/instances', async (c) => {
   }
 });
 
+router.patch('/v1/instances/:userId', async (c) => {
+  const userId = c.req.param('userId');
+  const json = await safeJson(c);
+  const parsed = patchInstanceBody.safeParse(json);
+  if (!parsed.success) {
+    return problemJson(
+      c,
+      new HttpError(400, 'invalid_body', parsed.error.issues[0]?.message ?? 'invalid body', userId),
+    );
+  }
+  try {
+    const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+    if (!row || row.destroyedAt) throw notFound(userId);
+    const updated = await prisma.hermesInstance.update({
+      where: { id: row.id },
+      data: {
+        ...(parsed.data.autonomyLevel ? { autonomyLevel: parsed.data.autonomyLevel } : {}),
+        ...(parsed.data.name ? { name: parsed.data.name.slice(0, 200) } : {}),
+        ...(parsed.data.email ? { email: parsed.data.email.slice(0, 254) } : {}),
+      },
+    });
+    return c.json({
+      autonomyLevel: updated.autonomyLevel,
+      name: updated.name,
+      email: updated.email,
+    });
+  } catch (err) {
+    return mapError(c, err, userId);
+  }
+});
+
 router.get('/v1/instances/:userId', async (c) => {
   const userId = c.req.param('userId');
   try {
@@ -101,6 +144,7 @@ router.get('/v1/instances/:userId', async (c) => {
       welcomeKind: view.welcomeKind,
       lastSokosumiSyncAt: view.lastSokosumiSyncAt?.toISOString() ?? null,
       sokosumiEnv: view.sokosumiEnv,
+      autonomyLevel: view.autonomyLevel,
       transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,

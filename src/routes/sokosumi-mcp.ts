@@ -32,6 +32,7 @@ interface InstanceContext {
   instanceId: string;
   userId: string;
   env: SokosumiEnv | null;
+  autonomyLevel: 'low' | 'medium' | 'high';
 }
 
 interface AuthOk {
@@ -67,7 +68,12 @@ async function authenticate(
     return { ok: false, status: 401, message: 'bad bearer' };
   }
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  return { ok: true, ctx: { instanceId: row.id, userId: row.userId, env } };
+  const autonomyLevel =
+    row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+  return {
+    ok: true,
+    ctx: { instanceId: row.id, userId: row.userId, env, autonomyLevel },
+  };
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -78,9 +84,23 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 // ---------- MCP tool catalog ----------
+// Each tool tagged with the minimum autonomy required:
+//   read    — available at all autonomy levels
+//   write   — requires medium or high
+//   spend   — requires medium or high (Hermes asks first at medium, fires
+//             autonomously at high). Costs Sokosumi credits.
+type ToolAccess = 'read' | 'write' | 'spend';
 
-const TOOLS = [
+interface ToolDef {
+  name: string;
+  description: string;
+  inputSchema: object;
+  access: ToolAccess;
+}
+
+const TOOLS_ALL: ToolDef[] = [
   {
+    access: 'read',
     name: 'sokosumi_list_tasks',
     description:
       "List the user's Sokosumi tasks across all orgs they belong to. Returns id, name, status, createdAt for each. Use this to discover what work the user has in flight. Filter by status (e.g. RUNNING, COMPLETED) or search by name substring.",
@@ -97,6 +117,7 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_get_task',
     description:
       'Fetch a single Sokosumi task by id. Returns the full body: description, status, embedded jobs[], events[], coworker assignment. Use when the user references a specific task and you need the full context.',
@@ -109,6 +130,7 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_list_jobs',
     description:
       "List the user's Sokosumi agent jobs across all orgs. Returns id, name, agentId, status, completedAt, short result snippet. Filter by status (COMPLETED for finished work) or agentId.",
@@ -126,6 +148,7 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_get_job',
     description:
       "Fetch a single Sokosumi job by id and return its FULL markdown result text (no truncation). Use this when the user asks 'what was the result of X?' — gives you the complete output to summarize, quote, or act on.",
@@ -138,6 +161,7 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_get_job_files',
     description:
       'List file attachments on a Sokosumi job (id, filename, mimeType, size, downloadUrl). Use when a job produced artifacts the user may want to reference.',
@@ -150,6 +174,7 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_list_conversations',
     description:
       "List the user's chat conversations with other Sokosumi coworkers (not with you). Returns id, title, coworker. Useful for cross-referencing what they've been discussing with other agents.",
@@ -161,12 +186,14 @@ const TOOLS = [
     },
   },
   {
+    access: 'read',
     name: 'sokosumi_get_credits',
     description:
       "Fetch the user's current Sokosumi credit balance. Use before suggesting expensive paid agent jobs.",
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    access: 'read',
     name: 'sokosumi_list_agents',
     description:
       'List Sokosumi agents available to the user (id, name, summary, price in credits). Use to suggest which agent fits a given task or recommend new ones.',
@@ -177,7 +204,115 @@ const TOOLS = [
       },
     },
   },
+  // ---------- write tools (medium + high autonomy) ----------
+  {
+    access: 'write',
+    name: 'sokosumi_add_task_comment',
+    description:
+      "Post a comment on a Sokosumi task to add context, observations, or supporting info. Free (no credits). Use this when you have useful background (relevant emails, prior research, important context) the task creator might want to know. Don't comment unless you actually have substance to add.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task id.' },
+        comment: { type: 'string', description: 'Your comment, 1-3 short paragraphs.' },
+      },
+      required: ['task_id', 'comment'],
+    },
+  },
+  {
+    access: 'write',
+    name: 'sokosumi_create_task',
+    description:
+      "Create a new task in the user's workspace. Free (only the jobs run under the task cost credits). Use this when the user explicitly asks for a task or, at HIGH autonomy, when you've decided proactive task creation is warranted (e.g., prepping for an upcoming meeting).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Task name, concise.' },
+        description: { type: 'string', description: 'Longer description of the task.' },
+        status: {
+          type: 'string',
+          enum: ['DRAFT', 'READY'],
+          description: 'Initial status. DRAFT for in-progress drafting, READY for finalized.',
+        },
+        coworker_id: {
+          type: 'string',
+          description: 'Optional Sokosumi coworker to assign the task to.',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    access: 'read',
+    name: 'sokosumi_get_agent_input_schema',
+    description:
+      "Fetch the input schema an agent needs before kicking off a job. Always call this BEFORE sokosumi_create_job so you know what fields the agent requires.",
+    inputSchema: {
+      type: 'object',
+      properties: { agent_id: { type: 'string', description: 'Agent id.' } },
+      required: ['agent_id'],
+    },
+  },
+  {
+    access: 'spend',
+    name: 'sokosumi_create_job',
+    description:
+      "Kick off a Sokosumi agent job. SPENDS CREDITS. Before calling: (1) fetch sokosumi_get_credits to know the balance, (2) fetch sokosumi_get_agent_input_schema to know required inputs, (3) verify the user's autonomy level allows it. At MEDIUM autonomy, you MUST ask the user for explicit confirmation in chat ('I'd like to run agent X for ~N credits — confirm?') and only call this tool after they reply affirmatively. At HIGH autonomy, you may fire autonomously but still warn if the cost exceeds 25% of the user's balance.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'The Sokosumi agent to run.' },
+        input_schema: {
+          type: 'object',
+          description: 'The input payload, matching the agent_input_schema you just fetched.',
+        },
+        task_id: {
+          type: 'string',
+          description: 'Optional task id to attach this job to.',
+        },
+      },
+      required: ['agent_id', 'input_schema'],
+    },
+  },
+  {
+    access: 'write',
+    name: 'sokosumi_provide_job_input',
+    description:
+      "Provide additional input for a job that's in AWAITING_INPUT state. First find the job via sokosumi_get_job, locate the awaiting-input event in its events[] array, use that event's id. Then submit inputData matching what the event requested.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'Job id.' },
+        event_id: { type: 'string', description: 'The awaiting-input event id.' },
+        input_data: { type: 'object', description: 'Key-value input the event requested.' },
+      },
+      required: ['job_id', 'event_id', 'input_data'],
+    },
+  },
+  {
+    access: 'write',
+    name: 'sokosumi_refund_job',
+    description:
+      "Request a refund for a FAILED job. Sokosumi processes the refund based on whether the failure was eligible. Use this when a job has clearly failed due to the agent or platform side (not user input).",
+    inputSchema: {
+      type: 'object',
+      properties: { job_id: { type: 'string', description: 'Job id.' } },
+      required: ['job_id'],
+    },
+  },
 ];
+
+/**
+ * Filter the tool catalog by the instance's autonomy level. Read tools
+ * always exposed; write tools at medium + high; spend tools at medium +
+ * high (medium is gated by SOUL.md rules at the prompt layer, not here).
+ */
+function toolsForAutonomy(level: 'low' | 'medium' | 'high'): ToolDef[] {
+  if (level === 'low') return TOOLS_ALL.filter((t) => t.access === 'read');
+  // medium + high get everything; gating between them is handled by SOUL.md
+  // rules ("ask first" at medium, "go" at high).
+  return TOOLS_ALL;
+}
 
 // ---------- JSON-RPC dispatch ----------
 
@@ -241,7 +376,12 @@ async function handle(c: Context): Promise<Response> {
   }
 
   if (method === 'tools/list') {
-    return rpcResult(id, { tools: TOOLS });
+    const available = toolsForAutonomy(auth.ctx.autonomyLevel).map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }));
+    return rpcResult(id, { tools: available });
   }
 
   if (method === 'tools/call') {
@@ -271,6 +411,16 @@ async function callTool(
   if (!SokosumiClient.isConfigured(ctx.env)) {
     return JSON.stringify({
       error: `Sokosumi env '${ctx.env ?? 'mainnet'}' not configured on the orchestrator`,
+    });
+  }
+
+  // Autonomy enforcement: if the user is on LOW, refuse any write/spend
+  // call even if Hermes somehow tries. tools/list already filtered them
+  // out but this is belt-and-suspenders.
+  const toolDef = TOOLS_ALL.find((t) => t.name === name);
+  if (toolDef && toolDef.access !== 'read' && ctx.autonomyLevel === 'low') {
+    return JSON.stringify({
+      error: `Tool '${name}' is not available at autonomy level 'low'. Ask the user to raise their autonomy setting in Sokosumi if they want this action.`,
     });
   }
 
@@ -382,6 +532,90 @@ async function callTool(
       const limit = clampNumber(args['limit'], 50, 100);
       const agents = await client.listAgents({ limit });
       return JSON.stringify({ count: agents.length, agents }, null, 2);
+    }
+
+    // ---------- write tools ----------
+
+    case 'sokosumi_add_task_comment': {
+      const taskId = String(args['task_id'] ?? '');
+      const comment = String(args['comment'] ?? '');
+      if (!taskId || !comment) throw new Error('missing required args: task_id, comment');
+      // Try the user's first org; if it fails, iterate orgs to find the task.
+      try {
+        const result = await client.addTaskEvent(taskId, { comment });
+        return JSON.stringify(result, null, 2);
+      } catch {
+        const orgs = await client.listOrganizations();
+        for (const org of orgs) {
+          try {
+            const result = await client.withOrganization(org.id).addTaskEvent(taskId, { comment });
+            return JSON.stringify({ orgId: org.id, result }, null, 2);
+          } catch {
+            /* try next */
+          }
+        }
+        throw new Error(`task ${taskId} not found in any org`);
+      }
+    }
+
+    case 'sokosumi_create_task': {
+      const taskArgs = {
+        name: String(args['name'] ?? ''),
+        description: typeof args['description'] === 'string' ? (args['description'] as string) : undefined,
+        coworkerId: typeof args['coworker_id'] === 'string' ? (args['coworker_id'] as string) : undefined,
+        status: typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined,
+      };
+      if (!taskArgs.name) throw new Error('missing required arg: name');
+      const orgs = await client.listOrganizations();
+      if (orgs.length === 0) throw new Error('user has no orgs to create the task in');
+      // Default to the first org. Hermes can specify a different one later
+      // via the input schema if needed (future: add organization_id arg).
+      const result = await client.withOrganization(orgs[0]!.id).createTask(taskArgs);
+      return JSON.stringify({ orgId: orgs[0]!.id, task: result }, null, 2);
+    }
+
+    case 'sokosumi_get_agent_input_schema': {
+      const agentId = String(args['agent_id'] ?? '');
+      if (!agentId) throw new Error('missing required arg: agent_id');
+      const schema = await client.getAgentInputSchema(agentId);
+      return JSON.stringify(schema, null, 2);
+    }
+
+    case 'sokosumi_create_job': {
+      const agentId = String(args['agent_id'] ?? '');
+      const inputSchema = args['input_schema'];
+      const taskId = typeof args['task_id'] === 'string' ? (args['task_id'] as string) : undefined;
+      if (!agentId || !inputSchema) {
+        throw new Error('missing required args: agent_id, input_schema');
+      }
+      const orgs = await client.listOrganizations();
+      if (orgs.length === 0) throw new Error('user has no orgs to create the job in');
+      const result = await client
+        .withOrganization(orgs[0]!.id)
+        .createJob({ agentId, inputSchema, taskId });
+      return JSON.stringify({ orgId: orgs[0]!.id, job: result }, null, 2);
+    }
+
+    case 'sokosumi_provide_job_input': {
+      const jobId = String(args['job_id'] ?? '');
+      const eventId = String(args['event_id'] ?? '');
+      const inputData = args['input_data'];
+      if (!jobId || !eventId || !inputData || typeof inputData !== 'object') {
+        throw new Error('missing required args: job_id, event_id, input_data');
+      }
+      const result = await client.provideJobInput({
+        jobId,
+        eventId,
+        inputData: inputData as Record<string, unknown>,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'sokosumi_refund_job': {
+      const jobId = String(args['job_id'] ?? '');
+      if (!jobId) throw new Error('missing required arg: job_id');
+      const result = await client.refundJob(jobId);
+      return JSON.stringify(result, null, 2);
     }
 
     default:
