@@ -3,7 +3,7 @@
 # Machine env vars at start time, not from this file.
 
 model:
-  default: anthropic/claude-sonnet-4.6
+  default: deepseek/deepseek-v4-flash
 
 terminal:
   backend: local
