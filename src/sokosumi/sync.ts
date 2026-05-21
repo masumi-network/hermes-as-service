@@ -139,27 +139,51 @@ function formatSnapshotForMemory(snapshot: {
   agents: unknown[];
   fetchedAt: string;
 }): string {
+  // Same enriched format as the onboarding snapshot — descriptions, larger
+  // job result snippets (1800 chars), used-agents-first. Daily refresh
+  // uses the same template so Hermes' memory stays consistent.
   const lines: string[] = [];
   lines.push(`Fetched at: ${snapshot.fetchedAt}`);
   lines.push(`Organizations: ${snapshot.organizations.length}`);
   lines.push('');
+  const usedAgentIds = new Set<string>();
   for (const ws of snapshot.organizations) {
     const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
     lines.push(`# Org: ${orgLabel}`);
-    lines.push(`Tasks: ${ws.tasks.length}`);
-    for (const t of ws.tasks.slice(0, 20) as Array<{ id?: string; name?: string; status?: string }>) {
-      lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'}`);
+    lines.push('');
+    lines.push(`## Tasks (${ws.tasks.length})`);
+    for (const t of ws.tasks.slice(0, 15) as Array<{
+      id?: string;
+      name?: string;
+      status?: string;
+      description?: string | null;
+      jobs?: Array<{ name?: string; status?: string; agentId?: string }>;
+    }>) {
+      lines.push(`### [${t.status ?? '?'}] ${t.name ?? '(unnamed)'}`);
+      if (t.description) {
+        const d = t.description.slice(0, 500).replace(/\s+/g, ' ');
+        lines.push(`  ${d}${t.description.length > 500 ? '…' : ''}`);
+      }
+      if (Array.isArray(t.jobs)) {
+        for (const j of t.jobs.slice(0, 3)) {
+          if (j.agentId) usedAgentIds.add(j.agentId);
+        }
+      }
     }
-    lines.push(`Completed jobs: ${ws.completedJobs.length}`);
-    for (const j of ws.completedJobs.slice(0, 10) as Array<{
+    lines.push('');
+    lines.push(`## Completed jobs (${ws.completedJobs.length})`);
+    for (const j of ws.completedJobs.slice(0, 8) as Array<{
       name?: string;
       agentId?: string;
       completedAt?: string;
       result?: string;
     }>) {
-      const snippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
-      lines.push(`- ${j.name ?? '(unnamed)'} (${j.completedAt ?? '?'})`);
-      if (snippet) lines.push(`  → ${snippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+      const snippet = (j.result ?? '').slice(0, 1800).replace(/\s+/g, ' ');
+      lines.push(`### ${j.name ?? '(unnamed)'} (${j.completedAt ?? '?'})`);
+      if (j.agentId) usedAgentIds.add(j.agentId);
+      if (snippet) {
+        lines.push(`> ${snippet}${(j.result ?? '').length > 1800 ? '… [truncated]' : ''}`);
+      }
     }
     lines.push('');
   }

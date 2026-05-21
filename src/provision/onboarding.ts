@@ -788,64 +788,108 @@ function formatSokosumiSnapshotForMemory(snapshot: {
   lines.push(`Organizations: ${snapshot.organizations.length}`);
   lines.push('');
 
+  // Track which agents the user has actually used so we can prioritize
+  // them in the agent catalog section (and prune the noise).
+  const usedAgentIds = new Set<string>();
+
   for (const ws of snapshot.organizations) {
     const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
     lines.push(`# Org: ${orgLabel}`);
     lines.push('');
 
+    // ---- TASKS: now enriched with description + events from GET /tasks/{id}
     lines.push(`## Tasks (${ws.tasks.length})`);
-    for (const t of ws.tasks.slice(0, 20) as Array<{
+    lines.push('');
+    for (const t of ws.tasks.slice(0, 15) as Array<{
       id?: string;
       name?: string;
       status?: string;
-      createdAt?: string;
+      description?: string | null;
+      credits?: number;
+      events?: Array<{ createdAt?: string; comment?: string | null; status?: string | null }>;
+      jobs?: Array<{ id?: string; name?: string; status?: string; agentId?: string }>;
+      coworker?: { name?: string };
     }>) {
-      lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'} (id=${t.id ?? '?'})`);
+      lines.push(`### [${t.status ?? '?'}] ${t.name ?? '(unnamed)'}`);
+      if (t.id) lines.push(`id: ${t.id}`);
+      if (t.description) {
+        const desc = t.description.slice(0, 600).replace(/\s+/g, ' ');
+        lines.push(`description: ${desc}${t.description.length > 600 ? '…' : ''}`);
+      }
+      if (t.coworker?.name) lines.push(`coworker: ${t.coworker.name}`);
+      if (Array.isArray(t.jobs) && t.jobs.length > 0) {
+        lines.push(`jobs (${t.jobs.length}):`);
+        for (const j of t.jobs.slice(0, 5)) {
+          lines.push(`  - [${j.status ?? '?'}] ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'})`);
+          if (j.agentId) usedAgentIds.add(j.agentId);
+        }
+      }
+      if (Array.isArray(t.events) && t.events.length > 0) {
+        const recent = t.events.slice(-3).reverse();
+        lines.push(`recent events:`);
+        for (const e of recent) {
+          const c = (e.comment ?? '').slice(0, 120).replace(/\s+/g, ' ');
+          lines.push(`  - ${e.createdAt ?? '?'} [${e.status ?? '?'}]${c ? ` "${c}"` : ''}`);
+        }
+      }
+      lines.push('');
     }
-    lines.push('');
 
+    // ---- COMPLETED JOBS: bumped result snippet 400 → 1800 chars (key fix)
     lines.push(`## Completed jobs (${ws.completedJobs.length})`);
-    for (const j of ws.completedJobs.slice(0, 10) as Array<{
+    lines.push('');
+    for (const j of ws.completedJobs.slice(0, 8) as Array<{
       id?: string;
       name?: string;
       agentId?: string;
       completedAt?: string;
       result?: string;
     }>) {
-      const resultSnippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
-      lines.push(`- ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'}, ${j.completedAt ?? '?'})`);
-      if (resultSnippet) {
-        lines.push(`  → ${resultSnippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+      lines.push(`### ${j.name ?? '(unnamed)'}`);
+      lines.push(`agent: ${j.agentId ?? '?'}  |  completed: ${j.completedAt ?? '?'}  |  id: ${j.id ?? '?'}`);
+      if (j.agentId) usedAgentIds.add(j.agentId);
+      const result = (j.result ?? '').slice(0, 1800).replace(/\s+/g, ' ');
+      if (result) {
+        lines.push(`result:`);
+        lines.push(`> ${result}${(j.result ?? '').length > 1800 ? '… [truncated, full text via sokosumi_get_job]' : ''}`);
       }
+      lines.push('');
     }
-    lines.push('');
 
-    lines.push(`## Recent conversations (${ws.conversations.length})`);
-    for (const c of ws.conversations.slice(0, 5) as Array<{
-      id?: string;
-      title?: string | null;
-      metadata?: { coworker?: string };
-    }>) {
-      lines.push(
-        `- ${c.title ?? '(untitled)'}${c.metadata?.coworker ? ` with ${c.metadata.coworker}` : ''}`,
-      );
+    if (ws.conversations.length > 0) {
+      lines.push(`## Recent conversations (${ws.conversations.length})`);
+      for (const c of ws.conversations.slice(0, 5) as Array<{
+        id?: string;
+        title?: string | null;
+        metadata?: { coworker?: string; useCase?: string };
+      }>) {
+        const meta: string[] = [];
+        if (c.metadata?.coworker) meta.push(`with ${c.metadata.coworker}`);
+        if (c.metadata?.useCase) meta.push(c.metadata.useCase);
+        lines.push(`- ${c.title ?? '(untitled)'}${meta.length ? ` (${meta.join(', ')})` : ''}`);
+      }
+      lines.push('');
     }
-    lines.push('');
   }
 
   if (snapshot.credits) {
     const cr = snapshot.credits as { balance?: number; currency?: string };
-    lines.push(`## Credits (user-level, all orgs): ${cr.balance ?? '?'} ${cr.currency ?? ''}`);
-  }
-  if (snapshot.agents.length > 0) {
+    lines.push(`## Credits (user-level): ${cr.balance ?? '?'} ${cr.currency ?? ''}`);
     lines.push('');
-    lines.push(`## Agents available (global, ${snapshot.agents.length})`);
-    for (const a of snapshot.agents.slice(0, 20) as Array<{
-      id?: string;
-      name?: string;
-      summary?: string;
-    }>) {
-      lines.push(`- ${a.name ?? '(unnamed)'}: ${a.summary?.slice(0, 100) ?? ''}`);
+  }
+
+  // ---- AGENTS: capped at 10, prioritize ones the user has actually used.
+  // The old list of 50 agents dominated the welcome — moving it to the
+  // bottom + filtering so it's reference data, not the headline.
+  if (snapshot.agents.length > 0) {
+    const allAgents = snapshot.agents as Array<{ id?: string; name?: string; summary?: string }>;
+    const usedFirst = allAgents.filter((a) => a.id && usedAgentIds.has(a.id));
+    const rest = allAgents.filter((a) => !a.id || !usedAgentIds.has(a.id));
+    const top = [...usedFirst, ...rest].slice(0, 10);
+    lines.push(`## Agents the user has access to (showing ${top.length} of ${allAgents.length}, used ones first)`);
+    for (const a of top) {
+      const used = a.id && usedAgentIds.has(a.id) ? ' [USED]' : '';
+      lines.push(`- ${a.name ?? '(unnamed)'}${used}: ${(a.summary ?? '').slice(0, 100)}`);
     }
   }
   return lines.join('\n');

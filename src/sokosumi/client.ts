@@ -98,7 +98,24 @@ export class SokosumiClient {
   }
 
   async getJob(id: string): Promise<unknown> {
-    return this.get(`/jobs/${encodeURIComponent(id)}`);
+    const body = await this.get<{ data?: unknown } | unknown>(
+      `/jobs/${encodeURIComponent(id)}`,
+    );
+    // Sokosumi wraps single-resource responses in {data: ...}.
+    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
+      return (body as { data: unknown }).data;
+    }
+    return body;
+  }
+
+  async getTask(id: string): Promise<unknown> {
+    const body = await this.get<{ data?: unknown } | unknown>(
+      `/tasks/${encodeURIComponent(id)}`,
+    );
+    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
+      return (body as { data: unknown }).data;
+    }
+    return body;
   }
 
   // ---------- conversations ----------
@@ -255,7 +272,31 @@ export async function fetchWorkspaceSnapshot(
           return [] as unknown[];
         }),
       ]);
-      return { organization: org, tasks, completedJobs, conversations };
+
+      // Enrich top-10 most recent tasks with full body (description, events,
+      // linked jobs). The list endpoint returns TaskListItem (summary only);
+      // GET /tasks/{id} returns Task (description + events + jobs). 10
+      // parallel calls per org, capped.
+      const taskIds = (tasks as Array<{ id?: string; createdAt?: string }>)
+        .slice(0, 10)
+        .map((t) => t.id)
+        .filter((id): id is string => typeof id === 'string');
+      const enrichedTasks = await Promise.all(
+        taskIds.map((id) =>
+          orgClient.getTask(id).catch((err) => {
+            logger.warn({ err, userId, orgId: org.id, taskId: id }, 'sokosumi_task_detail_failure');
+            return null;
+          }),
+        ),
+      );
+      const tasksWithDetail = enrichedTasks.filter((t): t is object => t !== null);
+
+      return {
+        organization: org,
+        tasks: tasksWithDetail.length > 0 ? tasksWithDetail : tasks,
+        completedJobs,
+        conversations,
+      };
     }),
   );
 
