@@ -15,6 +15,8 @@ export interface ProvisionInput {
   /** Email. Optional — same purpose as name. */
   email?: string;
   region?: string;
+  /** Which Sokosumi backend (dev/preprod/mainnet) this user lives in. */
+  sokosumiEnv?: 'development' | 'preprod' | 'mainnet';
 }
 
 export interface InstanceView {
@@ -78,6 +80,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         lastActivityAt: new Date(),
         welcomeMessage: null,
         welcomeKind: null,
+        ...(input.sokosumiEnv ? { sokosumiEnv: input.sokosumiEnv } : {}),
       },
     });
     await recordEvent({
@@ -97,6 +100,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         openRouterKey: encryptedOpenRouter,
         name: input.name?.slice(0, 200) ?? null,
         email: input.email?.slice(0, 254) ?? null,
+        sokosumiEnv: input.sokosumiEnv ?? null,
         status: 'provisioning',
       },
     });

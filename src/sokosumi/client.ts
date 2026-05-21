@@ -1,4 +1,4 @@
-import { loadConfig } from '../config.js';
+import { getSokosumiConfig, type SokosumiEnv } from '../config.js';
 import { logger } from '../logger.js';
 
 /**
@@ -19,13 +19,14 @@ import { logger } from '../logger.js';
 export class SokosumiClient {
   constructor(
     private readonly userId: string,
+    private readonly env: SokosumiEnv | null | undefined,
     private readonly organizationId?: string,
   ) {}
 
-  /** Returns true if SOKOSUMI_COWORKER_API_KEY is configured. Callers
-   *  should gracefully skip if false (no-op the sync). */
-  static isConfigured(): boolean {
-    return Boolean(loadConfig().SOKOSUMI_COWORKER_API_KEY);
+  /** Returns true if a coworker API key + base URL are configured for the
+   *  given env. Callers should gracefully skip if false. */
+  static isConfigured(env: SokosumiEnv | null | undefined): boolean {
+    return Boolean(getSokosumiConfig(env));
   }
 
   // ---------- tasks ----------
@@ -114,16 +115,19 @@ export class SokosumiClient {
   /** Withdraws an org-context-bound copy of this client. Subsequent calls
    *  attach `X-Delegation-Organization-Id`. */
   withOrganization(organizationId: string): SokosumiClient {
-    return new SokosumiClient(this.userId, organizationId);
+    return new SokosumiClient(this.userId, this.env, organizationId);
   }
 
   // ---------- internals ----------
 
   private async get<T>(path: string): Promise<T> {
-    const cfg = loadConfig();
-    const url = `${cfg.SOKOSUMI_API_BASE.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+    const sokoCfg = getSokosumiConfig(this.env);
+    if (!sokoCfg) {
+      throw new Error(`Sokosumi env '${this.env ?? 'mainnet'}' not configured`);
+    }
+    const url = `${sokoCfg.baseUrl.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${cfg.SOKOSUMI_COWORKER_API_KEY}`,
+      Authorization: `Bearer ${sokoCfg.apiKey}`,
       'X-Delegation-User-Id': this.userId,
       Accept: 'application/json',
     };
@@ -177,12 +181,13 @@ export interface WorkspaceSnapshot {
 
 export async function fetchWorkspaceSnapshot(
   userId: string,
+  env: SokosumiEnv | null | undefined,
 ): Promise<WorkspaceSnapshot | null> {
-  if (!SokosumiClient.isConfigured()) {
-    logger.warn({ userId }, 'sokosumi_sync_skipped_no_api_key');
+  if (!SokosumiClient.isConfigured(env)) {
+    logger.warn({ userId, env: env ?? '(default mainnet)' }, 'sokosumi_sync_skipped_no_api_key');
     return null;
   }
-  const baseClient = new SokosumiClient(userId);
+  const baseClient = new SokosumiClient(userId, env);
 
   // First: list the user's orgs. Without this we can't pull org-scoped data.
   const orgs = await baseClient.listOrganizations().catch((err) => {

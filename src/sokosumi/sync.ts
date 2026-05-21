@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from './client.js';
+import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 
 /**
  * One-shot sync of a single user's Sokosumi workspace into Hermes' memory.
@@ -16,17 +17,19 @@ import { fetchWorkspaceSnapshot, SokosumiClient } from './client.js';
  * destroyed, no endpoint), throws on hard failure.
  */
 export async function syncSokosumiWorkspaceForInstance(instanceId: string): Promise<boolean> {
-  if (!SokosumiClient.isConfigured()) return false;
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row) return false;
   if (row.destroyedAt) return false;
   if (!row.endpointUrl) return false;
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return false;
 
-  const log = logger.child({ instanceId, userId: row.userId, fn: 'sokosumi_sync' });
+  const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
+  if (!SokosumiClient.isConfigured(env)) return false;
+
+  const log = logger.child({ instanceId, userId: row.userId, env: env ?? '(default mainnet)', fn: 'sokosumi_sync' });
   log.info('starting workspace sync');
 
-  const snapshot = await fetchWorkspaceSnapshot(row.userId);
+  const snapshot = await fetchWorkspaceSnapshot(row.userId, env);
   if (!snapshot) {
     log.warn('snapshot null — skipping');
     return false;
@@ -93,7 +96,9 @@ Reply with just "ok".`;
  * cron. Limits per-tick concurrency so we don't hammer Sokosumi.
  */
 export async function runSokosumiDailySweep(): Promise<{ scanned: number; synced: number }> {
-  if (!SokosumiClient.isConfigured()) return { scanned: 0, synced: 0 };
+  // No global "is configured" gate anymore — each env is independent.
+  // syncSokosumiWorkspaceForInstance per-instance skips if its env's key
+  // isn't set, so a fully unconfigured orchestrator just no-ops.
   const cutoff = new Date(Date.now() - 23 * 60 * 60 * 1000);
   const due = await prisma.hermesInstance.findMany({
     where: {

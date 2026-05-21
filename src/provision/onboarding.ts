@@ -4,6 +4,7 @@ import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
+import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
 export interface OnboardingStep {
@@ -60,7 +61,8 @@ export async function runOnboarding(
   const researchDepth = opts.researchDepth ?? 'deep';
   const hasInbox = researchDepth === 'deep' && connectedProviders.length > 0;
 
-  const sokosumiConfigured = SokosumiClient.isConfigured();
+  const sokosumiEnv: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
+  const sokosumiConfigured = SokosumiClient.isConfigured(sokosumiEnv);
   const steps: OnboardingStep[] = [
     { id: 'memory', label: 'Saving your details', status: 'pending' },
     ...(connectedProviders.length > 0
@@ -178,7 +180,7 @@ export async function runOnboarding(
   if (sokosumiConfigured) {
     await markStep(instanceId, 'sokosumi_sync', 'running');
     try {
-      const snapshot = await fetchWorkspaceSnapshot(row.userId);
+      const snapshot = await fetchWorkspaceSnapshot(row.userId, sokosumiEnv);
       if (snapshot) {
         sokosumiSummary = formatSokosumiSnapshotForMemory(snapshot);
         // Push as a silent memory-write to Hermes so the agent's persistent

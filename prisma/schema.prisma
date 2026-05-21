@@ -63,6 +63,12 @@ model HermesInstance {
   /// >23h old. null means never synced — either Sokosumi API isn't
   /// configured or onboarding pre-dated this feature.
   lastSokosumiSyncAt DateTime?
+  /// Which Sokosumi backend this user lives in: "development", "preprod",
+  /// or "mainnet". Sokosumi sends this at provision time so the
+  /// orchestrator's sokosumi_sync routes API calls to the correct env's
+  /// base URL + coworker API key. null is treated as "mainnet" for
+  /// backwards compat with instances provisioned before this column existed.
+  sokosumiEnv    String?
   lastActivityAt DateTime @default(now())
   errorMessage   String?
   createdAt      DateTime @default(now())

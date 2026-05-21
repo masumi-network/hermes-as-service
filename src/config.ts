@@ -33,12 +33,20 @@ const schema = z.object({
   // identity is scoped via the ?user_id= query param Composio bakes into
   // each connection URL.
   COMPOSIO_API_KEY: z.string().optional().default(''),
-  // Sokosumi "Hermes Coworker" API key — single org-wide secret. Used by
-  // the orchestrator's sokosumi_sync step to pull each user's tasks, jobs,
-  // conversations etc. into Hermes' memory. Per-user scoping via the
-  // X-Delegation-User-Id header on each request.
-  SOKOSUMI_COWORKER_API_KEY: z.string().optional().default(''),
-  SOKOSUMI_API_BASE: z.string().url().default('https://app.sokosumi.com/api/v1'),
+  // Sokosumi "Hermes Coworker" API keys — one per env. Used by the
+  // sokosumi_sync step to pull each user's tasks/jobs/conversations into
+  // Hermes' memory. The HermesInstance row carries a sokosumiEnv field
+  // that picks which key to use per request. Per-user scoping via the
+  // X-Delegation-User-Id header.
+  //
+  // Set only the env(s) you have access to. Missing keys → sokosumi_sync
+  // gracefully skips for users in that env (logged, no error surfaced).
+  SOKOSUMI_COWORKER_API_KEY_DEV: z.string().optional().default(''),
+  SOKOSUMI_API_BASE_DEV: z.string().url().optional(),
+  SOKOSUMI_COWORKER_API_KEY_PREPROD: z.string().optional().default(''),
+  SOKOSUMI_API_BASE_PREPROD: z.string().url().default('https://api.preprod.sokosumi.com/v1'),
+  SOKOSUMI_COWORKER_API_KEY_MAINNET: z.string().optional().default(''),
+  SOKOSUMI_API_BASE_MAINNET: z.string().url().default('https://api.sokosumi.com/v1'),
   MASTER_ENCRYPTION_KEY: z.string().min(40),
   ADMIN_PASSWORD: z.string().min(8),
   // Public base URL of the orchestrator itself. Used to construct the
@@ -71,4 +79,44 @@ export function loadConfig(): Config {
   }
   cached = parsed.data;
   return cached;
+}
+
+export type SokosumiEnv = 'development' | 'preprod' | 'mainnet';
+
+export const SOKOSUMI_ENVS: SokosumiEnv[] = ['development', 'preprod', 'mainnet'];
+
+export function isValidSokosumiEnv(v: unknown): v is SokosumiEnv {
+  return v === 'development' || v === 'preprod' || v === 'mainnet';
+}
+
+/**
+ * Resolve the base URL + coworker API key for a given Sokosumi env.
+ * Returns null if the env's key isn't configured (caller graceful-skips).
+ *
+ * Defaults: undefined sokosumiEnv → 'mainnet' (backwards compat with
+ * instances provisioned before the sokosumiEnv column existed).
+ */
+export function getSokosumiConfig(
+  env: SokosumiEnv | null | undefined,
+): { baseUrl: string; apiKey: string } | null {
+  const cfg = loadConfig();
+  const effective: SokosumiEnv = env ?? 'mainnet';
+  let baseUrl: string | undefined;
+  let apiKey: string;
+  switch (effective) {
+    case 'development':
+      baseUrl = cfg.SOKOSUMI_API_BASE_DEV;
+      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_DEV;
+      break;
+    case 'preprod':
+      baseUrl = cfg.SOKOSUMI_API_BASE_PREPROD;
+      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_PREPROD;
+      break;
+    case 'mainnet':
+      baseUrl = cfg.SOKOSUMI_API_BASE_MAINNET;
+      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_MAINNET;
+      break;
+  }
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl, apiKey };
 }

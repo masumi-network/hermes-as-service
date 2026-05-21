@@ -30,6 +30,10 @@ const provisionBody = z.object({
   name: z.string().min(1).max(200).optional(),
   email: z.string().email().max(254).optional(),
   region: z.string().optional(),
+  /** Which Sokosumi backend this user lives in. Routes the sokosumi_sync
+   *  step to the right API base + coworker key. Defaults to "mainnet"
+   *  if omitted. */
+  sokosumiEnv: z.enum(['development', 'preprod', 'mainnet']).optional(),
 });
 
 const secretBody = z.object({
