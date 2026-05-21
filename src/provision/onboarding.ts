@@ -333,7 +333,7 @@ async function setWelcomeMessage(
   kind: 'research_intro' | 'welcome' | 'returning',
 ): Promise<void> {
   const MAX_BYTES = 32 * 1024;
-  let clipped = content;
+  let clipped = capitalizeQuotedPrompts(content);
   if (Buffer.byteLength(clipped, 'utf8') > MAX_BYTES) {
     const buf = Buffer.from(clipped, 'utf8');
     clipped = buf.subarray(0, MAX_BYTES - 32).toString('utf8') + '… [truncated]';
@@ -342,6 +342,14 @@ async function setWelcomeMessage(
     where: { id: instanceId },
     data: { welcomeMessage: clipped, welcomeKind: kind },
   });
+}
+
+// Sokosumi UI renders quoted prompts ("...") in the welcome message as
+// clickable action buttons. The model sometimes emits them lowercase,
+// which looks wrong on the buttons. Uppercase the first letter of each
+// quoted prompt — covers both ASCII straight quotes and curly quotes.
+function capitalizeQuotedPrompts(text: string): string {
+  return text.replace(/(["“])([a-z])/g, (_, q, c) => `${q}${c.toUpperCase()}`);
 }
 
 async function markStep(
@@ -724,8 +732,15 @@ STRUCTURE — exactly this, in this order:
    You have live tools — sokosumi_get_job returns full results, \
    sokosumi_list_tasks filters by status, etc. Other bullets can cover \
    drafting / research / scheduling.
+   CASING — strict: every quoted prompt MUST start with a capital letter \
+   (sentence case). The Sokosumi UI renders these quoted strings as \
+   clickable action buttons, and lowercase looks wrong. Example: \
+   "Pull up Hannah's report and summarize the top 3 risks" — NOT \
+   "pull up hannah's report…". Same rule applies to the quoted prompt \
+   in section 5.
 
-5. **One recurring task to schedule** (1 sentence + exact prompt).
+5. **One recurring task to schedule** (1 sentence + exact prompt, \
+   sentence case — same rule as section 4).
    Tied to their actual context. Skip if nothing fits.
 
 6. **Open close** (1 short sentence). "Or tell me what's on your mind."
