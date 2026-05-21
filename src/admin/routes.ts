@@ -424,6 +424,27 @@ router.post('/admin/scheduler/run-now', async (c) => {
   return c.json({ ran: count });
 });
 
+// One-off (but idempotent) maintenance: capitalize the first letter of
+// every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
+// those quoted strings as clickable action buttons and lowercase looked
+// wrong on the rendered buttons. Safe to call repeatedly.
+router.post('/admin/maintenance/fix-welcome-casing', async (c) => {
+  const rows = await prisma.hermesInstance.findMany({
+    where: { destroyedAt: null, welcomeMessage: { not: null } },
+    select: { id: true, welcomeMessage: true },
+  });
+  let updated = 0;
+  for (const r of rows) {
+    const before = r.welcomeMessage ?? '';
+    const after = before.replace(/(["“])([a-z])/g, (_, q, ch) => `${q}${ch.toUpperCase()}`);
+    if (after !== before) {
+      await prisma.hermesInstance.update({ where: { id: r.id }, data: { welcomeMessage: after } });
+      updated++;
+    }
+  }
+  return c.json({ scanned: rows.length, updated });
+});
+
 router.post('/admin/instances/:userId/outbox/:messageId/delete', async (c) => {
   const userId = c.req.param('userId');
   const messageId = c.req.param('messageId');
