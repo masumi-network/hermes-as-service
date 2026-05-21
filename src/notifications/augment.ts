@@ -34,7 +34,7 @@ export async function augmentTasksForInstance(instanceId: string): Promise<{ com
     return { commented: 0, scanned: 0 };
   }
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  if (!SokosumiClient.isConfigured(env)) return { commented: 0, scanned: 0 };
+  if (!SokosumiClient.isConfigured(env, row.userId)) return { commented: 0, scanned: 0 };
 
   const log = logger.child({ instanceId, userId: row.userId, fn: 'task_augment' });
   const since = row.lastTaskAugmentationAt ?? new Date(Date.now() - 24 * 60 * 60_000);

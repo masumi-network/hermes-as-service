@@ -45,7 +45,7 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   }
 
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  if (!SokosumiClient.isConfigured(env)) return { fired: false, reason: 'no_sokosumi_key' };
+  if (!SokosumiClient.isConfigured(env, row.userId)) return { fired: false, reason: 'no_sokosumi_key' };
 
   // Cooldown check — but AWAITING_INPUT bypasses the cooldown because
   // those events are time-critical (the user's job is paused). We still

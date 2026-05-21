@@ -62,7 +62,7 @@ export async function runOnboarding(
   const hasInbox = researchDepth === 'deep' && connectedProviders.length > 0;
 
   const sokosumiEnv: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  const sokosumiConfigured = SokosumiClient.isConfigured(sokosumiEnv);
+  const sokosumiConfigured = SokosumiClient.isConfigured(sokosumiEnv, row.userId);
   const steps: OnboardingStep[] = [
     { id: 'memory', label: 'Saving your details', status: 'pending' },
     ...(connectedProviders.length > 0

@@ -26,7 +26,7 @@ export async function syncSokosumiWorkspaceForInstance(instanceId: string): Prom
   if (!(await isSystemSweepEnabled(row.id, 'sokosumi-sync'))) return false;
 
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  if (!SokosumiClient.isConfigured(env)) return false;
+  if (!SokosumiClient.isConfigured(env, row.userId)) return false;
 
   const log = logger.child({ instanceId, userId: row.userId, env: env ?? '(default mainnet)', fn: 'sokosumi_sync' });
   log.info('starting workspace sync');

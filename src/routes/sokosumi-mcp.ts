@@ -435,7 +435,7 @@ export async function callTool(
   args: Record<string, unknown>,
   ctx: InstanceContext,
 ): Promise<string> {
-  if (!SokosumiClient.isConfigured(ctx.env)) {
+  if (!SokosumiClient.isConfigured(ctx.env, ctx.userId)) {
     return JSON.stringify({
       error: `Sokosumi env '${ctx.env ?? 'mainnet'}' not configured on the orchestrator`,
     });

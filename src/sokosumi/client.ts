@@ -5,28 +5,42 @@ import { logger } from '../logger.js';
  * Test-fixture overrides: when a user provisions via Sokosumi's local-dev
  * environment, their userId belongs to a local DB that doesn't exist in
  * preprod or mainnet. To run an end-to-end sokosumi_sync test against
- * preprod or mainnet, we need to substitute the delegation userId.
+ * preprod or mainnet, we substitute BOTH the delegation userId AND the
+ * env so every Sokosumi call is rerouted, not just the X-Delegation-User-Id
+ * header. Other paths (instance row, integrations, inbox endpoints) still
+ * use the original userId — only the SokosumiClient sees the redirect.
  *
- * Keys = Sokosumi-sent userId (from POST /v1/instances). Values = per-env
- * userId to actually use as X-Delegation-User-Id when calling Sokosumi
- * APIs. Only Sokosumi calls are affected — instance routing, inbox
- * endpoints, etc. still use the original userId.
+ * Per-incoming-env mapping. Use the wildcard `*` to redirect from any
+ * incoming env (e.g. when Sokosumi's UI provisioned the user on `development`
+ * but we want every call to land in `preprod`).
  *
  * Strictly for known test fixtures. Real users should use a userId that
  * exists in the env they declare.
  */
-const SOKOSUMI_USERID_OVERRIDES: Record<string, Partial<Record<SokosumiEnv, string>>> = {
-  // Patrick — local-dev Sokosumi userId → real preprod userId (patrick@nmkr.io)
+type SokosumiTarget = { userId: string; env?: SokosumiEnv };
+const SOKOSUMI_OVERRIDES: Record<
+  string,
+  Partial<Record<SokosumiEnv | '*', SokosumiTarget>>
+> = {
+  // Patrick (patrick@nmkr.io). Sokosumi's dev UI mints userId
+  // `019e1de5-...`; every Sokosumi call from this user should land in
+  // preprod under his real userId regardless of which env Sokosumi UI
+  // provisioned the orchestrator with.
   '019e1de5-1c27-711b-9918-da5b601d48b1': {
-    preprod: '993Sp1dOvyn4CFCEHIQPu1vn4ZVI0Dh4',
+    '*': { userId: '993Sp1dOvyn4CFCEHIQPu1vn4ZVI0Dh4', env: 'preprod' },
   },
 };
 
-function resolveSokosumiUserId(userId: string, env: SokosumiEnv | null | undefined): string {
-  const map = SOKOSUMI_USERID_OVERRIDES[userId];
-  if (!map) return userId;
-  const effective: SokosumiEnv = env ?? 'mainnet';
-  return map[effective] ?? userId;
+function resolveSokosumiTarget(
+  rawUserId: string,
+  rawEnv: SokosumiEnv | null | undefined,
+): { userId: string; env: SokosumiEnv | null | undefined } {
+  const map = SOKOSUMI_OVERRIDES[rawUserId];
+  if (!map) return { userId: rawUserId, env: rawEnv };
+  const incoming: SokosumiEnv = rawEnv ?? 'mainnet';
+  const target = map[incoming] ?? map['*'];
+  if (!target) return { userId: rawUserId, env: rawEnv };
+  return { userId: target.userId, env: target.env ?? rawEnv };
 }
 
 /**
@@ -46,24 +60,38 @@ function resolveSokosumiUserId(userId: string, env: SokosumiEnv | null | undefin
  */
 export class SokosumiClient {
   private readonly userId: string;
+  private readonly env: SokosumiEnv | null | undefined;
   constructor(
     rawUserId: string,
-    private readonly env: SokosumiEnv | null | undefined,
+    rawEnv: SokosumiEnv | null | undefined,
     private readonly organizationId?: string,
   ) {
-    this.userId = resolveSokosumiUserId(rawUserId, env);
-    if (this.userId !== rawUserId) {
+    const resolved = resolveSokosumiTarget(rawUserId, rawEnv);
+    this.userId = resolved.userId;
+    this.env = resolved.env;
+    if (this.userId !== rawUserId || this.env !== rawEnv) {
       logger.info(
-        { rawUserId, effectiveUserId: this.userId, env },
-        'sokosumi_userid_override_applied',
+        {
+          rawUserId,
+          rawEnv,
+          effectiveUserId: this.userId,
+          effectiveEnv: this.env,
+        },
+        'sokosumi_override_applied',
       );
     }
   }
 
   /** Returns true if a coworker API key + base URL are configured for the
-   *  given env. Callers should gracefully skip if false. */
-  static isConfigured(env: SokosumiEnv | null | undefined): boolean {
-    return Boolean(getSokosumiConfig(env));
+   *  given user + env combo (after applying any per-user overrides).
+   *  Callers should pass the same userId they'll later instantiate the
+   *  client with, since the override can redirect env. */
+  static isConfigured(
+    env: SokosumiEnv | null | undefined,
+    userId?: string,
+  ): boolean {
+    const effectiveEnv = userId ? resolveSokosumiTarget(userId, env).env : env;
+    return Boolean(getSokosumiConfig(effectiveEnv));
   }
 
   // ---------- tasks ----------
@@ -383,7 +411,7 @@ export async function fetchWorkspaceSnapshot(
   userId: string,
   env: SokosumiEnv | null | undefined,
 ): Promise<WorkspaceSnapshot | null> {
-  if (!SokosumiClient.isConfigured(env)) {
+  if (!SokosumiClient.isConfigured(env, userId)) {
     logger.warn({ userId, env: env ?? '(default mainnet)' }, 'sokosumi_sync_skipped_no_api_key');
     return null;
   }

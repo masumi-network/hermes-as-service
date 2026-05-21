@@ -158,22 +158,65 @@ async function forward(c: Context): Promise<Response> {
     if (v) outHeaders[h] = v;
   }
 
-  // Filter the tool catalog for read-only integrations. Buffer the body
-  // (tools/list responses are small — single JSON or one SSE frame), parse,
-  // strip write-tools, return modified. Anything we can't safely parse,
-  // we pass through unchanged — Composio's OAuth-scope-level enforcement
-  // is the primary defense; this is belt-and-suspenders.
+  // Filter the tool catalog for read-only integrations. Buffer the body,
+  // strip write-tools, return modified.
+  //
+  // Three legitimate response shapes from a streamable_http MCP server:
+  //
+  //   (a) HTTP 200 + JSON body — the inline JSON-RPC response. Parse,
+  //       filter tools[], re-serialize.
+  //   (b) HTTP 200 + text/event-stream body — one or more `data: <json>`
+  //       lines. Same idea, just wrapped in SSE framing.
+  //   (c) HTTP 202 Accepted + empty body — the server deferred the response
+  //       to the SSE side channel the client has open on GET. Pass the
+  //       empty body through unchanged so Hermes' MCP client handles the
+  //       deferred delivery. Composio takes this path on cold sessions
+  //       and the old code was incorrectly 502'ing here, breaking
+  //       inbox_scan.
+  //
+  // Anything we genuinely can't parse, we log with diagnostics and pass
+  // through unchanged so Hermes can keep moving — the OAuth-scope on the
+  // Composio side remains the hard guarantee.
   if (isToolsList && isReadOnly) {
+    const upstreamText = await upstream.text();
+    const isEmpty = upstreamText.length === 0 || upstreamText.trim().length === 0;
+    const isAccepted = upstream.status === 202 || upstream.status === 204;
+    if (isEmpty || isAccepted) {
+      // Defer-via-SSE pattern (or genuinely empty). Pass through; the GET
+      // long-poll on the same MCP URL will deliver the actual tools/list
+      // result later. Hermes' MCP client handles this state.
+      logger.info(
+        {
+          instanceId,
+          provider,
+          status: upstream.status,
+          contentType: outHeaders['content-type'] ?? null,
+        },
+        'mcp_proxy_tools_list_deferred',
+      );
+      delete outHeaders['content-length'];
+      return new Response(upstreamText, { status: upstream.status, headers: outHeaders });
+    }
     try {
-      const upstreamText = await upstream.text();
       const filtered = stripWriteTools(upstreamText, provider);
-      // Preserve original Content-Length if it was set (we recompute).
       delete outHeaders['content-length'];
       return new Response(filtered, { status: upstream.status, headers: outHeaders });
     } catch (err) {
-      logger.warn({ err, instanceId, provider }, 'mcp_proxy_tools_filter_failed_passthrough');
-      // Already consumed body — return an error to Hermes; it'll re-list.
-      return jsonResponse(502, { error: { message: 'tool-list filter failed' } });
+      logger.warn(
+        {
+          err,
+          instanceId,
+          provider,
+          status: upstream.status,
+          contentType: outHeaders['content-type'] ?? null,
+          bodyHead: upstreamText.slice(0, 200),
+        },
+        'mcp_proxy_tools_filter_failed_passthrough',
+      );
+      // Pass through unchanged rather than 502 — a parse failure here is
+      // less dangerous than killing Hermes' MCP session.
+      delete outHeaders['content-length'];
+      return new Response(upstreamText, { status: upstream.status, headers: outHeaders });
     }
   }
 
