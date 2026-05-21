@@ -45,6 +45,7 @@ job_name="$(printf '%s' "$payload" | jq -r '.extra.cron_job_name // ""')"
 case "$job_name" in
   research-intro)     kind="research_intro" ;;
   daily-suggestions)  kind="daily_suggestions" ;;
+  daily-brief)        kind="daily_brief" ;;
   *)                  kind="task_result" ;;
 esac
 

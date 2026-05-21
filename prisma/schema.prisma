@@ -63,6 +63,19 @@ model HermesInstance {
   /// >23h old. null means never synced — either Sokosumi API isn't
   /// configured or onboarding pre-dated this feature.
   lastSokosumiSyncAt DateTime?
+  /// Last time the inbox-refresh cron asked Hermes to scan its connected
+  /// mail/calendar MCPs and update memory. Cron picks up any user with
+  /// connected mail/calendar integrations whose value is >6h old (or null).
+  lastInboxRefreshAt DateTime?
+  /// Last Sokosumi job completedAt the urgent-interrupt cron has already
+  /// considered. Used to bound the "new completions since last check"
+  /// query so we don't re-evaluate the same jobs every tick.
+  lastJobNoticeAt    DateTime?
+  /// Floor for proactive interrupts — Hermes pushes at most one urgent
+  /// notification per 2h per user, regardless of how many events fire
+  /// inside the window. Multiple events in the same window get batched
+  /// into a single message at the next eligible tick.
+  lastUrgentInterruptAt DateTime?
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's

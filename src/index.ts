@@ -8,11 +8,17 @@ import { instancesRouter } from './routes/instances.js';
 import { proxyRouter } from './routes/proxy.js';
 import { llmProxyRouter } from './routes/llm-proxy.js';
 import { mcpProxyRouter } from './routes/mcp-proxy.js';
+import { sokosumiMcpRouter } from './routes/sokosumi-mcp.js';
 import { schedulesSokosumiRouter, schedulesSpriteRouter } from './routes/schedules.js';
 import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
 import { adminAuth } from './admin/auth.js';
 import { adminRouter } from './admin/routes.js';
-import { startIdleSuspendCron, startSokosumiDailySyncCron } from './cron.js';
+import {
+  startIdleSuspendCron,
+  startSokosumiDailySyncCron,
+  startInboxRefreshCron,
+  startUrgentInterruptCron,
+} from './cron.js';
 // On Fly always-on hosts, Hermes' own gateway daemon ticks its built-in
 // cron every 60s. We no longer need the orchestrator-side scheduler.
 // import { startScheduler } from './schedules/scheduler.js';
@@ -27,6 +33,7 @@ app.get('/health', (c) => c.json({ ok: true }));
 // aren't intercepted.
 app.route('/', llmProxyRouter);
 app.route('/', mcpProxyRouter);
+app.route('/', sokosumiMcpRouter);
 app.route('/', schedulesSpriteRouter);
 app.route('/', outboxSpriteRouter);
 
@@ -62,6 +69,8 @@ const server = serve({ fetch: app.fetch, port: cfg.PORT, hostname: '0.0.0.0' }, 
 // this user lately" — pure bookkeeping, no Fly side effects.
 startIdleSuspendCron();
 startSokosumiDailySyncCron();
+startInboxRefreshCron();
+startUrgentInterruptCron();
 // startScheduler();  // see import above
 
 const shutdown = (signal: string) => {

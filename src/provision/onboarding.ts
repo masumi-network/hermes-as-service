@@ -549,16 +549,35 @@ chat. Your response is discarded — do not greet me.
 
 1. **Memory** — ${identityLine}
 
-2. **Daily-suggestions task** — schedule a cronjob firing every day at \
-09:00 UTC (cron expression "0 9 * * *"). Set name to "daily-suggestions" \
-and deliver to "local". Prompt content:
+2. **Daily-brief task** — schedule a cronjob firing every day at \
+07:00 UTC (cron expression "0 7 * * *"). Set name to "daily-brief" and \
+deliver to "local". Prompt content:
 
    <prompt>
-   Review what you know about this user from your memory and recent \
-   conversations. Suggest 2–3 specific actions they could take today: \
-   try a new skill, install a new skill, set up a new automation, or \
-   draft something they could use. Be concrete (one paragraph each, \
-   include the exact prompt the user could send you).
+   Daily brief for ${name ?? 'the user'}. Pull together what's actually \
+   worth their attention this morning. Use memory + your tools as needed.
+
+   Structure the brief like this — concise prose, no markdown headings, \
+   skip any section that has nothing real to say:
+
+   1. One-sentence overview: "Here's the shape of today: ..."
+   2. Mail since yesterday — highlight 2-4 threads that need their \
+      attention (sender, subject, one-line gist + suggested action). \
+      Use your Gmail/Outlook tools if connected.
+   3. Sokosumi jobs that completed overnight — for each, one-sentence \
+      summary of the result + whether it needs the user to read/act.
+   4. Today's calendar — only mention meetings that need prep or that \
+      they might forget. Skip routine recurring blocks.
+   5. One concrete next action — the single most valuable thing they \
+      could do in the next hour, with the exact prompt they could send \
+      you to start it.
+
+   Tone: warm but tight. Lead with what's interesting. No corporate \
+   filler ("I hope this finds you well", "as your AI assistant"). \
+   Address them by first name. 200-350 words total.
+
+   If literally nothing notable arrived (truly quiet day), say so \
+   honestly in two sentences and stop. Don't pad.
    </prompt>
 
 Run the cronjob.create call now. Once created, reply "ok".`;

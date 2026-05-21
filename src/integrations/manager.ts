@@ -315,12 +315,6 @@ export async function listIntegrations(userId: string): Promise<IntegrationView[
  * Returns "[]" if the user has no connected integrations.
  */
 export async function buildMcpServersJsonForUser(userId: string): Promise<string> {
-  const rows = await prisma.integration.findMany({
-    where: { userId, status: { in: ['connected', 'connecting', 'pending'] } },
-    orderBy: { createdAt: 'asc' },
-  });
-  if (rows.length === 0) return '[]';
-
   // Need the instanceId + plaintext per-instance bearer to build the
   // proxy URL + auth header the Fly machine will use to call us.
   const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
@@ -336,6 +330,11 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
     return '[]';
   }
 
+  const rows = await prisma.integration.findMany({
+    where: { userId, status: { in: ['connected', 'connecting', 'pending'] } },
+    orderBy: { createdAt: 'asc' },
+  });
+
   const cfg = loadConfig();
   const base = cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, '');
 
@@ -347,6 +346,18 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
       headers: { Authorization: `Bearer ${proxyToken}` },
     });
   }
+  // Always-on: the Sokosumi MCP server is auto-injected. Gives Hermes
+  // 8 live-query tools (list_tasks, get_task, get_job with full result,
+  // etc.). Hermes connects whether or not the user has Composio
+  // integrations — Sokosumi is the user's home, not a third-party app.
+  // The MCP server itself graceful-degrades if SOKOSUMI_COWORKER_API_KEY_*
+  // isn't configured for the instance's env (tool calls return an error
+  // string Hermes can surface).
+  entries.push({
+    name: 'sokosumi',
+    url: `${base}/v1/sokosumi-mcp/${instance.id}`,
+    headers: { Authorization: `Bearer ${proxyToken}` },
+  });
   return JSON.stringify(entries);
 }
 

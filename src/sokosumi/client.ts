@@ -118,6 +118,13 @@ export class SokosumiClient {
     return body;
   }
 
+  async getJobFiles(id: string): Promise<unknown[]> {
+    const body = await this.get<{ items?: unknown[]; files?: unknown[]; data?: unknown[] }>(
+      `/jobs/${encodeURIComponent(id)}/files`,
+    );
+    return body.items ?? body.files ?? body.data ?? [];
+  }
+
   // ---------- conversations ----------
 
   async listConversations(opts: { limit?: number } = {}): Promise<unknown[]> {
