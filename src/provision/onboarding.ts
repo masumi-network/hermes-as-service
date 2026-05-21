@@ -250,6 +250,12 @@ export async function runOnboarding(
   // can render it alongside any user-scheduled tasks.
   if (sokosumiConfigured) {
     const nextRunAt = new Date(Date.now() + 24 * 60 * 60_000);
+    // Re-read the row so we pick up lastSokosumiSyncAt that the sync step
+    // just wrote — otherwise the system ScheduledTask shows last_run_at:null
+    // until tomorrow's cron tick.
+    const fresh = await prisma.hermesInstance
+      .findUnique({ where: { id: row.id }, select: { lastSokosumiSyncAt: true } })
+      .catch(() => null);
     try {
       await prisma.scheduledTask.upsert({
         where: { id: `system-sokosumi-sync-${row.id}` },
@@ -263,8 +269,9 @@ export async function runOnboarding(
           timezone: 'UTC',
           enabled: true,
           nextRunAt,
+          lastRunAt: fresh?.lastSokosumiSyncAt ?? null,
         },
-        update: { enabled: true },
+        update: { enabled: true, lastRunAt: fresh?.lastSokosumiSyncAt ?? null },
       });
     } catch (err) {
       log.warn({ err }, 'sokosumi_schedule_upsert_failed');
