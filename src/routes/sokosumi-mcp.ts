@@ -399,11 +399,26 @@ async function handle(c: Context): Promise<Response> {
   if (method === 'tools/call') {
     const toolName = (params?.['name'] as string) ?? '';
     const args = (params?.['arguments'] as Record<string, unknown>) ?? {};
+    const t0 = Date.now();
     try {
       const text = await callTool(toolName, args, auth.ctx);
+      logger.info(
+        {
+          toolName,
+          instanceId: auth.ctx.instanceId,
+          userId: auth.ctx.userId,
+          autonomy: auth.ctx.autonomyLevel,
+          ms: Date.now() - t0,
+          bytes: text.length,
+        },
+        'sokosumi_mcp_tool_done',
+      );
       return rpcResult(id, { content: [{ type: 'text', text }] });
     } catch (err) {
-      logger.warn({ err, toolName, instanceId: auth.ctx.instanceId }, 'sokosumi_mcp_tool_failed');
+      logger.warn(
+        { err, toolName, instanceId: auth.ctx.instanceId, ms: Date.now() - t0 },
+        'sokosumi_mcp_tool_failed',
+      );
       const message = err instanceof Error ? err.message : String(err);
       return rpcResult(id, {
         content: [{ type: 'text', text: `tool error: ${message}` }],
@@ -477,18 +492,21 @@ export async function executeTool(
 
   switch (name) {
     case 'sokosumi_list_tasks': {
-      // Aggregate across orgs.
+      // Aggregate across orgs in parallel — sequential per-org calls were
+      // adding ~500–800ms per extra org for users with multiple workspaces.
       const orgs = await client.listOrganizations();
       const status = typeof args['status'] === 'string' ? (args['status'] as string) : undefined;
       const q = typeof args['q'] === 'string' ? (args['q'] as string).toLowerCase() : undefined;
       const limit = clampNumber(args['limit'], 50, 100);
       const allTasks: Array<{ orgId: string; orgName?: string; task: unknown }> = [];
-      for (const org of orgs.slice(0, 5)) {
-        try {
-          const tasks = await client.withOrganization(org.id).listTasks({ limit, scope: 'workspace' });
-          for (const t of tasks) allTasks.push({ orgId: org.id, orgName: org.name, task: t });
-        } catch {
-          /* per-org failures are tolerated */
+      const settled = await Promise.allSettled(
+        orgs.slice(0, 5).map((org) =>
+          client.withOrganization(org.id).listTasks({ limit, scope: 'workspace' }).then((tasks) => ({ org, tasks })),
+        ),
+      );
+      for (const r of settled) {
+        if (r.status === 'fulfilled') {
+          for (const t of r.value.tasks) allTasks.push({ orgId: r.value.org.id, orgName: r.value.org.name, task: t });
         }
       }
       let filtered = allTasks;
@@ -508,20 +526,22 @@ export async function executeTool(
     case 'sokosumi_get_task': {
       const id = String(args['id'] ?? '');
       if (!id) throw new Error('missing required arg: id');
-      // GET /tasks/:id needs an org context; try without first, fall back to iterating orgs.
+      // GET /tasks/:id needs an org context; try without first, fall back to
+      // racing all orgs in parallel — the first to resolve with a real task
+      // wins, the others get cancelled by Promise.any logic.
       try {
         return JSON.stringify(await client.getTask(id), null, 2);
       } catch {
         const orgs = await client.listOrganizations();
-        for (const org of orgs) {
-          try {
-            const task = await client.withOrganization(org.id).getTask(id);
-            return JSON.stringify({ orgId: org.id, task }, null, 2);
-          } catch {
-            /* try next */
-          }
+        const attempts = orgs.map((org) =>
+          client.withOrganization(org.id).getTask(id).then((task) => ({ orgId: org.id, task })),
+        );
+        try {
+          const found = await Promise.any(attempts);
+          return JSON.stringify(found, null, 2);
+        } catch {
+          throw new Error(`task ${id} not found in any org`);
         }
-        throw new Error(`task ${id} not found in any org`);
       }
     }
 
@@ -531,9 +551,9 @@ export async function executeTool(
       const agentId = typeof args['agent_id'] === 'string' ? (args['agent_id'] as string) : undefined;
       const limit = clampNumber(args['limit'], 30, 100);
       const all: Array<unknown> = [];
-      for (const org of orgs.slice(0, 5)) {
-        try {
-          const jobs = await client.withOrganization(org.id).listJobs({
+      const settled = await Promise.allSettled(
+        orgs.slice(0, 5).map((org) =>
+          client.withOrganization(org.id).listJobs({
             status: status as Parameters<SokosumiClient['listJobs']>[0] extends infer P
               ? P extends { status?: infer S }
                 ? S
@@ -541,11 +561,11 @@ export async function executeTool(
               : never,
             agentId,
             limit,
-          });
-          for (const j of jobs) all.push(j);
-        } catch {
-          /* tolerate per-org failure */
-        }
+          }),
+        ),
+      );
+      for (const r of settled) {
+        if (r.status === 'fulfilled') for (const j of r.value) all.push(j);
       }
       return JSON.stringify({ count: all.length, jobs: all.slice(0, limit) }, null, 2);
     }
@@ -585,17 +605,22 @@ export async function executeTool(
 
     case 'sokosumi_list_coworkers': {
       const limit = clampNumber(args['limit'], 30, 100);
-      // Per-org delegation needed — iterate user's orgs.
+      // Per-org delegation needed — fan out across the user's orgs in parallel.
       const orgs = await client.listOrganizations();
       const all: Array<{ orgId: string; orgName?: string; coworker: unknown }> = [];
-      for (const org of orgs.slice(0, 5)) {
-        try {
-          const coworkers = await client
+      const settled = await Promise.allSettled(
+        orgs.slice(0, 5).map((org) =>
+          client
             .withOrganization(org.id)
-            .listCoworkers({ scope: 'whitelisted', limit });
-          for (const c of coworkers) all.push({ orgId: org.id, orgName: org.name, coworker: c });
-        } catch {
-          /* tolerate per-org failures */
+            .listCoworkers({ scope: 'whitelisted', limit })
+            .then((coworkers) => ({ org, coworkers })),
+        ),
+      );
+      for (const r of settled) {
+        if (r.status === 'fulfilled') {
+          for (const c of r.value.coworkers) {
+            all.push({ orgId: r.value.org.id, orgName: r.value.org.name, coworker: c });
+          }
         }
       }
       return JSON.stringify({ count: all.length, coworkers: all }, null, 2);

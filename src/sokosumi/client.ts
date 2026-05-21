@@ -222,12 +222,15 @@ export class SokosumiClient {
     if (this.organizationId) {
       headers['X-Delegation-Organization-Id'] = this.organizationId;
     }
+    const t0 = Date.now();
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });
+    const ms = Date.now() - t0;
+    logger.info({ method: 'POST', path, ms, status: res.status, env: this.env ?? 'mainnet' }, 'sokosumi_http');
     if (!res.ok) {
       const respBody = await res.text().catch(() => '');
       throw new Error(`sokosumi POST ${path} → ${res.status}: ${respBody.slice(0, 300)}`);
@@ -325,11 +328,14 @@ export class SokosumiClient {
     if (this.organizationId) {
       headers['X-Delegation-Organization-Id'] = this.organizationId;
     }
+    const t0 = Date.now();
     const res = await fetch(url, {
       method: 'GET',
       headers,
       signal: AbortSignal.timeout(20_000),
     });
+    const ms = Date.now() - t0;
+    logger.info({ method: 'GET', path, ms, status: res.status, env: this.env ?? 'mainnet' }, 'sokosumi_http');
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`sokosumi GET ${path} → ${res.status}: ${body.slice(0, 200)}`);
