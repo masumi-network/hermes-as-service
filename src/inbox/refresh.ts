@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
+import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60_000; // 6h
 
@@ -27,6 +28,7 @@ export async function refreshInboxForInstance(instanceId: string): Promise<boole
   if (row.destroyedAt) return false;
   if (!row.endpointUrl) return false;
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return false;
+  if (!(await isSystemSweepEnabled(row.id, 'inbox-refresh'))) return false;
 
   // Skip if no mail/calendar MCPs are connected — there's nothing to scan.
   const integrations = await listIntegrations(row.userId);

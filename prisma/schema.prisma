@@ -95,6 +95,11 @@ model HermesInstance {
   /// Set at provision time. Default "medium". Changeable via
   /// PATCH /v1/instances/:userId.
   autonomyLevel String   @default("medium")
+  /// IANA timezone (e.g. "America/New_York", "Europe/Berlin"). Used to
+  /// interpret cron expressions on user-facing scheduled tasks like
+  /// morning-brief or weekly-wrap. Defaults to UTC when null. Sokosumi
+  /// passes this at provision time if known.
+  timezone       String?
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's
@@ -106,12 +111,13 @@ model HermesInstance {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  messages         ChatMessage[]
-  provisionEvents  ProvisionEvent[]
-  llmUsage         LlmUsage[]
-  schedules        ScheduledTask[]
-  outbox           OutboxMessage[]
-  integrations     Integration[]
+  messages              ChatMessage[]
+  provisionEvents       ProvisionEvent[]
+  llmUsage              LlmUsage[]
+  schedules             ScheduledTask[]
+  outbox                OutboxMessage[]
+  integrations          Integration[]
+  pendingConfirmations  PendingConfirmation[]
 
   @@index([status])
   @@index([lastActivityAt])
@@ -220,6 +226,24 @@ model ScheduledTask {
   userId       String
   name         String
   prompt       String
+  /// What this schedule actually is for the user:
+  ///   "user"           — created by the user (or by Hermes on user's behalf)
+  ///                       via the cronjob tool. Scheduler dispatches the
+  ///                       prompt to Hermes' chat completions endpoint.
+  ///   "system_prompt"  — created by the orchestrator at provision (or
+  ///                       autonomy change) as a recurring chat prompt
+  ///                       (morning-brief, weekly-wrap, etc.). Scheduler
+  ///                       dispatches it just like user prompts.
+  ///   "system_sweep"   — informational mirror of an orchestrator-level
+  ///                       background sweep (inbox-refresh, urgent-interrupts,
+  ///                       task-augmentation). The scheduler SKIPS these
+  ///                       rows; the matching orchestrator sweep reads the
+  ///                       row's `enabled` flag to gate the work per user.
+  kind         String   @default("user")
+  /// Human-readable explanation of what this schedule does. Surfaced in
+  /// Sokosumi's settings panel so users can understand the chip before
+  /// toggling it off.
+  description  String?
   cronExpr     String
   timezone     String   @default("UTC")
   enabled      Boolean  @default(true)
@@ -234,6 +258,41 @@ model ScheduledTask {
 
   @@index([userId])
   @@index([enabled, nextRunAt])
+  @@index([instanceId, kind])
+}
+
+/// At MEDIUM autonomy, write/spend tool calls don't execute. Instead the
+/// MCP server records the intended call here as "pending" and the
+/// Sokosumi UI renders a confirmation box. The user approves or rejects
+/// via the orchestrator's /confirmations endpoints; approval triggers
+/// the actual tool execution and an outbox message back to Hermes.
+model PendingConfirmation {
+  id            String   @id @default(uuid())
+  instanceId    String
+  userId        String
+  /// MCP tool name, e.g. "sokosumi_create_task", "sokosumi_create_job".
+  toolName      String
+  /// Original arguments Hermes passed to the tool. Replayed on approval.
+  toolArgs      Json
+  /// Short, plain-language summary of what will happen. Rendered as the
+  /// body of the in-chat confirmation box.
+  summary       String
+  /// "pending" | "approved" | "rejected" | "expired" | "errored"
+  status        String   @default("pending")
+  /// "user" | "system_timeout" | "system_cancel"
+  resolvedBy    String?
+  /// Tool's JSON response after successful execution (post-approval).
+  resultPayload Json?
+  /// Set if execution after approval failed.
+  errorMessage  String?
+  createdAt     DateTime @default(now())
+  resolvedAt    DateTime?
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, status])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
 
 model ProvisionEvent {

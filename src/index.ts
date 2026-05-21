@@ -11,6 +11,7 @@ import { mcpProxyRouter } from './routes/mcp-proxy.js';
 import { sokosumiMcpRouter } from './routes/sokosumi-mcp.js';
 import { schedulesSokosumiRouter, schedulesSpriteRouter } from './routes/schedules.js';
 import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
+import { confirmationsRouter } from './routes/confirmations.js';
 import { adminAuth } from './admin/auth.js';
 import { adminRouter } from './admin/routes.js';
 import {
@@ -44,6 +45,7 @@ app.route('/', instancesRouter);
 app.route('/', proxyRouter);
 app.route('/', schedulesSokosumiRouter);
 app.route('/', outboxSokosumiRouter);
+app.route('/', confirmationsRouter);
 
 // /admin/* is the human dashboard (Basic Auth).
 app.use('/admin/*', adminAuth);

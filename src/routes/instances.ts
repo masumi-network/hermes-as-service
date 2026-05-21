@@ -40,12 +40,17 @@ const provisionBody = z.object({
    *  high   — fully autonomous, including background task creation
    *  Defaults to "medium". */
   autonomyLevel: z.enum(['low', 'medium', 'high']).optional(),
+  /** IANA timezone (e.g. "America/New_York"). Drives the cron expressions
+   *  for user-facing recurring prompts (morning-brief, weekly-wrap, etc.).
+   *  Defaults to UTC when omitted. */
+  timezone: z.string().min(1).max(80).optional(),
 });
 
 const patchInstanceBody = z.object({
   autonomyLevel: z.enum(['low', 'medium', 'high']).optional(),
   name: z.string().min(1).max(200).optional(),
   email: z.string().email().max(254).optional(),
+  timezone: z.string().min(1).max(80).optional(),
 });
 
 const secretBody = z.object({
@@ -102,29 +107,96 @@ router.patch('/v1/instances/:userId', async (c) => {
   try {
     const row = await prisma.hermesInstance.findUnique({ where: { userId } });
     if (!row || row.destroyedAt) throw notFound(userId);
+    const autonomyChanged =
+      parsed.data.autonomyLevel !== undefined && parsed.data.autonomyLevel !== row.autonomyLevel;
+    const timezoneChanged =
+      parsed.data.timezone !== undefined && parsed.data.timezone !== row.timezone;
     const updated = await prisma.hermesInstance.update({
       where: { id: row.id },
       data: {
         ...(parsed.data.autonomyLevel ? { autonomyLevel: parsed.data.autonomyLevel } : {}),
         ...(parsed.data.name ? { name: parsed.data.name.slice(0, 200) } : {}),
         ...(parsed.data.email ? { email: parsed.data.email.slice(0, 254) } : {}),
+        ...(parsed.data.timezone !== undefined ? { timezone: parsed.data.timezone } : {}),
       },
     });
+
+    if (autonomyChanged || timezoneChanged) {
+      // Re-sync system schedules so high-only rows appear/disappear and
+      // local-time crons rebind to the new timezone.
+      try {
+        const integrations = await prisma.integration.findMany({
+          where: { instanceId: row.id, status: 'connected' },
+          select: { provider: true },
+        });
+        const providers = new Set(integrations.map((i) => i.provider));
+        const hasMailOrCalendar =
+          providers.has('gmail') ||
+          providers.has('outlook') ||
+          providers.has('google_calendar') ||
+          providers.has('outlook_calendar');
+        const autonomy =
+          updated.autonomyLevel === 'low' || updated.autonomyLevel === 'high'
+            ? updated.autonomyLevel
+            : 'medium';
+        const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
+        await syncSystemSchedules({
+          instanceId: row.id,
+          userId: row.userId,
+          autonomy: autonomy as 'low' | 'medium' | 'high',
+          timezone: updated.timezone ?? 'UTC',
+          sokosumiConfigured: true,
+          hasMailOrCalendar,
+        });
+      } catch (err) {
+        logger.warn({ err, userId }, 'patch_instance_resync_schedules_failed');
+      }
+
+      if (autonomyChanged) {
+        // Best-effort nudge so Hermes' memory tracks the new contract.
+        // Fire-and-forget; the DB row is the source of truth either way.
+        void notifyAutonomyChanged(row.id, updated.autonomyLevel).catch((err) =>
+          logger.warn({ err, userId }, 'autonomy_memory_nudge_failed'),
+        );
+      }
+    }
+
     return c.json({
       autonomyLevel: updated.autonomyLevel,
       name: updated.name,
       email: updated.email,
+      timezone: updated.timezone,
     });
   } catch (err) {
     return mapError(c, err, userId);
   }
 });
 
+async function notifyAutonomyChanged(instanceId: string, newLevel: string): Promise<void> {
+  const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  if (!row || !row.endpointUrl) return;
+  const { decryptSecret } = await import('../crypto.js');
+  const apiKey = await decryptSecret(row.apiServerKey);
+  const prompt = `Internal — your reply is discarded. Your autonomy level has changed to "${newLevel}". Update your memory with this fact. At low you may only read; at medium your write/spend tool calls are intercepted by the orchestrator and require user approval before executing; at high you may act autonomously while respecting the cost rules in your SOUL. Reply only "ok".`;
+  await fetch(`${row.endpointUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'hermes-agent',
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+
 router.get('/v1/instances/:userId', async (c) => {
   const userId = c.req.param('userId');
   try {
     const view = await getInstance(userId);
     const integrations = await listIntegrations(userId);
+    const { listPendingConfirmations } = await import('../confirmations/store.js');
+    const pendingConfirmations = await listPendingConfirmations(view.instanceId);
     // `transitioning: true` when any integration is mid-apply OR the
     // instance lifecycle is itself unsettled. Sokosumi gates the
     // "Hermes is applying your change…" banner on this so the chat is
@@ -145,6 +217,7 @@ router.get('/v1/instances/:userId', async (c) => {
       lastSokosumiSyncAt: view.lastSokosumiSyncAt?.toISOString() ?? null,
       sokosumiEnv: view.sokosumiEnv,
       autonomyLevel: view.autonomyLevel,
+      timezone: view.timezone,
       transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,
@@ -153,6 +226,7 @@ router.get('/v1/instances/:userId', async (c) => {
         connectedAt: i.connectedAt?.toISOString() ?? null,
         lastError: i.lastError,
       })),
+      pendingConfirmations,
     });
   } catch (err) {
     return mapError(c, err, userId);

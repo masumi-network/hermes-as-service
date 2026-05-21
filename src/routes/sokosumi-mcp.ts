@@ -28,7 +28,7 @@ const router = new Hono();
 
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 
-interface InstanceContext {
+export interface InstanceContext {
   instanceId: string;
   userId: string;
   env: SokosumiEnv | null;
@@ -436,6 +436,43 @@ async function callTool(
     });
   }
 
+  // MEDIUM autonomy: write + spend tools don't execute. Instead, we
+  // record a PendingConfirmation row and return a structured response so
+  // Hermes can tell the user to approve in the Sokosumi UI's
+  // confirmation box. Sokosumi posts /approve or /reject back to the
+  // orchestrator; on approve, the orchestrator replays this same tool
+  // call with the stored args and pushes the result to Hermes via the
+  // outbox.
+  if (toolDef && toolDef.access !== 'read' && ctx.autonomyLevel === 'medium') {
+    const { createPendingConfirmation, summarizeToolCall } = await import('../confirmations/store.js');
+    const summary = await summarizeToolCall(name, args, ctx);
+    const pending = await createPendingConfirmation({
+      instanceId: ctx.instanceId,
+      userId: ctx.userId,
+      toolName: name,
+      toolArgs: args,
+      summary,
+    });
+    return JSON.stringify({
+      status: 'pending_confirmation',
+      confirmation_id: pending.id,
+      message: `User approval required. The Sokosumi UI is showing a confirmation box for this action with summary: "${summary}". Tell the user in chat what you're proposing in plain language and stop — do not retry this tool. When they approve or reject in the UI, you'll receive a follow-up message with the outcome.`,
+    });
+  }
+
+  return executeTool(name, args, ctx);
+}
+
+/**
+ * Executes a tool against Sokosumi WITHOUT autonomy gating. Reused by the
+ * confirmation-approval flow (orchestrator-internal, no Hermes turn) so
+ * we don't have to duplicate per-tool logic.
+ */
+export async function executeTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: InstanceContext,
+): Promise<string> {
   const client = new SokosumiClient(ctx.userId, ctx.env);
 
   switch (name) {

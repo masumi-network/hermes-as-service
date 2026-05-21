@@ -4,6 +4,7 @@ import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from './client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 /**
  * One-shot sync of a single user's Sokosumi workspace into Hermes' memory.
@@ -22,6 +23,7 @@ export async function syncSokosumiWorkspaceForInstance(instanceId: string): Prom
   if (row.destroyedAt) return false;
   if (!row.endpointUrl) return false;
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return false;
+  if (!(await isSystemSweepEnabled(row.id, 'sokosumi-sync'))) return false;
 
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
   if (!SokosumiClient.isConfigured(env)) return false;

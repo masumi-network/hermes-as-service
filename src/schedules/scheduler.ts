@@ -26,7 +26,13 @@ export function stopScheduler(): void {
 /** Public so tests / admin endpoints can trigger a tick on demand. */
 export async function runDueOnce(): Promise<number> {
   const due = await prisma.scheduledTask.findMany({
-    where: { enabled: true, nextRunAt: { lte: new Date() } },
+    where: {
+      enabled: true,
+      nextRunAt: { lte: new Date() },
+      // system_sweep rows are informational mirrors of orchestrator-level
+      // background sweeps — they don't dispatch a prompt themselves.
+      kind: { in: ['user', 'system_prompt'] },
+    },
     take: 50,
     include: { instance: true },
   });

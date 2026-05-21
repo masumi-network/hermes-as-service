@@ -5,6 +5,7 @@ import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 import { SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 const COOLDOWN_MS = 2 * 60 * 60_000; // 2h between urgent interrupts per user
 const MAX_EVENTS_TO_GATE = 10; // cap on candidate events fed to Hermes per tick
@@ -38,6 +39,9 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   if (!row.endpointUrl) return { fired: false, reason: 'no_endpoint' };
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') {
     return { fired: false, reason: `status=${row.status}` };
+  }
+  if (!(await isSystemSweepEnabled(row.id, 'urgent-interrupts'))) {
+    return { fired: false, reason: 'sweep_disabled' };
   }
 
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;

@@ -244,38 +244,30 @@ export async function runOnboarding(
   }
 
   // ---- finalize ----
-  // System-managed scheduled task entry for the daily Sokosumi-workspace
-  // refresh. Idempotent — created once per user, never recreated. Surfaced
-  // via GET /v1/instances/:userId/schedules so Sokosumi's settings panel
-  // can render it alongside any user-scheduled tasks.
-  if (sokosumiConfigured) {
-    const nextRunAt = new Date(Date.now() + 24 * 60 * 60_000);
-    // Re-read the row so we pick up lastSokosumiSyncAt that the sync step
-    // just wrote — otherwise the system ScheduledTask shows last_run_at:null
-    // until tomorrow's cron tick.
-    const fresh = await prisma.hermesInstance
-      .findUnique({ where: { id: row.id }, select: { lastSokosumiSyncAt: true } })
-      .catch(() => null);
-    try {
-      await prisma.scheduledTask.upsert({
-        where: { id: `system-sokosumi-sync-${row.id}` },
-        create: {
-          id: `system-sokosumi-sync-${row.id}`,
-          instanceId: row.id,
-          userId: row.userId,
-          name: 'sokosumi-sync',
-          prompt: '[orchestrator] Daily refresh of Sokosumi workspace state (tasks, completed jobs, conversations, credits) into Hermes memory.',
-          cronExpr: '0 9 * * *',
-          timezone: 'UTC',
-          enabled: true,
-          nextRunAt,
-          lastRunAt: fresh?.lastSokosumiSyncAt ?? null,
-        },
-        update: { enabled: true, lastRunAt: fresh?.lastSokosumiSyncAt ?? null },
-      });
-    } catch (err) {
-      log.warn({ err }, 'sokosumi_schedule_upsert_failed');
-    }
+  // Sync the full set of system schedules — both the orchestrator-sweep
+  // mirror rows (sokosumi-sync, inbox-refresh, urgent-interrupts,
+  // task-augmentation) and the autonomy-gated recurring prompts
+  // (morning-brief, weekly-wrap, etc.). Idempotent.
+  try {
+    const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
+    const integrationProviders = new Set(connectedProviders);
+    const hasMailOrCalendar =
+      integrationProviders.has('gmail') ||
+      integrationProviders.has('outlook') ||
+      integrationProviders.has('google_calendar') ||
+      integrationProviders.has('outlook_calendar');
+    const autonomy =
+      row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+    await syncSystemSchedules({
+      instanceId: row.id,
+      userId: row.userId,
+      autonomy: autonomy as 'low' | 'medium' | 'high',
+      timezone: row.timezone ?? 'UTC',
+      sokosumiConfigured,
+      hasMailOrCalendar,
+    });
+  } catch (err) {
+    log.warn({ err }, 'system_schedules_sync_failed');
   }
 
   await prisma.hermesInstance.update({

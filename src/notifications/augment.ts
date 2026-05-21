@@ -4,6 +4,7 @@ import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 const MAX_TASKS_PER_TICK = 5; // per-instance cap
 
@@ -27,6 +28,9 @@ export async function augmentTasksForInstance(instanceId: string): Promise<{ com
   if (!row.endpointUrl) return { commented: 0, scanned: 0 };
   if (row.autonomyLevel !== 'high') return { commented: 0, scanned: 0 };
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') {
+    return { commented: 0, scanned: 0 };
+  }
+  if (!(await isSystemSweepEnabled(row.id, 'task-augmentation'))) {
     return { commented: 0, scanned: 0 };
   }
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;

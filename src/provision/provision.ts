@@ -19,6 +19,8 @@ export interface ProvisionInput {
   sokosumiEnv?: 'development' | 'preprod' | 'mainnet';
   /** How much autonomy the agent gets ("low" | "medium" | "high"). */
   autonomyLevel?: 'low' | 'medium' | 'high';
+  /** IANA timezone for user-facing recurring prompts. Defaults to UTC. */
+  timezone?: string;
 }
 
 export interface InstanceView {
@@ -33,6 +35,7 @@ export interface InstanceView {
   lastSokosumiSyncAt: Date | null;
   sokosumiEnv: string | null;
   autonomyLevel: string;
+  timezone: string | null;
 }
 
 /**
@@ -87,6 +90,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         welcomeKind: null,
         ...(input.sokosumiEnv ? { sokosumiEnv: input.sokosumiEnv } : {}),
         ...(input.autonomyLevel ? { autonomyLevel: input.autonomyLevel } : {}),
+        ...(input.timezone ? { timezone: input.timezone } : {}),
       },
     });
     await recordEvent({
@@ -108,6 +112,7 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
         email: input.email?.slice(0, 254) ?? null,
         sokosumiEnv: input.sokosumiEnv ?? null,
         autonomyLevel: input.autonomyLevel ?? 'medium',
+        timezone: input.timezone ?? null,
         status: 'provisioning',
       },
     });
@@ -421,6 +426,7 @@ function toView(row: {
   lastSokosumiSyncAt: Date | null;
   sokosumiEnv: string | null;
   autonomyLevel: string;
+  timezone: string | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -434,6 +440,7 @@ function toView(row: {
     lastSokosumiSyncAt: row.lastSokosumiSyncAt,
     sokosumiEnv: row.sokosumiEnv,
     autonomyLevel: row.autonomyLevel,
+    timezone: row.timezone,
   };
 }
 

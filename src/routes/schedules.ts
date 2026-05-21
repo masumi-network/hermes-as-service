@@ -82,7 +82,9 @@ sokosumi.delete('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
   const scheduleId = c.req.param('scheduleId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.json({ error: { message: 'instance not found' } }, 404);
-  await prisma.scheduledTask.deleteMany({ where: { id: scheduleId, instanceId: row.id } });
+  await prisma.scheduledTask.deleteMany({
+    where: { id: scheduleId, instanceId: row.id, kind: 'user' },
+  });
   return c.body(null, 204);
 });
 
@@ -223,6 +225,8 @@ function toApiShape(task: {
   lastError: string | null;
   nextRunAt: Date;
   createdAt: Date;
+  kind?: string;
+  description?: string | null;
 }) {
   return {
     id: task.id,
@@ -235,6 +239,8 @@ function toApiShape(task: {
     last_error: task.lastError,
     next_run_at: task.nextRunAt.toISOString(),
     created_at: task.createdAt.toISOString(),
+    kind: task.kind ?? 'user',
+    description: task.description ?? null,
   };
 }
 
