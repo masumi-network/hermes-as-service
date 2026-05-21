@@ -160,68 +160,76 @@ async function forward(c: Context): Promise<Response> {
 
   // Filter the tool catalog for read-only integrations. Buffer the body,
   // strip write-tools, return modified.
-  //
-  // Three legitimate response shapes from a streamable_http MCP server:
-  //
-  //   (a) HTTP 200 + JSON body — the inline JSON-RPC response. Parse,
-  //       filter tools[], re-serialize.
-  //   (b) HTTP 200 + text/event-stream body — one or more `data: <json>`
-  //       lines. Same idea, just wrapped in SSE framing.
-  //   (c) HTTP 202 Accepted + empty body — the server deferred the response
-  //       to the SSE side channel the client has open on GET. Pass the
-  //       empty body through unchanged so Hermes' MCP client handles the
-  //       deferred delivery. Composio takes this path on cold sessions
-  //       and the old code was incorrectly 502'ing here, breaking
-  //       inbox_scan.
-  //
-  // Anything we genuinely can't parse, we log with diagnostics and pass
-  // through unchanged so Hermes can keep moving — the OAuth-scope on the
-  // Composio side remains the hard guarantee.
   if (isToolsList && isReadOnly) {
     const upstreamText = await upstream.text();
-    const isEmpty = upstreamText.length === 0 || upstreamText.trim().length === 0;
-    const isAccepted = upstream.status === 202 || upstream.status === 204;
-    if (isEmpty || isAccepted) {
-      // Defer-via-SSE pattern (or genuinely empty). Pass through; the GET
-      // long-poll on the same MCP URL will deliver the actual tools/list
-      // result later. Hermes' MCP client handles this state.
-      logger.info(
-        {
-          instanceId,
-          provider,
-          status: upstream.status,
-          contentType: outHeaders['content-type'] ?? null,
-        },
-        'mcp_proxy_tools_list_deferred',
-      );
-      delete outHeaders['content-length'];
-      return new Response(upstreamText, { status: upstream.status, headers: outHeaders });
+    const { body, action, logMeta } = handleToolsListResponse(
+      upstreamText,
+      upstream.status,
+      provider,
+    );
+    const metaWithCtx = { instanceId, provider, ...logMeta };
+    if (action === 'deferred') {
+      logger.info(metaWithCtx, 'mcp_proxy_tools_list_deferred');
+    } else if (action === 'unparseable') {
+      logger.warn(metaWithCtx, 'mcp_proxy_tools_filter_failed_passthrough');
     }
-    try {
-      const filtered = stripWriteTools(upstreamText, provider);
-      delete outHeaders['content-length'];
-      return new Response(filtered, { status: upstream.status, headers: outHeaders });
-    } catch (err) {
-      logger.warn(
-        {
-          err,
-          instanceId,
-          provider,
-          status: upstream.status,
-          contentType: outHeaders['content-type'] ?? null,
-          bodyHead: upstreamText.slice(0, 200),
-        },
-        'mcp_proxy_tools_filter_failed_passthrough',
-      );
-      // Pass through unchanged rather than 502 — a parse failure here is
-      // less dangerous than killing Hermes' MCP session.
-      delete outHeaders['content-length'];
-      return new Response(upstreamText, { status: upstream.status, headers: outHeaders });
-    }
+    delete outHeaders['content-length'];
+    return new Response(body, { status: upstream.status, headers: outHeaders });
   }
 
   // Default: stream response back unchanged.
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+/**
+ * Pure response-handling logic for read-only tools/list responses,
+ * extracted so we can unit-test it without mocking the whole proxy.
+ *
+ * Three legitimate response shapes from a streamable_http MCP server:
+ *
+ *   (a) HTTP 200 + JSON body — inline JSON-RPC response. Filter tools[].
+ *   (b) HTTP 200 + text/event-stream body — `data: <json>` lines. Same.
+ *   (c) HTTP 202 Accepted + empty body — server deferred the response to
+ *       the SSE side channel. Pass through unchanged. (Composio takes
+ *       this path on cold sessions; pre-fix we 502'd here, which made
+ *       Hermes retry tools/list in a loop and time out inbox_scan.)
+ *
+ * Anything we can't parse, we pass through unchanged — a filter glitch
+ * shouldn't kill Hermes' MCP session. OAuth scope on the Composio side
+ * is the hard guarantee.
+ */
+export function handleToolsListResponse(
+  upstreamText: string,
+  upstreamStatus: number,
+  provider: string,
+): {
+  body: string;
+  action: 'filtered' | 'deferred' | 'unparseable';
+  logMeta: Record<string, unknown>;
+} {
+  const isEmpty = upstreamText.length === 0 || upstreamText.trim().length === 0;
+  const isAccepted = upstreamStatus === 202 || upstreamStatus === 204;
+  if (isEmpty || isAccepted) {
+    return {
+      body: upstreamText,
+      action: 'deferred',
+      logMeta: { status: upstreamStatus, empty: isEmpty },
+    };
+  }
+  try {
+    const filtered = stripWriteTools(upstreamText, provider);
+    return { body: filtered, action: 'filtered', logMeta: { status: upstreamStatus } };
+  } catch (err) {
+    return {
+      body: upstreamText,
+      action: 'unparseable',
+      logMeta: {
+        err,
+        status: upstreamStatus,
+        bodyHead: upstreamText.slice(0, 200),
+      },
+    };
+  }
 }
 
 /**

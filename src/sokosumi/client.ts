@@ -31,7 +31,7 @@ const SOKOSUMI_OVERRIDES: Record<
   },
 };
 
-function resolveSokosumiTarget(
+export function resolveSokosumiTarget(
   rawUserId: string,
   rawEnv: SokosumiEnv | null | undefined,
 ): { userId: string; env: SokosumiEnv | null | undefined } {
