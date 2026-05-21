@@ -204,6 +204,18 @@ const TOOLS_ALL: ToolDef[] = [
       },
     },
   },
+  {
+    access: 'read',
+    name: 'sokosumi_list_coworkers',
+    description:
+      "List the user's whitelisted Sokosumi coworkers (id, slug, name, caption, capabilities). These are the AI personas — like Hannah, Demos, Elena — that actually DO the work. Tasks get assigned to coworkers; jobs run under their identity. Different from sokosumi_list_agents (which is the marketplace catalog). YOU (Hermes) are one of them, with slug=hermes — but never assign tasks to yourself; you're the coordinator, not the executor. Call this before sokosumi_create_task so you can pick the right coworker for the work (e.g., research → Hannah, project management → Elena, social media → Pheme).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max results (default 30, max 100).' },
+      },
+    },
+  },
   // ---------- write tools (medium + high autonomy) ----------
   {
     access: 'write',
@@ -223,23 +235,23 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_create_task',
     description:
-      "Create a new task in the user's workspace. Free (only the jobs run under the task cost credits). Use this when the user explicitly asks for a task or, at HIGH autonomy, when you've decided proactive task creation is warranted (e.g., prepping for an upcoming meeting).",
+      "Create a new task in the user's workspace and ASSIGN IT TO A COWORKER who will actually do the work. Free (only jobs run under the task cost credits). REQUIRED: coworker_id — call sokosumi_list_coworkers first to see who's available and pick the appropriate one based on the work (research → Hannah, project management → Elena, social media → Pheme, coding → Alex, etc.). NEVER assign a task to Hermes (you) — you're the coordinator. NEVER omit coworker_id — an unassigned task is dead on arrival. Tasks then live on the user's Sokosumi taskboard; the assigned coworker drives them through DRAFT → READY → RUNNING → COMPLETED via agent jobs over time.",
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Task name, concise.' },
-        description: { type: 'string', description: 'Longer description of the task.' },
+        description: { type: 'string', description: 'Longer description of what needs to be done.' },
+        coworker_id: {
+          type: 'string',
+          description: 'REQUIRED. The Sokosumi coworker who will do the work. Pick from sokosumi_list_coworkers. Must NOT be the Hermes coworker.',
+        },
         status: {
           type: 'string',
           enum: ['DRAFT', 'READY'],
-          description: 'Initial status. DRAFT for in-progress drafting, READY for finalized.',
-        },
-        coworker_id: {
-          type: 'string',
-          description: 'Optional Sokosumi coworker to assign the task to.',
+          description: 'Initial status. DRAFT for in-progress drafting, READY for finalized and ready for the coworker to pick up.',
         },
       },
-      required: ['name'],
+      required: ['name', 'coworker_id'],
     },
   },
   {
@@ -534,6 +546,24 @@ async function callTool(
       return JSON.stringify({ count: agents.length, agents }, null, 2);
     }
 
+    case 'sokosumi_list_coworkers': {
+      const limit = clampNumber(args['limit'], 30, 100);
+      // Per-org delegation needed — iterate user's orgs.
+      const orgs = await client.listOrganizations();
+      const all: Array<{ orgId: string; orgName?: string; coworker: unknown }> = [];
+      for (const org of orgs.slice(0, 5)) {
+        try {
+          const coworkers = await client
+            .withOrganization(org.id)
+            .listCoworkers({ scope: 'whitelisted', limit });
+          for (const c of coworkers) all.push({ orgId: org.id, orgName: org.name, coworker: c });
+        } catch {
+          /* tolerate per-org failures */
+        }
+      }
+      return JSON.stringify({ count: all.length, coworkers: all }, null, 2);
+    }
+
     // ---------- write tools ----------
 
     case 'sokosumi_add_task_comment': {
@@ -559,19 +589,69 @@ async function callTool(
     }
 
     case 'sokosumi_create_task': {
-      const taskArgs = {
-        name: String(args['name'] ?? ''),
-        description: typeof args['description'] === 'string' ? (args['description'] as string) : undefined,
-        coworkerId: typeof args['coworker_id'] === 'string' ? (args['coworker_id'] as string) : undefined,
-        status: typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined,
-      };
-      if (!taskArgs.name) throw new Error('missing required arg: name');
+      const name = String(args['name'] ?? '');
+      const coworkerId = String(args['coworker_id'] ?? '');
+      const description = typeof args['description'] === 'string' ? (args['description'] as string) : undefined;
+      const status = typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined;
+
+      if (!name) throw new Error('missing required arg: name');
+      if (!coworkerId) {
+        throw new Error(
+          "missing required arg: coworker_id. Tasks must be assigned to a coworker who will do the work. Call sokosumi_list_coworkers first to see who's available, then pick the right one for this task (e.g., research → Hannah, project management → Elena). DO NOT assign tasks to Hermes (slug=hermes) — Hermes is the coordinator, not the executor.",
+        );
+      }
+
+      // Find which org this coworker belongs to. We iterate user's orgs
+      // looking for the coworker; create the task in the matching org.
       const orgs = await client.listOrganizations();
       if (orgs.length === 0) throw new Error('user has no orgs to create the task in');
-      // Default to the first org. Hermes can specify a different one later
-      // via the input schema if needed (future: add organization_id arg).
-      const result = await client.withOrganization(orgs[0]!.id).createTask(taskArgs);
-      return JSON.stringify({ orgId: orgs[0]!.id, task: result }, null, 2);
+
+      let targetOrgId: string | null = null;
+      let coworkerSlug: string | undefined;
+      let coworkerName: string | undefined;
+      for (const org of orgs.slice(0, 5)) {
+        try {
+          const list = (await client.withOrganization(org.id).listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
+            id?: string;
+            slug?: string;
+            name?: string;
+          }>;
+          const match = list.find((c) => c.id === coworkerId);
+          if (match) {
+            targetOrgId = org.id;
+            coworkerSlug = match.slug;
+            coworkerName = match.name;
+            break;
+          }
+        } catch {
+          /* try next org */
+        }
+      }
+      if (!targetOrgId) {
+        throw new Error(
+          `coworker_id ${coworkerId} not found in any of the user's orgs. Call sokosumi_list_coworkers to see available coworkers.`,
+        );
+      }
+      // Refuse self-assignment to the Hermes coworker — Hermes coordinates,
+      // doesn't execute. Sokosumi may attribute jobs to Hermes if the user
+      // explicitly chats with Hermes, but tasks shouldn't be dumped onto it.
+      if (coworkerSlug === 'hermes') {
+        throw new Error(
+          `Refusing to assign task to coworker '${coworkerName}' (slug=hermes) — Hermes is the coordinator, not the executor. Pick a different coworker via sokosumi_list_coworkers based on what the task actually needs (research → Hannah, project management → Elena, social media → Pheme, etc.).`,
+        );
+      }
+
+      const result = await client.withOrganization(targetOrgId).createTask({
+        name,
+        description,
+        status,
+        coworkerId,
+      });
+      return JSON.stringify(
+        { orgId: targetOrgId, assignedTo: { id: coworkerId, slug: coworkerSlug, name: coworkerName }, task: result },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_get_agent_input_schema': {

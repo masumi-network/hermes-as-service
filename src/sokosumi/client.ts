@@ -270,6 +270,24 @@ export class SokosumiClient {
     return body.items ?? body.agents ?? body.data ?? [];
   }
 
+  /**
+   * List coworkers — the user-facing AI personas (Hannah, Elena, Demos,
+   * etc.) that actually DO the work. Different from agents (the
+   * underlying marketplace agent types). Tasks are assigned to coworkers;
+   * Hermes is one of them but should never assign tasks to itself.
+   *
+   * Defaults to whitelisted scope (the user's actively enabled coworkers).
+   */
+  async listCoworkers(opts: { scope?: 'all' | 'whitelisted' | 'archived'; limit?: number } = {}): Promise<unknown[]> {
+    const qs = new URLSearchParams();
+    if (opts.scope) qs.set('scope', opts.scope);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    const body = await this.get<{ items?: unknown[]; coworkers?: unknown[]; data?: unknown[] }>(
+      `/coworkers?${qs}`,
+    );
+    return body.items ?? body.coworkers ?? body.data ?? [];
+  }
+
   // ---------- organizations ----------
 
   /**
@@ -339,6 +357,9 @@ export interface OrgWorkspace {
   tasks: unknown[];
   completedJobs: unknown[];
   conversations: unknown[];
+  /** Whitelisted coworkers in this org — the personas that actually do
+   *  the work. Hermes uses this list when assigning new tasks. */
+  coworkers: unknown[];
 }
 
 export interface WorkspaceSnapshot {
@@ -375,7 +396,7 @@ export async function fetchWorkspaceSnapshot(
   const orgWorkspaces = await Promise.all(
     orgsToFetch.map(async (org) => {
       const orgClient = baseClient.withOrganization(org.id);
-      const [tasks, completedJobs, conversations] = await Promise.all([
+      const [tasks, completedJobs, conversations, coworkers] = await Promise.all([
         orgClient.listTasks({ limit: 50, scope: 'workspace' }).catch((err) => {
           logger.warn({ err, userId, orgId: org.id, endpoint: '/tasks' }, 'sokosumi_partial_failure');
           return [] as unknown[];
@@ -386,6 +407,10 @@ export async function fetchWorkspaceSnapshot(
         }),
         orgClient.listConversations({ limit: 5 }).catch((err) => {
           logger.warn({ err, userId, orgId: org.id, endpoint: '/conversations' }, 'sokosumi_partial_failure');
+          return [] as unknown[];
+        }),
+        orgClient.listCoworkers({ scope: 'whitelisted', limit: 30 }).catch((err) => {
+          logger.warn({ err, userId, orgId: org.id, endpoint: '/coworkers' }, 'sokosumi_partial_failure');
           return [] as unknown[];
         }),
       ]);
@@ -413,6 +438,7 @@ export async function fetchWorkspaceSnapshot(
         tasks: tasksWithDetail.length > 0 ? tasksWithDetail : tasks,
         completedJobs,
         conversations,
+        coworkers,
       };
     }),
   );

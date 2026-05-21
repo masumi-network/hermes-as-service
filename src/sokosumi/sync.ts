@@ -134,6 +134,7 @@ function formatSnapshotForMemory(snapshot: {
     tasks: unknown[];
     completedJobs: unknown[];
     conversations: unknown[];
+    coworkers: unknown[];
   }>;
   credits: unknown | null;
   agents: unknown[];
@@ -151,6 +152,20 @@ function formatSnapshotForMemory(snapshot: {
     const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
     lines.push(`# Org: ${orgLabel}`);
     lines.push('');
+    if (Array.isArray(ws.coworkers) && ws.coworkers.length > 0) {
+      lines.push(`## Coworkers (${ws.coworkers.length}) — tasks get assigned to these`);
+      for (const c of ws.coworkers as Array<{
+        id?: string;
+        slug?: string;
+        name?: string;
+        caption?: string | null;
+        capabilities?: string[];
+      }>) {
+        const capabilities = (c.capabilities ?? []).join(',');
+        lines.push(`- id=${c.id ?? '?'} slug=${c.slug ?? '?'} "${c.name ?? '?'}" — ${c.caption ?? ''} [${capabilities}]`);
+      }
+      lines.push('');
+    }
     lines.push(`## Tasks (${ws.tasks.length})`);
     for (const t of ws.tasks.slice(0, 15) as Array<{
       id?: string;

@@ -808,6 +808,7 @@ function formatSokosumiSnapshotForMemory(snapshot: {
     tasks: unknown[];
     completedJobs: unknown[];
     conversations: unknown[];
+    coworkers: unknown[];
   }>;
   credits: unknown | null;
   agents: unknown[];
@@ -826,6 +827,29 @@ function formatSokosumiSnapshotForMemory(snapshot: {
     const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
     lines.push(`# Org: ${orgLabel}`);
     lines.push('');
+
+    // ---- COWORKERS: who can actually do tasks in this org. Hermes
+    // assigns work to these (not to itself).
+    if (Array.isArray(ws.coworkers) && ws.coworkers.length > 0) {
+      lines.push(`## Coworkers in this org (${ws.coworkers.length})`);
+      lines.push('These are the workers Hermes can assign tasks to. Hermes is one of them — but should NEVER assign tasks to itself; Hermes is the coordinator, not the executor.');
+      for (const c of ws.coworkers as Array<{
+        id?: string;
+        slug?: string;
+        name?: string;
+        caption?: string | null;
+        description?: string | null;
+        capabilities?: string[];
+      }>) {
+        const capabilities = (c.capabilities ?? []).join(',') || 'unknown';
+        const caption = c.caption ?? '';
+        const desc = (c.description ?? '').slice(0, 200).replace(/\s+/g, ' ');
+        lines.push(`- id=${c.id ?? '?'} slug=${c.slug ?? '?'} name="${c.name ?? '?'}" caps=${capabilities}`);
+        if (caption) lines.push(`  caption: ${caption}`);
+        if (desc) lines.push(`  about: ${desc}${(c.description ?? '').length > 200 ? '…' : ''}`);
+      }
+      lines.push('');
+    }
 
     // ---- TASKS: now enriched with description + events from GET /tasks/{id}
     lines.push(`## Tasks (${ws.tasks.length})`);
