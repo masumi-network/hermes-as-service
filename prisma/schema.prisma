@@ -58,6 +58,11 @@ model HermesInstance {
   /// "returning" (short welcome-back on session 2+). Lets Sokosumi UI
   /// pick a render style if useful.
   welcomeKind    String?
+  /// Last successful run of the Sokosumi workspace sync (onboarding step
+  /// or recurring daily cron). The cron picks up any user whose value is
+  /// >23h old. null means never synced — either Sokosumi API isn't
+  /// configured or onboarding pre-dated this feature.
+  lastSokosumiSyncAt DateTime?
   lastActivityAt DateTime @default(now())
   errorMessage   String?
   createdAt      DateTime @default(now())

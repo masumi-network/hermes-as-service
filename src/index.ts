@@ -12,7 +12,7 @@ import { schedulesSokosumiRouter, schedulesSpriteRouter } from './routes/schedul
 import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
 import { adminAuth } from './admin/auth.js';
 import { adminRouter } from './admin/routes.js';
-import { startIdleSuspendCron } from './cron.js';
+import { startIdleSuspendCron, startSokosumiDailySyncCron } from './cron.js';
 // On Fly always-on hosts, Hermes' own gateway daemon ticks its built-in
 // cron every 60s. We no longer need the orchestrator-side scheduler.
 // import { startScheduler } from './schedules/scheduler.js';
@@ -61,6 +61,7 @@ const server = serve({ fetch: app.fetch, port: cfg.PORT, hostname: '0.0.0.0' }, 
 // after 30 min, which Sokosumi uses as a signal for "we haven't heard from
 // this user lately" — pure bookkeeping, no Fly side effects.
 startIdleSuspendCron();
+startSokosumiDailySyncCron();
 // startScheduler();  // see import above
 
 const shutdown = (signal: string) => {

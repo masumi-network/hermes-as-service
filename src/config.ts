@@ -33,6 +33,12 @@ const schema = z.object({
   // identity is scoped via the ?user_id= query param Composio bakes into
   // each connection URL.
   COMPOSIO_API_KEY: z.string().optional().default(''),
+  // Sokosumi "Hermes Coworker" API key — single org-wide secret. Used by
+  // the orchestrator's sokosumi_sync step to pull each user's tasks, jobs,
+  // conversations etc. into Hermes' memory. Per-user scoping via the
+  // X-Delegation-User-Id header on each request.
+  SOKOSUMI_COWORKER_API_KEY: z.string().optional().default(''),
+  SOKOSUMI_API_BASE: z.string().url().default('https://app.sokosumi.com/api/v1'),
   MASTER_ENCRYPTION_KEY: z.string().min(40),
   ADMIN_PASSWORD: z.string().min(8),
   // Public base URL of the orchestrator itself. Used to construct the

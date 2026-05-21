@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
+import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
 export interface OnboardingStep {
@@ -59,6 +60,7 @@ export async function runOnboarding(
   const researchDepth = opts.researchDepth ?? 'deep';
   const hasInbox = researchDepth === 'deep' && connectedProviders.length > 0;
 
+  const sokosumiConfigured = SokosumiClient.isConfigured();
   const steps: OnboardingStep[] = [
     { id: 'memory', label: 'Saving your details', status: 'pending' },
     ...(connectedProviders.length > 0
@@ -70,6 +72,9 @@ export async function runOnboarding(
       status: hasInbox ? 'pending' : 'skipped',
     },
     { id: 'web_research', label: 'Checking your public profile', status: 'pending' },
+    ...(sokosumiConfigured
+      ? [{ id: 'sokosumi_sync', label: 'Reading your Sokosumi workspace', status: 'pending' as const }]
+      : []),
     { id: 'intro_draft', label: 'Drafting your intro', status: 'pending' },
   ];
 
@@ -164,6 +169,44 @@ export async function runOnboarding(
     await markStep(instanceId, 'web_research', 'failed', errToMessage(err));
   }
 
+  // ---- 3b. Sokosumi workspace sync (only if API key configured) ----
+  // Pulls the user's tasks, completed jobs, conversations, credits, and
+  // agent catalog into Hermes' memory. Lets the intro mention real
+  // workspace state ("you have 3 open tasks", "your last completed job
+  // returned …") instead of generic capability ads.
+  let sokosumiSummary = '';
+  if (sokosumiConfigured) {
+    await markStep(instanceId, 'sokosumi_sync', 'running');
+    try {
+      const snapshot = await fetchWorkspaceSnapshot(row.userId);
+      if (snapshot) {
+        sokosumiSummary = formatSokosumiSnapshotForMemory(snapshot);
+        // Push as a silent memory-write to Hermes so the agent's persistent
+        // memory file picks it up. Hermes responds with "ok"; we discard.
+        try {
+          await callHermes(
+            row.endpointUrl,
+            apiKey,
+            buildSokosumiMemoryPrompt(sokosumiSummary),
+            5 * 60_000,
+          );
+        } catch (err) {
+          log.warn({ err }, 'sokosumi_memory_write_failed');
+        }
+        await prisma.hermesInstance.update({
+          where: { id: instanceId },
+          data: { lastSokosumiSyncAt: new Date() },
+        });
+        await markStep(instanceId, 'sokosumi_sync', 'done');
+      } else {
+        await markStep(instanceId, 'sokosumi_sync', 'skipped');
+      }
+    } catch (err) {
+      log.error({ err }, 'sokosumi_sync_failed');
+      await markStep(instanceId, 'sokosumi_sync', 'failed', errToMessage(err));
+    }
+  }
+
   // ---- 4. intro draft ----
   // Only claim integration access if we actually verified MCPs loaded.
   // Otherwise the welcome message would tell the user "your Gmail is
@@ -174,7 +217,14 @@ export async function runOnboarding(
     const intro = await callHermes(
       row.endpointUrl,
       apiKey,
-      buildIntroDraftPrompt(row.name, row.email, inboxSummary, webSummary, introProviders),
+      buildIntroDraftPrompt(
+        row.name,
+        row.email,
+        inboxSummary,
+        webSummary,
+        sokosumiSummary,
+        introProviders,
+      ),
       4 * 60_000,
     );
     if (intro && intro.trim().length > 30) {
@@ -192,6 +242,33 @@ export async function runOnboarding(
   }
 
   // ---- finalize ----
+  // System-managed scheduled task entry for the daily Sokosumi-workspace
+  // refresh. Idempotent — created once per user, never recreated. Surfaced
+  // via GET /v1/instances/:userId/schedules so Sokosumi's settings panel
+  // can render it alongside any user-scheduled tasks.
+  if (sokosumiConfigured) {
+    const nextRunAt = new Date(Date.now() + 24 * 60 * 60_000);
+    try {
+      await prisma.scheduledTask.upsert({
+        where: { id: `system-sokosumi-sync-${row.id}` },
+        create: {
+          id: `system-sokosumi-sync-${row.id}`,
+          instanceId: row.id,
+          userId: row.userId,
+          name: 'sokosumi-sync',
+          prompt: '[orchestrator] Daily refresh of Sokosumi workspace state (tasks, completed jobs, conversations, credits) into Hermes memory.',
+          cronExpr: '0 9 * * *',
+          timezone: 'UTC',
+          enabled: true,
+          nextRunAt,
+        },
+        update: { enabled: true },
+      });
+    } catch (err) {
+      log.warn({ err }, 'sokosumi_schedule_upsert_failed');
+    }
+  }
+
   await prisma.hermesInstance.update({
     where: { id: instanceId },
     data: { status: 'ready', onboardedAt: new Date(), lastActivityAt: new Date() },
@@ -533,6 +610,7 @@ function buildIntroDraftPrompt(
   email: string | null,
   inboxSummary: string,
   webSummary: string,
+  sokosumiSummary: string,
   providers: string[],
 ): string {
   const firstNameStr = name ? firstName(name) : null;
@@ -561,6 +639,12 @@ Public-web research summary (may be empty):
 ${webSummary.slice(0, 3000) || '(nothing — no public footprint found)'}
 """
 
+Sokosumi workspace snapshot (may be empty — open tasks, completed jobs, \
+recent conversations, credit balance, agents the user has access to):
+"""
+${sokosumiSummary.slice(0, 5000) || '(no Sokosumi workspace data available)'}
+"""
+
 STRUCTURE — follow this exact order. Write the sections as natural prose \
 paragraphs (no section headings in the output), with the capability list \
 as the only bulleted block.
@@ -576,13 +660,16 @@ as the only bulleted block.
    while they sleep.
 
 2. **What you've picked up about them** (1 short paragraph, prose).
-   Synthesize 3–5 specific things you learned from the inbox + web research. \
-   Name actual people, projects, events, deadlines you spotted. This isn't \
-   a status report — it's how you show them you actually *get* their world, \
-   so they'll trust you with real work. If both inbox and web summaries are \
-   empty, keep this honest and brief: "I don't know much about you yet — \
-   tell me what you do and I'll remember it across every future session." \
-   Do NOT invent facts.
+   Synthesize 3–5 specific things you learned from the inbox, web research, \
+   AND their Sokosumi workspace. The workspace data is the highest-signal \
+   source — reference open tasks they're working on, recent completed jobs \
+   (and what those jobs returned, if interesting), agents they use often, \
+   how many credits they have. Name actual people, projects, events, \
+   deadlines you spotted. This isn't a status report — it's how you show \
+   them you actually *get* their world, so they'll trust you with real \
+   work. If all three sources are empty, keep this honest and brief: "I \
+   don't know much about you yet — tell me what you do and I'll remember \
+   it across every future session." Do NOT invent facts.
 
 3. **What you can do, grounded in their context** (markdown bullet list, \
    3–4 items).
@@ -665,4 +752,86 @@ function errToMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
   return String(err);
+}
+
+/**
+ * Render the Sokosumi workspace snapshot as a compact text block suitable
+ * for both (a) writing into Hermes' memory file and (b) including in the
+ * intro_draft prompt as additional context.
+ *
+ * We keep this lightly structured rather than fully prose-summarized to
+ * avoid wasting tokens on a prefix LLM call — Hermes itself will distill
+ * what matters when it writes memory.
+ */
+function formatSokosumiSnapshotForMemory(snapshot: {
+  tasks: unknown[];
+  completedJobs: unknown[];
+  conversations: unknown[];
+  credits: unknown | null;
+  agents: unknown[];
+  fetchedAt: string;
+}): string {
+  const lines: string[] = [];
+  lines.push(`Fetched at: ${snapshot.fetchedAt}`);
+  lines.push('');
+  lines.push(`## Tasks (${snapshot.tasks.length})`);
+  for (const t of snapshot.tasks.slice(0, 30) as Array<{ id?: string; name?: string; status?: string; createdAt?: string }>) {
+    lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'} (id=${t.id ?? '?'}, created ${t.createdAt ?? '?'})`);
+  }
+  lines.push('');
+  lines.push(`## Completed jobs (${snapshot.completedJobs.length})`);
+  for (const j of snapshot.completedJobs.slice(0, 15) as Array<{
+    id?: string;
+    name?: string;
+    agentId?: string;
+    completedAt?: string;
+    result?: string;
+  }>) {
+    const resultSnippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
+    lines.push(`- ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'}, completed ${j.completedAt ?? '?'})`);
+    if (resultSnippet) lines.push(`  → ${resultSnippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+  }
+  lines.push('');
+  lines.push(`## Recent conversations (${snapshot.conversations.length})`);
+  for (const c of snapshot.conversations.slice(0, 5) as Array<{
+    id?: string;
+    title?: string | null;
+    metadata?: { coworker?: string };
+  }>) {
+    lines.push(
+      `- ${c.title ?? '(untitled)'}${c.metadata?.coworker ? ` with ${c.metadata.coworker}` : ''} (id=${c.id ?? '?'})`,
+    );
+  }
+  lines.push('');
+  if (snapshot.credits) {
+    const cr = snapshot.credits as { balance?: number; currency?: string };
+    lines.push(`## Credits: ${cr.balance ?? '?'} ${cr.currency ?? ''}`);
+  }
+  if (snapshot.agents.length > 0) {
+    lines.push('');
+    lines.push(`## Agents available (${snapshot.agents.length})`);
+    for (const a of snapshot.agents.slice(0, 20) as Array<{ id?: string; name?: string; summary?: string }>) {
+      lines.push(`- ${a.name ?? '(unnamed)'}: ${a.summary?.slice(0, 100) ?? ''}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildSokosumiMemoryPrompt(summary: string): string {
+  return `Internal task — your reply is discarded and not user-visible.
+
+I'm syncing your user's Sokosumi workspace state into your memory. Read
+the snapshot below carefully and use your memory tool to save the
+high-signal facts: what the user is currently working on (open tasks),
+what agents they've used recently, anything notable from completed job
+results, and the credit balance.
+
+This snapshot will be refreshed daily; treat it as your view of the user's
+current state, not a one-time read.
+
+<snapshot>
+${summary}
+</snapshot>
+
+Once you've written the relevant facts to memory, reply with just "ok".`;
 }

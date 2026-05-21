@@ -41,12 +41,40 @@ sokosumi.post('/v1/instances/:userId/schedules', async (c) => {
 sokosumi.get('/v1/instances/:userId/schedules', async (c) => {
   const userId = c.req.param('userId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
-  if (!row) return c.json({ error: { message: 'instance not found' } }, 404);
-  const tasks = await prisma.scheduledTask.findMany({
+  if (!row || row.destroyedAt) return c.json({ error: { message: 'instance not found' } }, 404);
+
+  // Orchestrator-managed tasks (system + user-created through our API).
+  const orchTasks = await prisma.scheduledTask.findMany({
     where: { instanceId: row.id },
     orderBy: { createdAt: 'desc' },
   });
-  return c.json({ schedules: tasks.map(toApiShape) });
+
+  // Hermes-managed tasks (created via Hermes' built-in cronjob tool, e.g.
+  // daily-suggestions and anything the user has asked the agent to
+  // schedule mid-conversation). Best-effort — if Hermes' API doesn't
+  // expose its cron list, we return [] and don't block the response.
+  let hermesTasks: Array<{
+    id: string;
+    name: string;
+    cron_expr: string;
+    enabled: boolean;
+    source: 'hermes';
+  }> = [];
+  if (row.endpointUrl && row.apiServerKey) {
+    try {
+      const apiKey = await decryptSecret(row.apiServerKey);
+      hermesTasks = await fetchHermesCronList(row.endpointUrl, apiKey);
+    } catch (err) {
+      logger.debug({ err, userId }, 'hermes_cron_list_fetch_failed');
+    }
+  }
+
+  return c.json({
+    schedules: [
+      ...orchTasks.map((t) => ({ ...toApiShape(t), source: 'orchestrator' as const })),
+      ...hermesTasks,
+    ],
+  });
 });
 
 sokosumi.delete('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
@@ -216,6 +244,77 @@ async function safeJson(c: Context): Promise<unknown> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Probe Hermes' API for its native cron list and normalize the response.
+ *
+ * Hermes' upstream gateway may expose this under one of a few paths
+ * depending on version. We try them in order and return whichever
+ * succeeds; the response shapes are also normalized to {id, name,
+ * cron_expr, enabled, source:"hermes"}.
+ *
+ * Failure modes (returns []):
+ *   - Hermes' API not reachable
+ *   - All probe paths 404
+ *   - Response doesn't parse into the expected shape
+ *
+ * If Hermes doesn't expose a cron list endpoint at all, this returns
+ * an empty array — the orchestrator-side ScheduledTask rows still
+ * show up in the parent response.
+ */
+async function fetchHermesCronList(
+  endpointUrl: string,
+  apiKey: string,
+): Promise<Array<{ id: string; name: string; cron_expr: string; enabled: boolean; source: 'hermes' }>> {
+  const probeUrls = [
+    `${endpointUrl}/v1/cron/jobs`,
+    `${endpointUrl}/v1/cron`,
+    `${endpointUrl}/cron/jobs`,
+  ];
+  for (const url of probeUrls) {
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) continue;
+      const body = (await res.json()) as unknown;
+      const jobs = extractCronJobs(body);
+      if (jobs.length === 0 && !Array.isArray(body)) continue;
+      return jobs.map((j) => ({
+        id: j.id ?? j.name ?? '(unnamed)',
+        name: j.name ?? j.id ?? '(unnamed)',
+        cron_expr: j.cron_expr ?? j.cron ?? j.schedule ?? '',
+        enabled: j.enabled ?? true,
+        source: 'hermes' as const,
+      }));
+    } catch {
+      // try next path
+    }
+  }
+  return [];
+}
+
+interface RawCronJob {
+  id?: string;
+  name?: string;
+  cron_expr?: string;
+  cron?: string;
+  schedule?: string;
+  enabled?: boolean;
+}
+
+function extractCronJobs(body: unknown): RawCronJob[] {
+  if (Array.isArray(body)) return body as RawCronJob[];
+  if (body && typeof body === 'object') {
+    const obj = body as Record<string, unknown>;
+    for (const key of ['jobs', 'cron_jobs', 'cronjobs', 'items']) {
+      const v = obj[key];
+      if (Array.isArray(v)) return v as RawCronJob[];
+    }
+  }
+  return [];
 }
 
 interface AuthOk {
