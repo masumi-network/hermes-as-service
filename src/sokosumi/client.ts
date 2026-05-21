@@ -2,6 +2,34 @@ import { getSokosumiConfig, type SokosumiEnv } from '../config.js';
 import { logger } from '../logger.js';
 
 /**
+ * Test-fixture overrides: when a user provisions via Sokosumi's local-dev
+ * environment, their userId belongs to a local DB that doesn't exist in
+ * preprod or mainnet. To run an end-to-end sokosumi_sync test against
+ * preprod or mainnet, we need to substitute the delegation userId.
+ *
+ * Keys = Sokosumi-sent userId (from POST /v1/instances). Values = per-env
+ * userId to actually use as X-Delegation-User-Id when calling Sokosumi
+ * APIs. Only Sokosumi calls are affected — instance routing, inbox
+ * endpoints, etc. still use the original userId.
+ *
+ * Strictly for known test fixtures. Real users should use a userId that
+ * exists in the env they declare.
+ */
+const SOKOSUMI_USERID_OVERRIDES: Record<string, Partial<Record<SokosumiEnv, string>>> = {
+  // Patrick — local-dev Sokosumi userId → real preprod userId (patrick@nmkr.io)
+  '019e1de5-1c27-711b-9918-da5b601d48b1': {
+    preprod: '993Sp1dOvyn4CFCEHIQPu1vn4ZVI0Dh4',
+  },
+};
+
+function resolveSokosumiUserId(userId: string, env: SokosumiEnv | null | undefined): string {
+  const map = SOKOSUMI_USERID_OVERRIDES[userId];
+  if (!map) return userId;
+  const effective: SokosumiEnv = env ?? 'mainnet';
+  return map[effective] ?? userId;
+}
+
+/**
  * Thin client for Sokosumi's v1 API.
  *
  * Auth model: one org-wide coworker API key (held in Railway env), plus
@@ -17,11 +45,20 @@ import { logger } from '../logger.js';
  * land in Phase C with a user-consent flow.
  */
 export class SokosumiClient {
+  private readonly userId: string;
   constructor(
-    private readonly userId: string,
+    rawUserId: string,
     private readonly env: SokosumiEnv | null | undefined,
     private readonly organizationId?: string,
-  ) {}
+  ) {
+    this.userId = resolveSokosumiUserId(rawUserId, env);
+    if (this.userId !== rawUserId) {
+      logger.info(
+        { rawUserId, effectiveUserId: this.userId, env },
+        'sokosumi_userid_override_applied',
+      );
+    }
+  }
 
   /** Returns true if a coworker API key + base URL are configured for the
    *  given env. Callers should gracefully skip if false. */
