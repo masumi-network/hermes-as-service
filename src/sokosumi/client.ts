@@ -90,8 +90,31 @@ export class SokosumiClient {
   async listAgents(opts: { limit?: number } = {}): Promise<unknown[]> {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 50));
-    const body = await this.get<{ items?: unknown[]; agents?: unknown[] }>(`/agents?${qs}`);
-    return body.items ?? body.agents ?? [];
+    const body = await this.get<{ items?: unknown[]; agents?: unknown[]; data?: unknown[] }>(
+      `/agents?${qs}`,
+    );
+    return body.items ?? body.agents ?? body.data ?? [];
+  }
+
+  // ---------- organizations ----------
+
+  /**
+   * List every organization this user belongs to. Sokosumi users live
+   * across multiple orgs but Hermes is per-user (not per-org), so we
+   * iterate orgs and aggregate workspace data into a single Hermes
+   * memory.
+   */
+  async listOrganizations(): Promise<Array<{ id: string; name?: string; slug?: string }>> {
+    const body = await this.get<{ data?: Array<{ id: string; name?: string; slug?: string }> }>(
+      `/users/${encodeURIComponent(this.userId)}/organizations`,
+    );
+    return body.data ?? [];
+  }
+
+  /** Withdraws an org-context-bound copy of this client. Subsequent calls
+   *  attach `X-Delegation-Organization-Id`. */
+  withOrganization(organizationId: string): SokosumiClient {
+    return new SokosumiClient(this.userId, organizationId);
   }
 
   // ---------- internals ----------
@@ -128,52 +151,84 @@ export class SokosumiClient {
  * Throttle / quota concerns: we make 5 parallel requests per user. Sokosumi
  * is the source of truth and will rate-limit if needed; we just propagate.
  */
-export interface WorkspaceSnapshot {
+/**
+ * A Sokosumi user can belong to multiple organizations. Tasks, jobs, and
+ * conversations are org-scoped; the user's credits + the global agent
+ * catalog are not. Hermes is per-user, so we aggregate across every org
+ * the user is a member of.
+ */
+export interface OrgWorkspace {
+  organization: { id: string; name?: string; slug?: string };
   tasks: unknown[];
   completedJobs: unknown[];
   conversations: unknown[];
+}
+
+export interface WorkspaceSnapshot {
+  /** One entry per org the user belongs to. May be empty for users with
+   *  no org memberships. */
+  organizations: OrgWorkspace[];
+  /** Credits are user-level, not org-scoped. */
   credits: unknown | null;
+  /** Global agent catalog — same for every user. */
   agents: unknown[];
   fetchedAt: string;
 }
 
 export async function fetchWorkspaceSnapshot(
   userId: string,
-  organizationId?: string,
 ): Promise<WorkspaceSnapshot | null> {
   if (!SokosumiClient.isConfigured()) {
     logger.warn({ userId }, 'sokosumi_sync_skipped_no_api_key');
     return null;
   }
-  const client = new SokosumiClient(userId, organizationId);
+  const baseClient = new SokosumiClient(userId);
 
-  const [tasks, completedJobs, conversations, credits, agents] = await Promise.all([
-    client.listTasks({ limit: 100, scope: 'workspace' }).catch((err) => {
-      logger.warn({ err, userId, endpoint: '/tasks' }, 'sokosumi_partial_failure');
-      return [] as unknown[];
+  // First: list the user's orgs. Without this we can't pull org-scoped data.
+  const orgs = await baseClient.listOrganizations().catch((err) => {
+    logger.warn({ err, userId }, 'sokosumi_list_orgs_failed');
+    return [] as Array<{ id: string; name?: string; slug?: string }>;
+  });
+
+  // Per-org pulls — tasks, completed jobs, conversations. Run in parallel
+  // across orgs (typically 1–3 per user). Cap so we don't fan out badly
+  // for users with many orgs.
+  const orgsToFetch = orgs.slice(0, 5);
+  const orgWorkspaces = await Promise.all(
+    orgsToFetch.map(async (org) => {
+      const orgClient = baseClient.withOrganization(org.id);
+      const [tasks, completedJobs, conversations] = await Promise.all([
+        orgClient.listTasks({ limit: 50, scope: 'workspace' }).catch((err) => {
+          logger.warn({ err, userId, orgId: org.id, endpoint: '/tasks' }, 'sokosumi_partial_failure');
+          return [] as unknown[];
+        }),
+        orgClient.listJobs({ status: 'COMPLETED', limit: 15 }).catch((err) => {
+          logger.warn({ err, userId, orgId: org.id, endpoint: '/jobs' }, 'sokosumi_partial_failure');
+          return [] as unknown[];
+        }),
+        orgClient.listConversations({ limit: 5 }).catch((err) => {
+          logger.warn({ err, userId, orgId: org.id, endpoint: '/conversations' }, 'sokosumi_partial_failure');
+          return [] as unknown[];
+        }),
+      ]);
+      return { organization: org, tasks, completedJobs, conversations };
     }),
-    client.listJobs({ status: 'COMPLETED', limit: 20 }).catch((err) => {
-      logger.warn({ err, userId, endpoint: '/jobs' }, 'sokosumi_partial_failure');
-      return [] as unknown[];
-    }),
-    client.listConversations({ limit: 5 }).catch((err) => {
-      logger.warn({ err, userId, endpoint: '/conversations' }, 'sokosumi_partial_failure');
-      return [] as unknown[];
-    }),
-    client.getCredits().catch((err) => {
+  );
+
+  // User-level pulls.
+  const [credits, agents] = await Promise.all([
+    baseClient.getCredits().catch((err) => {
       logger.warn({ err, userId, endpoint: '/credits' }, 'sokosumi_partial_failure');
       return null;
     }),
-    client.listAgents({ limit: 50 }).catch((err) => {
+    baseClient.listAgents({ limit: 50 }).catch((err) => {
       logger.warn({ err, userId, endpoint: '/agents' }, 'sokosumi_partial_failure');
       return [] as unknown[];
     }),
   ]);
 
   return {
-    tasks,
-    completedJobs,
-    conversations,
+    organizations: orgWorkspaces,
     credits,
     agents,
     fetchedAt: new Date().toISOString(),

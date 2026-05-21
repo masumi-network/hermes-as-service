@@ -764,53 +764,78 @@ function errToMessage(err: unknown): string {
  * what matters when it writes memory.
  */
 function formatSokosumiSnapshotForMemory(snapshot: {
-  tasks: unknown[];
-  completedJobs: unknown[];
-  conversations: unknown[];
+  organizations: Array<{
+    organization: { id: string; name?: string; slug?: string };
+    tasks: unknown[];
+    completedJobs: unknown[];
+    conversations: unknown[];
+  }>;
   credits: unknown | null;
   agents: unknown[];
   fetchedAt: string;
 }): string {
   const lines: string[] = [];
   lines.push(`Fetched at: ${snapshot.fetchedAt}`);
+  lines.push(`Organizations: ${snapshot.organizations.length}`);
   lines.push('');
-  lines.push(`## Tasks (${snapshot.tasks.length})`);
-  for (const t of snapshot.tasks.slice(0, 30) as Array<{ id?: string; name?: string; status?: string; createdAt?: string }>) {
-    lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'} (id=${t.id ?? '?'}, created ${t.createdAt ?? '?'})`);
+
+  for (const ws of snapshot.organizations) {
+    const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
+    lines.push(`# Org: ${orgLabel}`);
+    lines.push('');
+
+    lines.push(`## Tasks (${ws.tasks.length})`);
+    for (const t of ws.tasks.slice(0, 20) as Array<{
+      id?: string;
+      name?: string;
+      status?: string;
+      createdAt?: string;
+    }>) {
+      lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'} (id=${t.id ?? '?'})`);
+    }
+    lines.push('');
+
+    lines.push(`## Completed jobs (${ws.completedJobs.length})`);
+    for (const j of ws.completedJobs.slice(0, 10) as Array<{
+      id?: string;
+      name?: string;
+      agentId?: string;
+      completedAt?: string;
+      result?: string;
+    }>) {
+      const resultSnippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
+      lines.push(`- ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'}, ${j.completedAt ?? '?'})`);
+      if (resultSnippet) {
+        lines.push(`  → ${resultSnippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+      }
+    }
+    lines.push('');
+
+    lines.push(`## Recent conversations (${ws.conversations.length})`);
+    for (const c of ws.conversations.slice(0, 5) as Array<{
+      id?: string;
+      title?: string | null;
+      metadata?: { coworker?: string };
+    }>) {
+      lines.push(
+        `- ${c.title ?? '(untitled)'}${c.metadata?.coworker ? ` with ${c.metadata.coworker}` : ''}`,
+      );
+    }
+    lines.push('');
   }
-  lines.push('');
-  lines.push(`## Completed jobs (${snapshot.completedJobs.length})`);
-  for (const j of snapshot.completedJobs.slice(0, 15) as Array<{
-    id?: string;
-    name?: string;
-    agentId?: string;
-    completedAt?: string;
-    result?: string;
-  }>) {
-    const resultSnippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
-    lines.push(`- ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'}, completed ${j.completedAt ?? '?'})`);
-    if (resultSnippet) lines.push(`  → ${resultSnippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
-  }
-  lines.push('');
-  lines.push(`## Recent conversations (${snapshot.conversations.length})`);
-  for (const c of snapshot.conversations.slice(0, 5) as Array<{
-    id?: string;
-    title?: string | null;
-    metadata?: { coworker?: string };
-  }>) {
-    lines.push(
-      `- ${c.title ?? '(untitled)'}${c.metadata?.coworker ? ` with ${c.metadata.coworker}` : ''} (id=${c.id ?? '?'})`,
-    );
-  }
-  lines.push('');
+
   if (snapshot.credits) {
     const cr = snapshot.credits as { balance?: number; currency?: string };
-    lines.push(`## Credits: ${cr.balance ?? '?'} ${cr.currency ?? ''}`);
+    lines.push(`## Credits (user-level, all orgs): ${cr.balance ?? '?'} ${cr.currency ?? ''}`);
   }
   if (snapshot.agents.length > 0) {
     lines.push('');
-    lines.push(`## Agents available (${snapshot.agents.length})`);
-    for (const a of snapshot.agents.slice(0, 20) as Array<{ id?: string; name?: string; summary?: string }>) {
+    lines.push(`## Agents available (global, ${snapshot.agents.length})`);
+    for (const a of snapshot.agents.slice(0, 20) as Array<{
+      id?: string;
+      name?: string;
+      summary?: string;
+    }>) {
       lines.push(`- ${a.name ?? '(unnamed)'}: ${a.summary?.slice(0, 100) ?? ''}`);
     }
   }

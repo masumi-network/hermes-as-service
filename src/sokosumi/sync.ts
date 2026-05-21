@@ -76,7 +76,14 @@ Reply with just "ok".`;
     event: 'onboarding_step',
     detail: { step: 'sokosumi_sync', status: 'done', source: 'cron' },
   });
-  log.info({ tasks: snapshot.tasks.length, completedJobs: snapshot.completedJobs.length }, 'workspace sync done');
+  log.info(
+    {
+      orgs: snapshot.organizations.length,
+      totalTasks: snapshot.organizations.reduce((s, o) => s + o.tasks.length, 0),
+      totalCompletedJobs: snapshot.organizations.reduce((s, o) => s + o.completedJobs.length, 0),
+    },
+    'workspace sync done',
+  );
   return true;
 }
 
@@ -117,37 +124,43 @@ export async function runSokosumiDailySweep(): Promise<{ scanned: number; synced
 // ---------- helpers ----------
 
 function formatSnapshotForMemory(snapshot: {
-  tasks: unknown[];
-  completedJobs: unknown[];
-  conversations: unknown[];
+  organizations: Array<{
+    organization: { id: string; name?: string; slug?: string };
+    tasks: unknown[];
+    completedJobs: unknown[];
+    conversations: unknown[];
+  }>;
   credits: unknown | null;
   agents: unknown[];
   fetchedAt: string;
 }): string {
   const lines: string[] = [];
   lines.push(`Fetched at: ${snapshot.fetchedAt}`);
+  lines.push(`Organizations: ${snapshot.organizations.length}`);
   lines.push('');
-  lines.push(`## Tasks (${snapshot.tasks.length})`);
-  for (const t of snapshot.tasks.slice(0, 30) as Array<{ id?: string; name?: string; status?: string }>) {
-    lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'} (id=${t.id ?? '?'})`);
-  }
-  lines.push('');
-  lines.push(`## Completed jobs (${snapshot.completedJobs.length})`);
-  for (const j of snapshot.completedJobs.slice(0, 15) as Array<{
-    id?: string;
-    name?: string;
-    agentId?: string;
-    completedAt?: string;
-    result?: string;
-  }>) {
-    const resultSnippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
-    lines.push(`- ${j.name ?? '(unnamed)'} (agent=${j.agentId ?? '?'}, ${j.completedAt ?? '?'})`);
-    if (resultSnippet) lines.push(`  → ${resultSnippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+  for (const ws of snapshot.organizations) {
+    const orgLabel = `${ws.organization.name ?? ws.organization.slug ?? '(unnamed)'} (id=${ws.organization.id})`;
+    lines.push(`# Org: ${orgLabel}`);
+    lines.push(`Tasks: ${ws.tasks.length}`);
+    for (const t of ws.tasks.slice(0, 20) as Array<{ id?: string; name?: string; status?: string }>) {
+      lines.push(`- [${t.status ?? '?'}] ${t.name ?? '(unnamed)'}`);
+    }
+    lines.push(`Completed jobs: ${ws.completedJobs.length}`);
+    for (const j of ws.completedJobs.slice(0, 10) as Array<{
+      name?: string;
+      agentId?: string;
+      completedAt?: string;
+      result?: string;
+    }>) {
+      const snippet = (j.result ?? '').slice(0, 400).replace(/\s+/g, ' ');
+      lines.push(`- ${j.name ?? '(unnamed)'} (${j.completedAt ?? '?'})`);
+      if (snippet) lines.push(`  → ${snippet}${(j.result ?? '').length > 400 ? '…' : ''}`);
+    }
+    lines.push('');
   }
   if (snapshot.credits) {
     const cr = snapshot.credits as { balance?: number };
-    lines.push('');
-    lines.push(`## Credits: ${cr.balance ?? '?'}`);
+    lines.push(`Credits (user-level): ${cr.balance ?? '?'}`);
   }
   return lines.join('\n');
 }
