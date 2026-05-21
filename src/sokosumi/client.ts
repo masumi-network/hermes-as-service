@@ -35,10 +35,10 @@ export class SokosumiClient {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 100));
     if (opts.scope) qs.set('scope', opts.scope);
-    const body = await this.get<{ items?: unknown[]; tasks?: unknown[] }>(`/tasks?${qs}`);
-    // Defensive: accept either {items} or {tasks} envelope shape — the spec
-    // uses different keys on different endpoints.
-    return body.items ?? body.tasks ?? [];
+    const body = await this.get<{ items?: unknown[]; tasks?: unknown[]; data?: unknown[] }>(
+      `/tasks?${qs}`,
+    );
+    return body.items ?? body.tasks ?? body.data ?? [];
   }
 
   // ---------- jobs ----------
@@ -54,8 +54,10 @@ export class SokosumiClient {
     if (opts.agentId) qs.set('agentId', opts.agentId);
     qs.set('limit', String(opts.limit ?? 50));
     if (opts.scope) qs.set('scope', opts.scope);
-    const body = await this.get<{ items?: unknown[]; jobs?: unknown[] }>(`/jobs?${qs}`);
-    return body.items ?? body.jobs ?? [];
+    const body = await this.get<{ items?: unknown[]; jobs?: unknown[]; data?: unknown[] }>(
+      `/jobs?${qs}`,
+    );
+    return body.items ?? body.jobs ?? body.data ?? [];
   }
 
   async getJob(id: string): Promise<unknown> {
@@ -67,19 +69,19 @@ export class SokosumiClient {
   async listConversations(opts: { limit?: number } = {}): Promise<unknown[]> {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set('limit', String(opts.limit));
-    const body = await this.get<{ items?: unknown[]; conversations?: unknown[] }>(
+    const body = await this.get<{ items?: unknown[]; conversations?: unknown[]; data?: unknown[] }>(
       `/conversations?${qs}`,
     );
-    return body.items ?? body.conversations ?? [];
+    return body.items ?? body.conversations ?? body.data ?? [];
   }
 
   async getConversationMessages(id: string, opts: { limit?: number } = {}): Promise<unknown[]> {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set('limit', String(opts.limit));
-    const body = await this.get<{ items?: unknown[]; messages?: unknown[] }>(
+    const body = await this.get<{ items?: unknown[]; messages?: unknown[]; data?: unknown[] }>(
       `/conversations/${encodeURIComponent(id)}/messages?${qs}`,
     );
-    return body.items ?? body.messages ?? [];
+    return body.items ?? body.messages ?? body.data ?? [];
   }
 
   // ---------- credits + meta ----------

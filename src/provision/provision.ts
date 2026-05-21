@@ -28,6 +28,8 @@ export interface InstanceView {
   onboardedAt: Date | null;
   welcomeMessage: string | null;
   welcomeKind: string | null;
+  lastSokosumiSyncAt: Date | null;
+  sokosumiEnv: string | null;
 }
 
 /**
@@ -411,6 +413,8 @@ function toView(row: {
   onboardedAt: Date | null;
   welcomeMessage: string | null;
   welcomeKind: string | null;
+  lastSokosumiSyncAt: Date | null;
+  sokosumiEnv: string | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -421,6 +425,8 @@ function toView(row: {
     onboardedAt: row.onboardedAt,
     welcomeMessage: row.welcomeMessage,
     welcomeKind: row.welcomeKind,
+    lastSokosumiSyncAt: row.lastSokosumiSyncAt,
+    sokosumiEnv: row.sokosumiEnv,
   };
 }
 

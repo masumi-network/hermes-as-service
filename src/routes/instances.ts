@@ -99,6 +99,8 @@ router.get('/v1/instances/:userId', async (c) => {
       onboardedAt: view.onboardedAt?.toISOString() ?? null,
       welcomeMessage: view.welcomeMessage,
       welcomeKind: view.welcomeKind,
+      lastSokosumiSyncAt: view.lastSokosumiSyncAt?.toISOString() ?? null,
+      sokosumiEnv: view.sokosumiEnv,
       transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,
