@@ -117,8 +117,14 @@ async function forward(c: Context): Promise<Response> {
   // bearer or arbitrary headers from Hermes to Composio.
   const cfg = loadConfig();
   const upstreamHeaders: Record<string, string> = {};
-  // Composio: x-api-key. Heuristic matches buildMcpServersJsonForUser.
-  if (cfg.COMPOSIO_API_KEY && /(composio\.dev|composio\.ai)/i.test(upstreamUrl)) {
+  // Composio: x-api-key. We add the org-wide Composio API key whenever
+  // the upstream MCP URL looks Composio-hosted. Composio uses several
+  // hosts: apollo.composio.dev, backend.composio.dev, mcp.composio.dev,
+  // composio.ai, and per-server Vercel-hosted URLs like
+  // apollo-<id>-composio.vercel.app. The older regex missed the Vercel
+  // variant, which caused silent 401s on tools/list (Composio returned
+  // 401 with empty body → our filter blew up → inbox_scan stalled).
+  if (cfg.COMPOSIO_API_KEY && isComposioUpstream(upstreamUrl)) {
     upstreamHeaders['x-api-key'] = cfg.COMPOSIO_API_KEY;
   }
   // Pass through MCP-relevant headers.
@@ -139,6 +145,33 @@ async function forward(c: Context): Promise<Response> {
   // response when the integration is read-only.
   const isToolsList = isToolsListRequest(bodyText);
   const isReadOnly = integration.mode !== 'write'; // default to read
+
+  // Defense-in-depth: even if a write-verb tool name leaks into Hermes'
+  // catalog (model hallucination, prompt injection, cached state from a
+  // write-mode session), refuse to forward the call at the proxy layer.
+  // Composio's OAuth scope is the hard backstop; this is the soft one.
+  if (isReadOnly) {
+    const blockedName = isToolsCallToWriteVerb(bodyText);
+    if (blockedName) {
+      logger.warn(
+        { instanceId, provider, toolName: blockedName },
+        'mcp_proxy_blocked_write_tool_call',
+      );
+      return jsonResponse(200, {
+        jsonrpc: '2.0',
+        id: extractRpcId(bodyText),
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: `Tool '${blockedName}' is blocked by the read-only integration mode. Ask the user to switch the ${provider} integration to write mode in Sokosumi settings if they want this action.`,
+            },
+          ],
+          isError: true,
+        },
+      });
+    }
+  }
 
   let upstream: Response;
   try {
@@ -179,6 +212,30 @@ async function forward(c: Context): Promise<Response> {
 
   // Default: stream response back unchanged.
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+/**
+ * True if the upstream URL belongs to a Composio-hosted MCP server.
+ * Composio uses several host patterns; this list mirrors what their docs
+ * publish today. Adding a new one is cheap — better to be inclusive than
+ * silently drop the auth header.
+ */
+export function isComposioUpstream(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host.endsWith('.composio.dev') ||
+      host === 'composio.dev' ||
+      host.endsWith('.composio.ai') ||
+      host === 'composio.ai' ||
+      // Per-server Vercel-hosted URLs: apollo-<randomId>-composio.vercel.app
+      // and similar variants documented in Composio's troubleshooting docs.
+      /composio.*\.vercel\.app$/.test(host) ||
+      /^apollo[-.].*\.vercel\.app$/.test(host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -243,6 +300,37 @@ function isToolsListRequest(bodyText: string | undefined): boolean {
     return parsed?.method === 'tools/list';
   } catch {
     return false;
+  }
+}
+
+/**
+ * If the body is a `tools/call` JSON-RPC request and the tool name
+ * matches a write verb, return the tool name (so we can block + log it).
+ * Otherwise null. Treats parse failures as null — pass through.
+ */
+export function isToolsCallToWriteVerb(bodyText: string | undefined): string | null {
+  if (!bodyText) return null;
+  try {
+    const parsed = JSON.parse(bodyText) as {
+      method?: string;
+      params?: { name?: string };
+    };
+    if (parsed?.method !== 'tools/call') return null;
+    const name = parsed?.params?.name;
+    if (typeof name !== 'string' || !name) return null;
+    return isWriteToolName(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractRpcId(bodyText: string | undefined): number | string | null {
+  if (!bodyText) return null;
+  try {
+    const parsed = JSON.parse(bodyText) as { id?: number | string | null };
+    return parsed?.id ?? null;
+  } catch {
+    return null;
   }
 }
 

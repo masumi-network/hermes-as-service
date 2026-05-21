@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { handleToolsListResponse } from '../src/routes/mcp-proxy.js';
+import {
+  handleToolsListResponse,
+  isComposioUpstream,
+  isToolsCallToWriteVerb,
+} from '../src/routes/mcp-proxy.js';
 import { resolveSokosumiTarget } from '../src/sokosumi/client.js';
 
 describe('handleToolsListResponse — read-only filter for MCP tools/list', () => {
@@ -88,6 +92,65 @@ describe('handleToolsListResponse — read-only filter for MCP tools/list', () =
     expect(out.action).toBe('filtered');
     const parsed = JSON.parse(out.body) as { error: { code: number } };
     expect(parsed.error.code).toBe(-32000);
+  });
+});
+
+describe('isComposioUpstream — auth-header heuristic', () => {
+  it('matches apollo.composio.dev URLs', () => {
+    expect(isComposioUpstream('https://apollo.composio.dev/v3/mcp/abc?user_id=u1')).toBe(true);
+  });
+  it('matches backend.composio.dev URLs', () => {
+    expect(isComposioUpstream('https://backend.composio.dev/v3/mcp/abc?user_id=u1')).toBe(true);
+  });
+  it('matches mcp.composio.dev URLs', () => {
+    expect(isComposioUpstream('https://mcp.composio.dev/v3/mcp/abc')).toBe(true);
+  });
+  it('matches composio.ai URLs', () => {
+    expect(isComposioUpstream('https://api.composio.ai/v3/mcp/abc')).toBe(true);
+  });
+  it('matches Vercel-hosted Composio MCP URLs (apollo-<id>-composio.vercel.app)', () => {
+    // This was the gap that caused silent 401s before the fix.
+    expect(
+      isComposioUpstream('https://apollo-9k7vy3-composio.vercel.app/v3/mcp/abc?user_id=u1'),
+    ).toBe(true);
+  });
+  it('matches generic composio-<x>.vercel.app pattern', () => {
+    expect(isComposioUpstream('https://composio-prod.vercel.app/v3/mcp/abc')).toBe(true);
+  });
+  it('does NOT match unrelated hosts', () => {
+    expect(isComposioUpstream('https://api.openai.com/v1/foo')).toBe(false);
+    expect(isComposioUpstream('https://random.vercel.app/v3/mcp/abc')).toBe(false);
+    expect(isComposioUpstream('not-a-url')).toBe(false);
+  });
+});
+
+describe('isToolsCallToWriteVerb — defense-in-depth block', () => {
+  const rpc = (method: string, name?: string) =>
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: name ? { name } : {} });
+
+  it('flags tools/call for a write verb tool', () => {
+    expect(isToolsCallToWriteVerb(rpc('tools/call', 'GMAIL_SEND_EMAIL'))).toBe('GMAIL_SEND_EMAIL');
+    expect(isToolsCallToWriteVerb(rpc('tools/call', 'GMAIL_DELETE_MESSAGE'))).toBe(
+      'GMAIL_DELETE_MESSAGE',
+    );
+    expect(isToolsCallToWriteVerb(rpc('tools/call', 'OUTLOOK_REPLY_EMAIL'))).toBe(
+      'OUTLOOK_REPLY_EMAIL',
+    );
+  });
+
+  it('does NOT flag read-tool tools/call', () => {
+    expect(isToolsCallToWriteVerb(rpc('tools/call', 'GMAIL_FETCH_EMAILS'))).toBeNull();
+    expect(isToolsCallToWriteVerb(rpc('tools/call', 'GMAIL_LIST_LABELS'))).toBeNull();
+  });
+
+  it('does NOT flag tools/list (only tools/call is gated here)', () => {
+    expect(isToolsCallToWriteVerb(rpc('tools/list'))).toBeNull();
+  });
+
+  it('handles missing/garbage body gracefully', () => {
+    expect(isToolsCallToWriteVerb(undefined)).toBeNull();
+    expect(isToolsCallToWriteVerb('')).toBeNull();
+    expect(isToolsCallToWriteVerb('not json')).toBeNull();
   });
 });
 
