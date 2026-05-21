@@ -555,17 +555,20 @@ deliver to "local". Prompt content:
 
    <prompt>
    Daily brief for ${name ?? 'the user'}. Pull together what's actually \
-   worth their attention this morning. Use memory + your tools as needed.
+   worth their attention this morning. Use memory + your sokosumi_* and \
+   mail/calendar tools as needed.
 
    Structure the brief like this — concise prose, no markdown headings, \
    skip any section that has nothing real to say:
 
    1. One-sentence overview: "Here's the shape of today: ..."
-   2. Mail since yesterday — highlight 2-4 threads that need their \
+   2. Sokosumi workspace — any tasks with status changes, jobs that \
+      completed overnight (call sokosumi_list_jobs with status=COMPLETED \
+      to check), anything stalled or needing input. Per item, one-sentence \
+      summary of the result + whether it needs the user to read/act.
+   3. Mail since yesterday — highlight 2-4 threads that need their \
       attention (sender, subject, one-line gist + suggested action). \
       Use your Gmail/Outlook tools if connected.
-   3. Sokosumi jobs that completed overnight — for each, one-sentence \
-      summary of the result + whether it needs the user to read/act.
    4. Today's calendar — only mention meetings that need prep or that \
       they might forget. Skip routine recurring blocks.
    5. One concrete next action — the single most valuable thing they \
@@ -580,7 +583,27 @@ deliver to "local". Prompt content:
    honestly in two sentences and stop. Don't pad.
    </prompt>
 
-Run the cronjob.create call now. Once created, reply "ok".`;
+Run the cronjob.create call now.
+
+3. **Register the schedule with the orchestrator** — immediately after \
+the cronjob.create call succeeds, make this HTTP request so the user can \
+see the schedule in their Sokosumi settings panel:
+
+   POST \${ORCHESTRATOR_BASE}/v1/llm/\${INSTANCE_ID}/schedules
+   Authorization: Bearer \${ORCHESTRATOR_OUTBOX_TOKEN}
+   Content-Type: application/json
+   Body: {
+     "name": "daily-brief",
+     "prompt": "Daily morning brief — Sokosumi changes, mail, calendar, next action.",
+     "cron_expr": "0 7 * * *",
+     "timezone": "UTC",
+     "enabled": true
+   }
+
+These env vars are in your environment. If the request fails, the cronjob \
+still runs — this is for UI visibility only.
+
+Once both steps are done, reply "ok".`;
 }
 
 function buildInboxScanPrompt(providers: string[], name: string | null): string {
