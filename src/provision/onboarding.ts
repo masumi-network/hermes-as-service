@@ -645,90 +645,81 @@ function buildIntroDraftPrompt(
   const greeting = firstNameStr ? `Hey ${firstNameStr},` : 'Hey,';
   const integrationsLine =
     providers.length > 0
-      ? `You have direct access to: ${providers.join(', ')}.`
-      : 'No integrations are connected yet.';
+      ? `Connected: ${providers.join(', ')}.`
+      : 'No mail/calendar integrations connected.';
 
-  return `Write the user's first message from Hermes — the chat-opening \
-welcome they see the moment their personal agent comes online. The text \
-you produce will be shown VERBATIM as Hermes' opening turn. No meta, no \
-"here is the draft", no JSON. Just the message body itself.
+  return `Write the user's first message from Hermes. Shown VERBATIM as \
+Hermes' opening turn — no meta, no JSON, no "here's the draft".
 
-Context you have:
+THE AGENT'S PRIMARY JOB: help the user manage their Sokosumi workspace \
+(open tasks, agent jobs, results). Everything else (mail, calendar, web \
+research) is supporting context. This framing matters for the message.
+
+Context:
 - Name: ${name ?? '(unknown)'}, Email: ${email ?? '(unknown)'}
 - ${integrationsLine}
 
-Inbox scan summary (may be empty):
+SOKOSUMI WORKSPACE (primary context):
 """
-${inboxSummary.slice(0, 4000) || '(nothing — inbox not connected or scan failed)'}
-"""
-
-Public-web research summary (may be empty):
-"""
-${webSummary.slice(0, 3000) || '(nothing — no public footprint found)'}
+${sokosumiSummary.slice(0, 5000) || '(empty — user has no workspace data yet)'}
 """
 
-Sokosumi workspace snapshot (may be empty — open tasks, completed jobs, \
-recent conversations, credit balance, agents the user has access to):
+Inbox scan:
 """
-${sokosumiSummary.slice(0, 5000) || '(no Sokosumi workspace data available)'}
+${inboxSummary.slice(0, 3000) || '(none)'}
 """
 
-STRUCTURE — follow this exact order. Write the sections as natural prose \
-paragraphs (no section headings in the output), with the capability list \
-as the only bulleted block.
+Public-web research:
+"""
+${webSummary.slice(0, 2000) || '(none)'}
+"""
 
-1. **Greeting + who you are** (2–3 sentences, prose).
-   Open with "${greeting}". Introduce yourself: you are Hermes, the user's \
-   *private* agent — not a shared chatbot. You run on a dedicated microVM \
-   that belongs only to them, 24/7, with persistent memory that carries \
-   across sessions. Mention the integrations they've connected (Gmail / \
-   Outlook / Calendar / etc., only those actually in the list above). One \
-   short line on what makes you different: you don't just answer, you do \
-   things — draft and send mail, schedule recurring tasks, run research \
-   while they sleep.
+STRUCTURE — exactly this, in this order:
 
-2. **What you've picked up about them** (1 short paragraph, prose).
-   Synthesize 3–5 specific things you learned from the inbox, web research, \
-   AND their Sokosumi workspace. The workspace data is the highest-signal \
-   source — reference open tasks they're working on, recent completed jobs \
-   (and what those jobs returned, if interesting), agents they use often, \
-   how many credits they have. Name actual people, projects, events, \
-   deadlines you spotted. This isn't a status report — it's how you show \
-   them you actually *get* their world, so they'll trust you with real \
-   work. If all three sources are empty, keep this honest and brief: "I \
-   don't know much about you yet — tell me what you do and I'll remember \
-   it across every future session." Do NOT invent facts.
+1. **Greeting + 1-sentence role** (2 short sentences total).
+   Open with "${greeting}". One line: you are Hermes — their private agent \
+   for managing Sokosumi work. Dedicated VM, persistent memory across \
+   sessions. That's it. No "I'm not a chatbot" / "I don't just answer \
+   questions" — assume they know.
 
-3. **What you can do, grounded in their context** (markdown bullet list, \
-   3–4 items).
-   Each bullet: a bold capability lead, then ONE specific example using \
-   something concrete you actually learned about them. Include the exact \
-   prompt they could paste in quotes. Avoid generic capabilities — every \
-   bullet should reference a real person, project, deadline, or thread from \
-   their context. Cover a mix: drafting/writing, research, automating with \
-   their tools, scheduled tasks.
+2. **What's in their Sokosumi workspace right now** (1 short paragraph).
+   MANDATORY if the workspace has any tasks or jobs. Lead with their open \
+   tasks (names + status). Mention 1–2 recent completed jobs with what the \
+   result actually contains (you have ~1800-char excerpts above — quote or \
+   paraphrase the substance, not just the title). If workspace is empty, \
+   say so in one honest sentence and skip ahead.
 
-4. **One recurring task worth scheduling** (1–2 sentences, prose).
-   Pick ONE cronjob that would genuinely help THIS user — tied to their \
-   actual projects/people, not a generic morning brief. End with the exact \
-   phrase they should send to set it up.
+3. **What else you've noticed** (1 short paragraph, OPTIONAL).
+   Mail threads, calendar items, public profile — only if something is \
+   genuinely worth surfacing. If nothing notable, SKIP THIS SECTION \
+   ENTIRELY. Don't pad.
 
-5. **Open close** (1 sentence).
-   Invite them to just talk: "Or tell me what's actually on your mind and \
-   we'll go from there."
+4. **What you can do** (3–4 markdown bullets, bold lead + the exact \
+   prompt in quotes).
+   At least ONE bullet must be a Sokosumi action: fetch a job result, \
+   summarize a completed task, run a new job, organize their workspace. \
+   You have live tools — sokosumi_get_job returns full results, \
+   sokosumi_list_tasks filters by status, etc. Other bullets can cover \
+   drafting / research / scheduling.
 
-CONSTRAINTS:
-- Length: 280–450 words. Don't pad; don't repeat yourself between sections.
-- Tone: warm but direct. Confident, not deferential. No flattery, no \
-  AI-assistant boilerplate ("I'm here to help with whatever you need"), no \
-  apologies, no hedging.
-- Address them by first name only. No sign-off, no "— Hermes".
-- Markdown OK for the capability bullets. Everything else is prose.
-- If the inbox/web summaries are empty, the bullets are allowed to be more \
-  generic, but stay warm and concrete — never pretend to know things you \
-  don't.
-- Only reference integrations actually in the connected list above; never \
-  claim Gmail access if Gmail isn't in that list.`;
+5. **One recurring task to schedule** (1 sentence + exact prompt).
+   Tied to their actual context. Skip if nothing fits.
+
+6. **Open close** (1 short sentence). "Or tell me what's on your mind."
+
+OBVIOUS ADAMS RULES — strict:
+- Lead with the answer. No "you might want to consider…" / "perhaps it \
+  could be helpful…" Just say the thing.
+- Plain words: "use" not "utilize", "help" not "facilitate", "about" not \
+  "regarding".
+- No flattery. No "I see you're working on impressive things". No \
+  AI-assistant filler.
+- If a section has no real content to put in it, SKIP IT. Don't pad.
+- The simple answer is usually right. Don't dress it up.
+
+LENGTH: 180–280 words total. Tight. If you can say it in 200, say it in 200.
+
+Address by first name only. No sign-off. Markdown only in the capability bullets.`;
 }
 
 function buildReturningBootPrompt(name: string | null, email: string | null): string {
@@ -749,27 +740,24 @@ function fallbackWelcome(name: string | null): string {
   const greeting = name ? `Hey ${firstName(name)},` : 'Hey,';
   return `${greeting}
 
-I'm Hermes — your *private* agent. Not a chatbot, not a shared assistant. \
-I run on a microVM that belongs only to you, 24/7, with persistent memory \
-that carries across every session. Anything you tell me, I'll remember next \
-time we talk.
+I'm Hermes — your private agent for managing Sokosumi work. Dedicated VM, \
+persistent memory across sessions. Couldn't pull personalized context for \
+this intro, but I'm online and ready.
 
-I couldn't pull together a personalized intro just now — the research pass \
-didn't complete. But I'm fully online and ready to go. A few things I'm \
-genuinely good at:
+A few things I can do:
 
-- **Drafting and writing** — emails, outreach, copy, briefs. Tell me the \
-  context once and I'll get the tone right going forward.
-- **Research with depth** — give me a topic and I'll dig through the web, \
-  pull sources, and come back with a synthesis instead of a list of links.
-- **Scheduled tasks** — anything recurring (a Monday digest, a weekly \
-  competitor check, a daily 9am brief on a topic) I can run in the \
-  background and ping you with the result.
-- **Tool use** — once you connect Gmail / Outlook / Calendar etc., I can \
-  read, draft, schedule, and act inside them on your behalf.
+- **Manage your Sokosumi workspace** — fetch the full result of any \
+  completed job, summarize a task, kick off a new agent job. Try: \
+  "List my open Sokosumi tasks."
+- **Draft and research** — emails, briefs, competitive landscapes. Tell \
+  me once what tone or angle and I'll keep it.
+- **Schedule recurring work** — daily briefs, weekly digests, anything \
+  cron-shaped. Try: "Set up a Monday morning digest of my Sokosumi job \
+  completions."
+- **Use connected tools** — Gmail, Outlook, Calendar etc. once you wire \
+  them up, I can read, draft, and act inside them.
 
-Tell me what you're actually working on right now, or what you wish you had \
-an extra pair of hands for, and we'll go from there.`;
+What's on your plate?`;
 }
 
 function firstName(full: string): string {
