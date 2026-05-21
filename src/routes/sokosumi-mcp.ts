@@ -415,7 +415,7 @@ async function handle(c: Context): Promise<Response> {
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
 
-async function callTool(
+export async function callTool(
   name: string,
   args: Record<string, unknown>,
   ctx: InstanceContext,

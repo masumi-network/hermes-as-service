@@ -424,6 +424,42 @@ router.post('/admin/scheduler/run-now', async (c) => {
   return c.json({ ran: count });
 });
 
+/**
+ * Admin-only smoke test for the MCP gating + pending-confirmation path.
+ * Calls the same callTool() Hermes uses, with the row's current
+ * autonomyLevel, so the response shows exactly what Hermes would see —
+ * "pending_confirmation" at medium, the tool's result at high, or
+ * "not available at autonomy level low" at low.
+ *
+ * Body: { toolName: string, args: object }
+ * Returns: { autonomy, response }
+ */
+router.post('/admin/instances/:userId/test/mcp-call', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { toolName?: string; args?: Record<string, unknown> };
+  const toolName = body.toolName ?? '';
+  const args = body.args ?? {};
+  if (!toolName) return c.json({ error: 'toolName required' }, 400);
+
+  const { callTool } = await import('../routes/sokosumi-mcp.js');
+  const { isValidSokosumiEnv } = await import('../config.js');
+  const autonomy = row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+  const ctx = {
+    instanceId: row.id,
+    userId: row.userId,
+    env: isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null,
+    autonomyLevel: autonomy as 'low' | 'medium' | 'high',
+  };
+  try {
+    const text = await callTool(toolName, args, ctx);
+    return c.json({ autonomy, response: text });
+  } catch (err) {
+    return c.json({ autonomy, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 // One-off (but idempotent) maintenance: capitalize the first letter of
 // every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
 // those quoted strings as clickable action buttons and lowercase looked
