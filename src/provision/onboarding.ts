@@ -97,7 +97,7 @@ export async function runOnboarding(
     await callHermes(
       row.endpointUrl,
       apiKey,
-      buildBootPrompt(row.name, row.email),
+      buildBootPrompt(row.name, row.email, row.role, row.company),
       5 * 60_000,
     );
     await markStep(instanceId, 'memory', 'done');
@@ -141,7 +141,7 @@ export async function runOnboarding(
       inboxSummary = await callHermes(
         row.endpointUrl,
         apiKey,
-        buildInboxScanPrompt(connectedProviders, row.name),
+        buildInboxScanPrompt(connectedProviders, row.name, row.role, row.company),
         4 * 60_000,
       );
       await markStep(instanceId, 'inbox_scan', 'done');
@@ -162,7 +162,7 @@ export async function runOnboarding(
     webSummary = await callHermes(
       row.endpointUrl,
       apiKey,
-      buildWebResearchPrompt(row.name, row.email),
+      buildWebResearchPrompt(row.name, row.email, row.role, row.company),
       4 * 60_000,
     );
     await markStep(instanceId, 'web_research', 'done');
@@ -226,6 +226,8 @@ export async function runOnboarding(
         webSummary,
         sokosumiSummary,
         introProviders,
+        row.role,
+        row.company,
       ),
       4 * 60_000,
     );
@@ -299,7 +301,7 @@ export async function runReturningUserBoot(instanceId: string): Promise<void> {
     await callHermes(
       row.endpointUrl,
       apiKey,
-      buildReturningBootPrompt(row.name, row.email),
+      buildReturningBootPrompt(row.name, row.email, row.role, row.company),
       3 * 60_000,
     );
   } catch (err) {
@@ -539,10 +541,21 @@ async function callHermes(
 
 // ---------- prompts ----------
 
-function buildBootPrompt(name: string | null, email: string | null): string {
-  const identityLine = name || email
-    ? `The user's name is "${name ?? ''}"${email ? ` and their email is "${email}"` : ''}. Save this to your memory so you remember them next time.`
-    : 'The user has not given a name yet.';
+function buildBootPrompt(
+  name: string | null,
+  email: string | null,
+  role: string | null = null,
+  company: string | null = null,
+): string {
+  const identityParts: string[] = [];
+  if (name) identityParts.push(`their name is "${name}"`);
+  if (email) identityParts.push(`their email is "${email}"`);
+  if (role) identityParts.push(`their role is "${role}"`);
+  if (company) identityParts.push(`they work at "${company}"`);
+  const identityLine =
+    identityParts.length > 0
+      ? `The user identity: ${identityParts.join(', ')}. Save all of this to your memory under explicit keys (user.name, user.email, user.role, user.company) so subsequent threads can reference them without re-fetching.`
+      : 'The user has not given any identity details yet.';
 
   return `Onboarding setup. This message is orchestration, not a user-visible \
 chat. Your response is discarded — do not greet me.
@@ -606,20 +619,36 @@ still runs — this is for UI visibility only.
 Once both steps are done, reply "ok".`;
 }
 
-function buildInboxScanPrompt(providers: string[], name: string | null): string {
+function buildInboxScanPrompt(
+  providers: string[],
+  name: string | null,
+  role: string | null = null,
+  company: string | null = null,
+): string {
   const list = providers.join(', ');
+  const roleLine = role ? `Role: ${role}.` : '';
+  const companyLine = company ? `Company: ${company}.` : '';
+  const roleWeighting = role
+    ? `\n\nWeight signals by their relevance to a ${role}. For engineering \
+roles, surface GitHub/Linear/Jira-style threads, technical incidents, and \
+deploys first. For sales/CS roles, surface customer threads, deals, and \
+support escalations. For marketing/product, surface launch threads, \
+content reviews, and stakeholder communications. For founders/exec, \
+surface investor updates, board threads, and strategic decisions.`
+    : '';
   return `Internal task — your response will be passed verbatim to the next \
 step, NOT shown to the user. Do not greet, do not format as a chat reply.
 
 Use your connected MCPs (${list}) to scan the user's recent activity. \
-Specifically:
+${roleLine}${companyLine ? ' ' + companyLine : ''}
 
+Specifically:
 - For Gmail / Outlook (mail): read the most recent ~30 messages they have \
 sent or received. Identify the 3–5 most relevant ongoing threads or topics. \
 Note people they correspond with often.
 - For calendar (Google / Outlook): read upcoming events for the next 14 days \
 plus the last 7. Identify recurring meetings, time-blocked focus work, and \
-any notable upcoming events.
+any notable upcoming events.${roleWeighting}
 
 Output a tight prose summary (300–500 words) in the structure:
 
@@ -637,15 +666,34 @@ Be honest if a tool fails or returns nothing — don't invent. The user's \
 name${name ? ` is "${name}"` : ' is unknown'}; use that as a focal point for whose mailbox you're reading.`;
 }
 
-function buildWebResearchPrompt(name: string | null, email: string | null): string {
+function buildWebResearchPrompt(
+  name: string | null,
+  email: string | null,
+  role: string | null = null,
+  company: string | null = null,
+): string {
+  const identity: string[] = [];
+  if (name) identity.push(`Name: ${name}`);
+  if (email) identity.push(`Email: ${email}`);
+  if (role) identity.push(`Role: ${role}`);
+  if (company) identity.push(`Company: ${company}`);
+  const idLine = identity.length > 0 ? identity.join('. ') + '.' : '(no identity given)';
+
+  const companyBias = company
+    ? `\n\nThe user told us they work at "${company}" — prioritise the public \
+research pass on that company's official site, recent news/press about it, \
+their funding/positioning, and their public team. That context shapes \
+everything else you'll do for this user.`
+    : '';
+
   return `Internal task — response feeds the next step, not the user. No \
 greeting, no chat framing.
 
-Do a brief public-web pass on the user. Name: ${name ?? '(unknown)'}${email ? ` Email: ${email}` : ''}.
+Do a brief public-web pass on the user. ${idLine}${companyBias}
 
-Use web_search to find: LinkedIn, company, public projects, recent talks / \
-posts / press. 4–8 search queries max. Be honest about what you can't \
-verify — do not invent.
+Use web_search to find: LinkedIn, the company's public footprint, public \
+projects the user is associated with, recent talks / posts / press. 4–8 \
+search queries max. Be honest about what you can't verify — do not invent.
 
 Return a tight summary (200–400 words):
 
@@ -663,6 +711,8 @@ function buildIntroDraftPrompt(
   webSummary: string,
   sokosumiSummary: string,
   providers: string[],
+  role: string | null = null,
+  company: string | null = null,
 ): string {
   const firstNameStr = name ? firstName(name) : null;
   const greeting = firstNameStr ? `Hey ${firstNameStr},` : 'Hey,';
@@ -670,17 +720,29 @@ function buildIntroDraftPrompt(
     providers.length > 0
       ? `Connected: ${providers.join(', ')}.`
       : 'No mail/calendar integrations connected.';
+  const roleCompanyLine =
+    role || company
+      ? `Role: ${role ?? '(unknown)'}, Company: ${company ?? '(unknown)'}.`
+      : '';
+  const groundingHint =
+    role || company
+      ? `\nGROUND THE OPENER: when role/company are set, weave them into the \
+opening sentence naturally — e.g. "Hi ${firstNameStr ?? 'there'} — I had a look at \
+${company ?? 'your company'} and your ${role ?? 'work'} inbox. Here's what I \
+think matters this week." Don't force it if it'd feel awkward, but use \
+this context to make the welcome feel personal, not generic.`
+      : '';
 
   return `Write the user's first message from Hermes. Shown VERBATIM as \
 Hermes' opening turn — no meta, no JSON, no "here's the draft".
 
 THE AGENT'S PRIMARY JOB: help the user manage their Sokosumi workspace \
 (open tasks, agent jobs, results). Everything else (mail, calendar, web \
-research) is supporting context. This framing matters for the message.
+research) is supporting context. This framing matters for the message.${groundingHint}
 
 Context:
 - Name: ${name ?? '(unknown)'}, Email: ${email ?? '(unknown)'}
-- ${integrationsLine}
+${roleCompanyLine ? '- ' + roleCompanyLine + '\n' : ''}- ${integrationsLine}
 
 SOKOSUMI WORKSPACE (primary context):
 """
@@ -752,11 +814,22 @@ LENGTH: 180–280 words total. Tight. If you can say it in 200, say it in 200.
 Address by first name only. No sign-off. Markdown only in the capability bullets.`;
 }
 
-function buildReturningBootPrompt(name: string | null, email: string | null): string {
+function buildReturningBootPrompt(
+  name: string | null,
+  email: string | null,
+  role: string | null = null,
+  company: string | null = null,
+): string {
+  const idParts: string[] = [];
+  if (name) idParts.push(name);
+  if (email) idParts.push(`email ${email}`);
+  if (role) idParts.push(`role: ${role}`);
+  if (company) idParts.push(`at ${company}`);
+  const idLine = idParts.length > 0 ? ` (${idParts.join(', ')})` : '';
   return `Internal — your reply is discarded. Briefly re-read your memory. \
-The user${name ? ` (${name})` : ''}${email ? `, email ${email}` : ''} is \
-returning for a new session. The Fly machine is fresh, so any in-flight \
-state from last time is gone; only your memory file survived. Reply "ok".`;
+The user${idLine} is returning for a new session. The Fly machine is fresh, \
+so any in-flight state from last time is gone; only your memory file \
+survived. Reply "ok".`;
 }
 
 function returningWelcome(name: string | null): string {

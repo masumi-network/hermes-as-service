@@ -36,6 +36,8 @@ export interface InstanceView {
   sokosumiEnv: string | null;
   autonomyLevel: string;
   timezone: string | null;
+  role: string | null;
+  company: string | null;
 }
 
 /**
@@ -427,6 +429,8 @@ function toView(row: {
   sokosumiEnv: string | null;
   autonomyLevel: string;
   timezone: string | null;
+  role: string | null;
+  company: string | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -441,6 +445,8 @@ function toView(row: {
     sokosumiEnv: row.sokosumiEnv,
     autonomyLevel: row.autonomyLevel,
     timezone: row.timezone,
+    role: row.role,
+    company: row.company,
   };
 }
 

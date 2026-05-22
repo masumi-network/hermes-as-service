@@ -51,6 +51,8 @@ const patchInstanceBody = z.object({
   name: z.string().min(1).max(200).optional(),
   email: z.string().email().max(254).optional(),
   timezone: z.string().min(1).max(80).optional(),
+  role: z.string().min(1).max(64).optional(),
+  company: z.string().min(1).max(120).optional(),
 });
 
 const secretBody = z.object({
@@ -71,6 +73,11 @@ const onboardBody = z.object({
   name: z.string().min(1).max(200).optional(),
   email: z.string().email().max(254).optional(),
   researchDepth: z.enum(['light', 'deep']).optional(),
+  /** Free-form user role/title (e.g. "Founder / CEO"). ≤64 chars.
+   *  Persisted on the instance + fed into research/welcome prompts. */
+  role: z.string().min(1).max(64).optional(),
+  /** Company name the user works at. ≤120 chars. */
+  company: z.string().min(1).max(120).optional(),
 });
 
 router.post('/v1/instances', async (c) => {
@@ -118,6 +125,8 @@ router.patch('/v1/instances/:userId', async (c) => {
         ...(parsed.data.name ? { name: parsed.data.name.slice(0, 200) } : {}),
         ...(parsed.data.email ? { email: parsed.data.email.slice(0, 254) } : {}),
         ...(parsed.data.timezone !== undefined ? { timezone: parsed.data.timezone } : {}),
+        ...(parsed.data.role !== undefined ? { role: parsed.data.role.slice(0, 64) } : {}),
+        ...(parsed.data.company !== undefined ? { company: parsed.data.company.slice(0, 120) } : {}),
       },
     });
 
@@ -218,6 +227,8 @@ router.get('/v1/instances/:userId', async (c) => {
       sokosumiEnv: view.sokosumiEnv,
       autonomyLevel: view.autonomyLevel,
       timezone: view.timezone,
+      role: view.role,
+      company: view.company,
       transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,
@@ -327,13 +338,15 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
       );
     }
 
-    // Patch name/email if provided.
-    if (parsed.data.name || parsed.data.email) {
+    // Patch name/email/role/company if provided.
+    if (parsed.data.name || parsed.data.email || parsed.data.role || parsed.data.company) {
       await prisma.hermesInstance.update({
         where: { id: row.id },
         data: {
           name: parsed.data.name?.slice(0, 200) ?? row.name,
           email: parsed.data.email?.slice(0, 254) ?? row.email,
+          role: parsed.data.role?.slice(0, 64) ?? row.role,
+          company: parsed.data.company?.slice(0, 120) ?? row.company,
         },
       });
     }

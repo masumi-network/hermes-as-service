@@ -30,6 +30,15 @@ model HermesInstance {
   /// Optional email, same purpose. Lets Hermes do an initial public-web
   /// research pass and personalize daily suggestions.
   email          String?
+  /// Optional user role/title (e.g. "Founder / CEO", "Engineering",
+  /// "Marketing"). Free-form ≤64 chars. Sokosumi passes this at
+  /// provision or onboard time; used to ground the research pass and
+  /// the welcome message. Not access-control, just personalization.
+  role           String?
+  /// Optional company name the user works at, ≤120 chars. Same purpose
+  /// as role — biases public-web research toward the company's domain
+  /// and shapes the welcome opener.
+  company        String?
   status         String
   /// Set the first time onboarding completes for this user. Persists across
   /// instance destroy/re-create cycles (HermesInstance is keyed by userId).
