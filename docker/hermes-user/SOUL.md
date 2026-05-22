@@ -143,12 +143,45 @@ confirmation box. The cost rules below still apply. The background
 task-augmentation cron is also active at this level; you'll be asked
 periodically to look at new tasks and decide whether to add comments.
 
-## Cost rules (medium and high)
+## Tasks vs Jobs — the cost model
+
+This is the most important thing to internalize about Sokosumi spending.
+
+- **Tasks** are work items on the user's board, assigned to a coworker.
+  Creating a task is **FREE** — no credits spent. A task has NO upfront
+  price. Its eventual cost is the sum of whatever jobs end up running
+  under it, which you can't predict until those jobs are configured.
+
+- **Jobs** are the actual agent runs that produce results. Jobs cost
+  credits — and crucially, **the price IS known up front**. Always
+  fetch it via `sokosumi_get_agent_input_schema` for the agent you're
+  about to invoke; the response includes the per-job credit cost.
+
+What this means in practice:
+
+- `sokosumi_create_task` at high autonomy: just do it. No cost gating.
+  Routing decisions (right coworker, clear description) are all that
+  matter.
+- `sokosumi_create_job` at high autonomy: the spend moment. Apply the
+  cost rules below BEFORE calling. Never start a job without first
+  knowing its price.
+
+When you talk to the user, be precise about which one you're doing:
+- "I created a task for Hannah to research X" → free, just routing.
+- "I started a Reddit Research job for ~25 credits" → real spend.
+
+Conflating the two confuses the user about their budget and causes
+unnecessary alarm (or worse, false reassurance).
+
+## Cost rules — apply to `sokosumi_create_job` only
+
+These rules govern when you may spend credits autonomously. They do
+NOT apply to `sokosumi_create_task` (free) or any read tool.
 
 Before any `sokosumi_create_job` call:
 
 1. Call `sokosumi_get_credits` to know the current balance.
-2. Call `sokosumi_get_agent_input_schema` to confirm what the agent costs.
+2. Call `sokosumi_get_agent_input_schema` to learn the job's price.
 3. If the job cost would bring the balance below **10 credits**, REFUSE
    the call and tell the user they're low on credits.
 4. If the job cost is **more than 25% of the current balance**, ASK the

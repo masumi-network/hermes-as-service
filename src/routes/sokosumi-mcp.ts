@@ -235,7 +235,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_create_task',
     description:
-      "Create a new task in the user's workspace and ASSIGN IT TO A COWORKER who will actually do the work. Free (only jobs run under the task cost credits). REQUIRED: coworker_id — call sokosumi_list_coworkers first to see who's available and pick the appropriate one based on the work (research → Hannah, project management → Elena, social media → Pheme, coding → Alex, etc.). NEVER assign a task to Hermes (you) — you're the coordinator. NEVER omit coworker_id — an unassigned task is dead on arrival. Tasks then live on the user's Sokosumi taskboard; the assigned coworker drives them through DRAFT → READY → RUNNING → COMPLETED via agent jobs over time.",
+      "Create a new task in the user's workspace and ASSIGN IT TO A COWORKER. FREE — tasks themselves cost zero credits and have NO upfront price; spending only happens later when jobs run under the task. Don't conflate this with sokosumi_create_job (which spends). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). NEVER omit coworker_id — an unassigned task is dead on arrival. Tasks live on the user's board going DRAFT → READY → RUNNING → COMPLETED as the coworker drives jobs underneath.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -258,7 +258,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_get_agent_input_schema',
     description:
-      "Fetch the input schema an agent needs before kicking off a job. Always call this BEFORE sokosumi_create_job so you know what fields the agent requires.",
+      "Fetch the input schema AND the credit price for an agent. Always call this BEFORE sokosumi_create_job — the response tells you (a) exactly what fields the agent needs, and (b) how many credits the job will cost. The price is what makes job spending predictable (tasks don't have prices, jobs do). Use the price to apply cost rules before firing the job.",
     inputSchema: {
       type: 'object',
       properties: { agent_id: { type: 'string', description: 'Agent id.' } },
@@ -269,7 +269,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'spend',
     name: 'sokosumi_create_job',
     description:
-      "Kick off a Sokosumi agent job. SPENDS CREDITS. Before calling: (1) fetch sokosumi_get_credits to know the balance, (2) fetch sokosumi_get_agent_input_schema to know required inputs, (3) verify the user's autonomy level allows it. At MEDIUM autonomy, you MUST ask the user for explicit confirmation in chat ('I'd like to run agent X for ~N credits — confirm?') and only call this tool after they reply affirmatively. At HIGH autonomy, you may fire autonomously but still warn if the cost exceeds 25% of the user's balance.",
+      "Kick off a Sokosumi agent job. SPENDS CREDITS — and unlike tasks, the price IS known up front via sokosumi_get_agent_input_schema (which returns the per-job credit cost). Always before calling: (1) fetch sokosumi_get_credits for the current balance, (2) fetch sokosumi_get_agent_input_schema for the required inputs AND the credit price, (3) apply your autonomy's cost rules. At MEDIUM, the orchestrator intercepts the call and surfaces a confirmation box — surface the price to the user in chat too. At HIGH, fire autonomously if balance allows AND cost ≤ 25% of balance; refuse if balance would drop below 10 credits; ask first if cost > 25% of balance.",
     inputSchema: {
       type: 'object',
       properties: {
