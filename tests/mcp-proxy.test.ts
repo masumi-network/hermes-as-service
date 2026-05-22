@@ -62,6 +62,21 @@ describe('handleToolsListResponse — read-only filter for MCP tools/list', () =
     expect(out.logMeta).toMatchObject({ status: 202, empty: true });
   });
 
+  it('flags HTTP 500 + empty body as upstream_error, NOT deferred', () => {
+    // Previously masked as 'deferred' which left Hermes hanging on an
+    // SSE delivery that never came (Composio had errored). Now surfaces.
+    const out = handleToolsListResponse('', 500, 'gmail');
+    expect(out.action).toBe('upstream_error');
+    expect(out.body).toBe('');
+    expect(out.logMeta.status).toBe(500);
+  });
+
+  it('flags HTTP 4xx as upstream_error', () => {
+    const out = handleToolsListResponse('{"error":"unauthorized"}', 401, 'gmail');
+    expect(out.action).toBe('upstream_error');
+    expect(out.body).toBe('{"error":"unauthorized"}');
+  });
+
   it('passes through HTTP 200 + empty body without throwing', () => {
     // This was the case that previously 502'd: JSON.parse('') → SyntaxError.
     const out = handleToolsListResponse('', 200, 'gmail');

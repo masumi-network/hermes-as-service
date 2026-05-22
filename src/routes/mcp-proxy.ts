@@ -205,6 +205,8 @@ async function forward(c: Context): Promise<Response> {
       logger.info(metaWithCtx, 'mcp_proxy_tools_list_deferred');
     } else if (action === 'unparseable') {
       logger.warn(metaWithCtx, 'mcp_proxy_tools_filter_failed_passthrough');
+    } else if (action === 'upstream_error') {
+      logger.error(metaWithCtx, 'mcp_proxy_upstream_error');
     }
     delete outHeaders['content-length'];
     return new Response(body, { status: upstream.status, headers: outHeaders });
@@ -261,10 +263,30 @@ export function handleToolsListResponse(
   provider: string,
 ): {
   body: string;
-  action: 'filtered' | 'deferred' | 'unparseable';
+  action: 'filtered' | 'deferred' | 'unparseable' | 'upstream_error';
   logMeta: Record<string, unknown>;
 } {
   const isEmpty = upstreamText.length === 0 || upstreamText.trim().length === 0;
+
+  // 5xx + 4xx from Composio are real upstream errors. They MUST NOT be
+  // masked as "deferred" — Hermes' MCP client would wait forever on an
+  // SSE delivery that never comes. Pass through as-is so the failure is
+  // visible to Hermes (and logged here with the body head for triage).
+  if (upstreamStatus >= 400) {
+    return {
+      body: upstreamText,
+      action: 'upstream_error',
+      logMeta: {
+        status: upstreamStatus,
+        empty: isEmpty,
+        bodyHead: upstreamText.slice(0, 400),
+      },
+    };
+  }
+
+  // Legitimate "deferred via SSE" pattern: HTTP 202/204 (or 200 + empty
+  // when the server uses streaming response delivery). Everything is 2xx
+  // here — the response actually arrives on the GET-SSE side channel.
   const isAccepted = upstreamStatus === 202 || upstreamStatus === 204;
   if (isEmpty || isAccepted) {
     return {
