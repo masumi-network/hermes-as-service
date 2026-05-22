@@ -59,7 +59,14 @@ export async function runDueOnce(): Promise<number> {
 }
 
 type Task = Awaited<ReturnType<typeof prisma.scheduledTask.findMany>>[number] & {
-  instance: { id: string; userId: string; spriteName: string; endpointUrl: string | null; apiServerKey: string };
+  instance: {
+    id: string;
+    userId: string;
+    spriteName: string;
+    endpointUrl: string | null;
+    apiServerKey: string;
+    sokosumiEnv: string | null;
+  };
 };
 
 async function runOne(task: Task): Promise<void> {
@@ -86,6 +93,22 @@ async function runOne(task: Task): Promise<void> {
     });
     return;
   }
+
+  // Mirror this firing as a Sokosumi task on the user's personal scope
+  // when the env supports it (preprod today). Silent no-op everywhere
+  // else. The cron runs regardless of whether the mirror succeeds.
+  const { startCronTask } = await import('./cron-task-logger.js');
+  const cronTask = await startCronTask({
+    userId: instance.userId,
+    sokosumiEnv: instance.sokosumiEnv,
+    cronName: task.name,
+    cronExpr: task.cronExpr,
+    prompt: task.prompt,
+  }).catch((err) => {
+    log.warn({ err }, 'cron_task_mirror_start_failed');
+    return null;
+  });
+  await cronTask?.markRunning();
 
   const requestId = randomUUID();
   let apiServerKey: string;
@@ -154,6 +177,7 @@ async function runOne(task: Task): Promise<void> {
       data: { nextRunAt: next, lastRunAt: new Date(), lastError: err instanceof Error ? err.message : 'fetch failed' },
     });
     await recordEvent({ userId: instance.userId, instanceId: instance.id, event: 'chat_failed', detail: { scheduledTaskId: task.id, source: 'scheduler' } });
+    await cronTask?.markFailed(err instanceof Error ? err.message : 'fetch failed');
     return;
   }
 
@@ -234,5 +258,16 @@ async function runOne(task: Task): Promise<void> {
     detail: { scheduledTaskId: task.id, source: 'scheduler', latencyMs: Date.now() - t0 },
   });
 
-  log.info({ latencyMs: Date.now() - t0, errorMessage }, 'scheduled_task_done');
+  // Finalise the Sokosumi task mirror with the result (or the error).
+  if (errorMessage) {
+    await cronTask?.markFailed(errorMessage);
+  } else {
+    const summary =
+      content.length > 0
+        ? content
+        : '(cron ran but produced no chat output — likely a silent acknowledgement)';
+    await cronTask?.markCompleted(summary);
+  }
+
+  log.info({ latencyMs: Date.now() - t0, errorMessage, cronTaskMirrored: !!cronTask }, 'scheduled_task_done');
 }
