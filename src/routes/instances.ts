@@ -33,11 +33,12 @@ const provisionBody = z.object({
   /** Which Sokosumi backend this user lives in. Routes the sokosumi_sync
    *  step to the right API base + coworker key. Defaults to "mainnet"
    *  if omitted. */
-  /** Which Sokosumi backend this user lives in. Only "preprod" or
-   *  "mainnet" are accepted — "development" is rejected with 400 so
-   *  Sokosumi UI bugs surface immediately rather than silently routing
-   *  to the wrong backend. */
-  sokosumiEnv: z.enum(['preprod', 'mainnet']).optional(),
+  /** Which Sokosumi backend this user lives in. Sokosumi UI MUST pass
+   *  the env it's actually running on — preprod UI sends "preprod",
+   *  mainnet UI sends "mainnet", dev UI sends "development". Mismatches
+   *  get caught downstream when getSokosumiConfig(env) returns null
+   *  ("env not configured") rather than silently routed. */
+  sokosumiEnv: z.enum(['development', 'preprod', 'mainnet']).optional(),
   /** How much autonomy the agent gets on this user's workspace.
    *  low    — read only
    *  medium — can do anything but always asks first (Hermes-side gating)
