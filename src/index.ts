@@ -77,6 +77,16 @@ startInboxRefreshCron();
 startUrgentInterruptCron();
 startTaskAugmentationCron();
 startHermesExecutorCron();
+
+// On boot, resume any onboarding pipelines that died with a previous pod.
+void (async () => {
+  try {
+    const { recoverStrandedOnboardings } = await import('./provision/onboarding-recovery.js');
+    await recoverStrandedOnboardings();
+  } catch (err) {
+    logger.error({ err }, 'onboarding_recovery_threw');
+  }
+})();
 // startScheduler();  // see import above
 
 const shutdown = (signal: string) => {

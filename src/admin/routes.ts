@@ -393,6 +393,32 @@ const hardReset = async (c: Context) => {
 router.post('/admin/instances/:userId/hard-reset', hardReset);
 router.get('/admin/instances/:userId/hard-reset', hardReset);
 
+/**
+ * Recover an instance whose onboarding pipeline died mid-flight (typical
+ * cause: orchestrator pod restart while a step was running). Flips
+ * status back to a state that /onboard accepts, resets the running
+ * step to pending, and re-kicks runOnboarding. Idempotent.
+ */
+const retryOnboarding = async (c: Context) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const steps = ((row.onboardingSteps as Array<{ id: string; status: string; finishedAt?: string }> | null) ?? []).map(
+    (s) => (s.status === 'running' || s.status === 'pending' ? { ...s, status: 'pending' } : s),
+  );
+  await prisma.hermesInstance.update({
+    where: { id: row.id },
+    data: { status: 'infrastructure_ready', onboardingSteps: steps as object, errorMessage: null },
+  });
+  const { runOnboarding } = await import('../provision/onboarding.js');
+  void runOnboarding(row.id, {}).catch((err) =>
+    logger.error({ err, userId, instanceId: row.id }, 'admin_retry_onboarding_failed'),
+  );
+  return c.json({ ok: true, userId, retried: true });
+};
+router.post('/admin/instances/:userId/retry-onboarding', retryOnboarding);
+router.get('/admin/instances/:userId/retry-onboarding', retryOnboarding);
+
 router.post('/admin/instances/:userId/sync-config', async (c) => {
   const userId = c.req.param('userId');
   const { syncConfig } = await import('../provision/sync-config.js');
