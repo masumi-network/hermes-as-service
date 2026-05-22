@@ -92,6 +92,10 @@ router.get('/admin/instances', async (c) => {
   if (q) where['OR'] = [
     { userId: { contains: q, mode: 'insensitive' } },
     { spriteName: { contains: q, mode: 'insensitive' } },
+    { name: { contains: q, mode: 'insensitive' } },
+    { email: { contains: q, mode: 'insensitive' } },
+    { role: { contains: q, mode: 'insensitive' } },
+    { company: { contains: q, mode: 'insensitive' } },
     { id: { equals: q } },
   ];
   if (status) where['status'] = status;
@@ -105,10 +109,10 @@ router.get('/admin/instances', async (c) => {
   const body = `
     <h1>Instances</h1>
     <form method="get" action="/admin/instances" class="actions">
-      <input type="search" name="q" placeholder="Search userId, sprite name, instance id" value="${esc(q)}" style="background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:6px 10px;color:var(--text);min-width:320px;font-size:13px;font-family:inherit" />
+      <input type="search" name="q" placeholder="Search name, email, company, role, userId, sprite…" value="${esc(q)}" style="background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:6px 10px;color:var(--text);min-width:340px;font-size:13px;font-family:inherit" />
       <select name="status" style="background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px;font-family:inherit">
         <option value="">all statuses</option>
-        ${['running', 'suspended', 'provisioning', 'error']
+        ${['running', 'ready', 'onboarding', 'suspended', 'provisioning', 'infrastructure_ready', 'error']
           .map((s) => `<option value="${s}" ${s === status ? 'selected' : ''}>${s}</option>`)
           .join('')}
       </select>
@@ -118,16 +122,17 @@ router.get('/admin/instances', async (c) => {
       <table>
         <thead>
           <tr>
-            <th>User</th>
+            <th>Who</th>
+            <th>Role · Company</th>
             <th>Status</th>
+            <th>Autonomy</th>
+            <th>Env</th>
             <th>Last activity</th>
-            <th>Region</th>
             <th>Age</th>
-            <th>Sprite</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.length === 0 ? `<tr><td colspan="6" class="empty">No instances match.</td></tr>` : rows.map(rowToInstanceRow).join('')}
+          ${rows.length === 0 ? `<tr><td colspan="7" class="empty">No instances match.</td></tr>` : rows.map(rowToInstanceRow).join('')}
         </tbody>
       </table>
     </div>
@@ -145,14 +150,29 @@ function rowToInstanceRow(r: {
   createdAt: Date;
   spriteName: string;
   endpointUrl: string | null;
+  name: string | null;
+  email: string | null;
+  role: string | null;
+  company: string | null;
+  autonomyLevel: string;
+  sokosumiEnv: string | null;
 }): string {
+  const who = r.name
+    ? `<strong>${esc(r.name)}</strong>${r.email ? `<div class="dim mono" style="font-size:11px">${esc(r.email)}</div>` : ''}`
+    : r.email
+      ? `<span class="mono">${esc(r.email)}</span>`
+      : `<span class="mono dim" title="${esc(r.userId)}">${esc(r.userId.slice(0, 14))}…</span>`;
+  const roleCompany = r.role || r.company
+    ? `${esc(r.role ?? '—')}${r.company ? ` · <strong>${esc(r.company)}</strong>` : ''}`
+    : '<span class="dim">—</span>';
   return `<tr>
-    <td><a href="/admin/instances/${encodeURIComponent(r.userId)}" class="mono">${esc(r.userId)}</a></td>
+    <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a></td>
+    <td>${roleCompany}</td>
     <td>${statusPill(r.status)}</td>
+    <td><span class="badge${r.autonomyLevel === 'high' ? ' warn' : ''}">${esc(r.autonomyLevel)}</span></td>
+    <td><span class="badge${r.sokosumiEnv === 'mainnet' ? ' danger' : ''}">${esc(r.sokosumiEnv ?? 'mainnet')}</span></td>
     <td>${esc(relTime(r.lastActivityAt))}</td>
-    <td class="mono">${esc(r.region || '—')}</td>
     <td>${esc(relTime(r.createdAt))}</td>
-    <td class="mono">${r.endpointUrl ? `<a href="${esc(r.endpointUrl)}" target="_blank">${esc(r.spriteName)}</a>` : esc(r.spriteName)}</td>
   </tr>`;
 }
 
