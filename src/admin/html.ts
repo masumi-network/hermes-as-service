@@ -32,6 +32,7 @@ export function layout(opts: { title: string; body: string; active?: string }): 
     <nav>
       ${nav('/admin', 'Overview')}
       ${nav('/admin/instances', 'Instances')}
+      ${nav('/admin/chats', 'Chats')}
       ${nav('/admin/events', 'Events')}
     </nav>
   </header>

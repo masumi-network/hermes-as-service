@@ -650,6 +650,157 @@ router.post('/admin/instances/:userId/outbox/:messageId/delete', async (c) => {
   return c.redirect(`/admin/instances/${encodeURIComponent(userId)}`);
 });
 
+// ---------- Chats — read-only monitor of all chat traffic ----------
+
+router.get('/admin/chats', async (c) => {
+  const userFilter = c.req.query('user') ?? '';
+  const kindFilter = c.req.query('kind') ?? '';
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 80), 10), 500);
+
+  const where: { userId?: string; kind?: string } = {};
+  if (userFilter) where.userId = userFilter;
+  if (kindFilter && (kindFilter === 'chat' || kindFilter === 'scheduled')) {
+    where.kind = kindFilter;
+  }
+
+  const msgs = await prisma.chatMessage.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit * 2, // user + assistant pair per requestId
+  });
+
+  // Pair user+assistant by requestId. Newest pair first.
+  type Pair = {
+    requestId: string;
+    userId: string;
+    instanceId: string;
+    kind: string;
+    userMsg?: typeof msgs[number];
+    asstMsg?: typeof msgs[number];
+  };
+  const byReq = new Map<string, Pair>();
+  for (const m of msgs) {
+    const pair = byReq.get(m.requestId) ?? {
+      requestId: m.requestId,
+      userId: m.userId,
+      instanceId: m.instanceId,
+      kind: m.kind,
+    };
+    if (m.role === 'user') pair.userMsg = m;
+    else if (m.role === 'assistant') pair.asstMsg = m;
+    byReq.set(m.requestId, pair);
+  }
+  const pairs = Array.from(byReq.values())
+    .sort((a, b) => {
+      const at = (a.userMsg?.createdAt ?? a.asstMsg?.createdAt ?? new Date(0)).getTime();
+      const bt = (b.userMsg?.createdAt ?? b.asstMsg?.createdAt ?? new Date(0)).getTime();
+      return bt - at;
+    })
+    .slice(0, limit);
+
+  // Look up display names for the listed users.
+  const userIds = Array.from(new Set(pairs.map((p) => p.userId)));
+  const users = await prisma.hermesInstance.findMany({
+    where: { userId: { in: userIds } },
+    select: { userId: true, name: true, email: true },
+  });
+  const nameByUser = new Map(users.map((u) => [u.userId, u.name ?? u.email ?? u.userId]));
+
+  const renderPair = (p: Pair): string => {
+    const ts = (p.userMsg?.createdAt ?? p.asstMsg?.createdAt) ?? new Date();
+    const userHead = esc((p.userMsg?.content ?? '(no user message captured)').slice(0, 180));
+    const asstHead = esc((p.asstMsg?.content ?? '(no reply / pending)').slice(0, 240));
+    const tokens = (p.asstMsg?.totalTokens ?? 0) || (p.asstMsg?.promptTokens ?? 0) + (p.asstMsg?.completionTokens ?? 0);
+    const lat = p.asstMsg?.latencyMs ?? null;
+    const err = p.asstMsg?.errorMessage ?? null;
+    const errCell = err ? `<span class="badge danger">${esc(err.slice(0, 60))}</span>` : '';
+    return `<tr>
+      <td class="mono" title="${esc(ts.toISOString())}">${esc(relTime(ts))}</td>
+      <td><a class="mono" href="/admin/instances/${encodeURIComponent(p.userId)}">${esc(nameByUser.get(p.userId) ?? p.userId.slice(0, 14))}</a></td>
+      <td><span class="badge ${p.kind === 'scheduled' ? 'warn' : ''}">${esc(p.kind)}</span></td>
+      <td><a href="/admin/chats/${encodeURIComponent(p.requestId)}">${esc(userHead)}</a></td>
+      <td style="color:var(--muted)">${esc(asstHead)}</td>
+      <td class="mono">${tokens ? esc(tokens) : '—'}</td>
+      <td class="mono">${lat !== null ? esc(lat + 'ms') : '—'}</td>
+      <td>${errCell}</td>
+    </tr>`;
+  };
+
+  const filterForm = `
+    <form method="get" action="/admin/chats" class="actions">
+      <input name="user" placeholder="filter by userId" value="${esc(userFilter)}" />
+      <select name="kind">
+        <option value="">all kinds</option>
+        <option value="chat" ${kindFilter === 'chat' ? 'selected' : ''}>chat</option>
+        <option value="scheduled" ${kindFilter === 'scheduled' ? 'selected' : ''}>scheduled</option>
+      </select>
+      <input name="limit" placeholder="limit" value="${esc(limit)}" style="width:80px" />
+      <button type="submit">Apply</button>
+      <a href="/admin/chats" style="margin-left:8px">Reset</a>
+    </form>`;
+
+  const body = `
+    <h1>Chats</h1>
+    <p class="dim">Most recent ${pairs.length} chat exchanges across all users. Click a row to see the full conversation.</p>
+    ${filterForm}
+    <div class="card">
+      ${
+        pairs.length === 0
+          ? '<div class="empty">No chats yet.</div>'
+          : `<table>
+              <thead><tr>
+                <th>When</th><th>User</th><th>Kind</th><th>User message</th><th>Assistant reply</th><th>Tokens</th><th>Latency</th><th>Error</th>
+              </tr></thead>
+              <tbody>${pairs.map(renderPair).join('')}</tbody>
+            </table>`
+      }
+    </div>`;
+  return c.html(layout({ title: 'Chats', body, active: '/admin/chats' }));
+});
+
+router.get('/admin/chats/:requestId', async (c) => {
+  const requestId = c.req.param('requestId');
+  const msgs = await prisma.chatMessage.findMany({
+    where: { requestId },
+    orderBy: { createdAt: 'asc' },
+  });
+  const first = msgs[0];
+  if (!first) {
+    return c.html(layout({ title: 'Chat', body: '<h1>Chat</h1><div class="empty">Not found.</div>', active: '/admin/chats' }), 404);
+  }
+  const userMeta = await prisma.hermesInstance.findUnique({
+    where: { userId: first.userId },
+    select: { name: true, email: true, role: true, company: true, autonomyLevel: true, sokosumiEnv: true },
+  });
+  const renderFull = (m: (typeof msgs)[number]): string => `
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <div>
+          <strong>${esc(m.role)}</strong>
+          ${m.kind !== 'chat' ? ` <span class="badge warn">${esc(m.kind)}</span>` : ''}
+          ${m.model ? ` <span class="badge">${esc(m.model)}</span>` : ''}
+          ${m.errorMessage ? ` <span class="badge danger">${esc(m.errorMessage)}</span>` : ''}
+        </div>
+        <div class="dim mono">${esc(m.createdAt.toISOString())} · ${m.totalTokens ? m.totalTokens + ' tok' : ''} ${m.latencyMs !== null ? '· ' + m.latencyMs + 'ms' : ''}</div>
+      </div>
+      <pre style="white-space:pre-wrap;word-wrap:break-word;margin:0;font-size:13px">${esc(m.content || '(empty)')}</pre>
+    </div>
+    <div style="height:12px"></div>`;
+  const body = `
+    <h1>Chat detail</h1>
+    <p class="dim">
+      requestId <span class="mono">${esc(requestId)}</span> ·
+      user <a class="mono" href="/admin/instances/${encodeURIComponent(first.userId)}">${esc(userMeta?.name ?? userMeta?.email ?? first.userId)}</a>
+      ${userMeta?.role ? ` · ${esc(userMeta.role)}` : ''}
+      ${userMeta?.company ? ` at ${esc(userMeta.company)}` : ''}
+      ${userMeta?.autonomyLevel ? ` · autonomy=${esc(userMeta.autonomyLevel)}` : ''}
+      ${userMeta?.sokosumiEnv ? ` · env=${esc(userMeta.sokosumiEnv)}` : ''}
+    </p>
+    ${msgs.map(renderFull).join('')}
+    <p class="dim"><a href="/admin/chats">← Back to chats</a></p>`;
+  return c.html(layout({ title: 'Chat detail', body, active: '/admin/chats' }));
+});
+
 // ---------- Events firehose ----------
 
 router.get('/admin/events', async (c) => {
