@@ -559,6 +559,69 @@ function extractToolNamesAnyFormat(body: string): string[] {
   return [];
 }
 
+/**
+ * Admin-only — seed a personal-scope Sokosumi task assigned to the
+ * Hermes coworker so the executor sweep has something to pick up.
+ * Body: { name: string, description: string }
+ */
+router.post('/admin/instances/:userId/test/seed-hermes-task', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { name?: string; description?: string };
+  const taskName = body.name ?? `E2E test ${Date.now()}`;
+  const description = body.description ?? 'What is 2 + 2? Reply with just the number.';
+
+  const { SokosumiClient } = await import('../sokosumi/client.js');
+  const { isValidSokosumiEnv } = await import('../config.js');
+  const env = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
+  const client = new SokosumiClient(row.userId, env);
+
+  let hermesCoworkerId: string | null = null;
+  try {
+    const coworkers = (await client.listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
+      id?: string;
+      slug?: string;
+    }>;
+    hermesCoworkerId = coworkers.find((c) => c.slug === 'hermes')?.id ?? null;
+  } catch (err) {
+    return c.json({ error: 'list_coworkers failed', detail: String(err) }, 502);
+  }
+  if (!hermesCoworkerId) {
+    return c.json({ error: 'hermes coworker not found in personal scope' }, 404);
+  }
+  try {
+    const created = (await client.createTask({
+      name: taskName,
+      description,
+      coworkerId: hermesCoworkerId,
+      status: 'READY',
+    })) as { data?: { id?: string }; id?: string };
+    const taskId = created?.data?.id ?? created?.id;
+    return c.json({ ok: true, taskId, hermesCoworkerId });
+  } catch (err) {
+    return c.json({ error: 'createTask failed', detail: String(err) }, 502);
+  }
+});
+
+/**
+ * Admin-only — run the Hermes-executor sweep against a single instance
+ * right now. Returns the sweep result counts. Useful for testing without
+ * waiting on the 5-minute cron.
+ */
+router.post('/admin/instances/:userId/test/run-hermes-executor', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const { runHermesExecutorForInstance } = await import('../notifications/hermes-executor.js');
+  try {
+    const res = await runHermesExecutorForInstance(row.id);
+    return c.json({ ok: true, ...res });
+  } catch (err) {
+    return c.json({ error: 'sweep failed', detail: String(err) }, 500);
+  }
+});
+
 // One-off (but idempotent) maintenance: capitalize the first letter of
 // every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
 // those quoted strings as clickable action buttons and lowercase looked
