@@ -87,6 +87,18 @@ void (async () => {
     logger.error({ err }, 'onboarding_recovery_threw');
   }
 })();
+
+// One-off cleanup: instances previously provisioned with
+// sokosumiEnv="development" get bumped to "preprod" so they stop
+// failing with "env not configured" after we tightened the contract.
+void (async () => {
+  try {
+    const { migrateDevelopmentEnvRows } = await import('./provision/env-migration.js');
+    await migrateDevelopmentEnvRows();
+  } catch (err) {
+    logger.error({ err }, 'sokosumi_env_migration_threw');
+  }
+})();
 // startScheduler();  // see import above
 
 const shutdown = (signal: string) => {
