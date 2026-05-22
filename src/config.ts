@@ -101,22 +101,44 @@ export function getSokosumiConfig(
 ): { baseUrl: string; apiKey: string } | null {
   const cfg = loadConfig();
   const effective: SokosumiEnv = env ?? 'mainnet';
-  let baseUrl: string | undefined;
-  let apiKey: string;
-  switch (effective) {
-    case 'development':
-      baseUrl = cfg.SOKOSUMI_API_BASE_DEV;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_DEV;
-      break;
-    case 'preprod':
-      baseUrl = cfg.SOKOSUMI_API_BASE_PREPROD;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_PREPROD;
-      break;
-    case 'mainnet':
-      baseUrl = cfg.SOKOSUMI_API_BASE_MAINNET;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_MAINNET;
-      break;
+  const cfgFor = (e: SokosumiEnv): { baseUrl?: string; apiKey: string } => {
+    switch (e) {
+      case 'development':
+        return { baseUrl: cfg.SOKOSUMI_API_BASE_DEV, apiKey: cfg.SOKOSUMI_COWORKER_API_KEY_DEV };
+      case 'preprod':
+        return { baseUrl: cfg.SOKOSUMI_API_BASE_PREPROD, apiKey: cfg.SOKOSUMI_COWORKER_API_KEY_PREPROD };
+      case 'mainnet':
+        return { baseUrl: cfg.SOKOSUMI_API_BASE_MAINNET, apiKey: cfg.SOKOSUMI_COWORKER_API_KEY_MAINNET };
+    }
+  };
+  const primary = cfgFor(effective);
+  if (primary.baseUrl && primary.apiKey) {
+    return { baseUrl: primary.baseUrl, apiKey: primary.apiKey };
   }
-  if (!baseUrl || !apiKey) return null;
-  return { baseUrl, apiKey };
+  // Graceful fallback for "development": if no dev backend is configured
+  // on this orchestrator, silently use preprod. This handles the case
+  // where Sokosumi's UI provisions a user with sokosumiEnv="development"
+  // even though only a preprod backend exists. We never silently fall
+  // back FROM mainnet — a missing mainnet key is a real misconfig that
+  // should surface.
+  if (effective === 'development') {
+    const fallback = cfgFor('preprod');
+    if (fallback.baseUrl && fallback.apiKey) {
+      if (!loggedDevFallback) {
+        // eslint-disable-next-line no-console
+        console.log(
+          JSON.stringify({
+            level: 'info',
+            msg: 'sokosumi_dev_to_preprod_fallback',
+            note: 'no DEV key configured; serving preprod for development env',
+          }),
+        );
+        loggedDevFallback = true;
+      }
+      return { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey };
+    }
+  }
+  return null;
 }
+
+let loggedDevFallback = false;
