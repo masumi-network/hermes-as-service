@@ -460,6 +460,81 @@ router.post('/admin/instances/:userId/test/mcp-call', async (c) => {
   }
 });
 
+/**
+ * Admin-only smoke test for a Composio MCP integration. Sends a
+ * tools/list JSON-RPC request to the integration's stored mcpUrl,
+ * exactly as Hermes' MCP client would, including the x-api-key auth
+ * header our proxy injects. Returns the upstream status, content-type,
+ * and (if parseable) the filtered tool catalog Hermes would see.
+ *
+ * Body: { provider: "gmail" | "outlook" | "google_calendar" | "outlook_calendar" }
+ */
+router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { provider?: string };
+  const provider = body.provider;
+  if (!provider) return c.json({ error: 'provider required' }, 400);
+
+  const integ = await prisma.integration.findUnique({
+    where: { userId_provider: { userId: row.userId, provider } },
+  });
+  if (!integ) return c.json({ error: `no integration for ${provider}` }, 404);
+
+  const { decryptSecret } = await import('../crypto.js');
+  const { isComposioUpstream, handleToolsListResponse } = await import('../routes/mcp-proxy.js');
+  const { loadConfig } = await import('../config.js');
+  const mcpUrl = await decryptSecret(integ.mcpUrl);
+  const cfg = loadConfig();
+  const upstreamHeaders: Record<string, string> = {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+  };
+  if (cfg.COMPOSIO_API_KEY && isComposioUpstream(mcpUrl)) {
+    upstreamHeaders['x-api-key'] = cfg.COMPOSIO_API_KEY;
+  }
+  const t0 = Date.now();
+  let upstream: Response;
+  try {
+    upstream = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: upstreamHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    });
+  } catch (err) {
+    return c.json({ error: 'upstream fetch failed', detail: String(err) }, 502);
+  }
+  const ms = Date.now() - t0;
+  const upstreamText = await upstream.text();
+  const handled = handleToolsListResponse(upstreamText, upstream.status, provider);
+  let toolNames: string[] | null = null;
+  if (handled.action === 'filtered') {
+    try {
+      const trimmed = handled.body.trim();
+      const dataLine = trimmed.startsWith('data:')
+        ? trimmed.split('\n').find((l) => l.startsWith('data:'))!.slice(5).trim()
+        : trimmed;
+      const parsed = JSON.parse(dataLine) as { result?: { tools?: Array<{ name?: string }> } };
+      toolNames = (parsed.result?.tools ?? []).map((t) => t.name ?? '?');
+    } catch {
+      toolNames = null;
+    }
+  }
+  return c.json({
+    provider,
+    mcpUrlHost: new URL(mcpUrl).hostname,
+    authHeaderAdded: 'x-api-key' in upstreamHeaders,
+    upstreamStatus: upstream.status,
+    upstreamContentType: upstream.headers.get('content-type'),
+    upstreamBodyHead: upstreamText.slice(0, 240),
+    ms,
+    proxyAction: handled.action,
+    filteredToolCount: toolNames?.length ?? null,
+    filteredToolNames: toolNames,
+  });
+});
+
 // One-off (but idempotent) maintenance: capitalize the first letter of
 // every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
 // those quoted strings as clickable action buttons and lowercase looked
