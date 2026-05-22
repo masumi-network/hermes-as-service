@@ -508,19 +508,9 @@ router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
   const ms = Date.now() - t0;
   const upstreamText = await upstream.text();
   const handled = handleToolsListResponse(upstreamText, upstream.status, provider);
-  let toolNames: string[] | null = null;
-  if (handled.action === 'filtered') {
-    try {
-      const trimmed = handled.body.trim();
-      const dataLine = trimmed.startsWith('data:')
-        ? trimmed.split('\n').find((l) => l.startsWith('data:'))!.slice(5).trim()
-        : trimmed;
-      const parsed = JSON.parse(dataLine) as { result?: { tools?: Array<{ name?: string }> } };
-      toolNames = (parsed.result?.tools ?? []).map((t) => t.name ?? '?');
-    } catch {
-      toolNames = null;
-    }
-  }
+  const upstreamToolNames = extractToolNamesAnyFormat(upstreamText);
+  const filteredToolNames = extractToolNamesAnyFormat(handled.body);
+  const droppedTools = upstreamToolNames.filter((n) => !filteredToolNames.includes(n));
   return c.json({
     provider,
     mcpUrlHost: new URL(mcpUrl).hostname,
@@ -530,10 +520,44 @@ router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
     upstreamBodyHead: upstreamText.slice(0, 240),
     ms,
     proxyAction: handled.action,
-    filteredToolCount: toolNames?.length ?? null,
-    filteredToolNames: toolNames,
+    upstreamToolCount: upstreamToolNames.length,
+    filteredToolCount: filteredToolNames.length,
+    droppedToolCount: droppedTools.length,
+    droppedTools, // every write tool we stripped — easy to audit
+    filteredTools: filteredToolNames,
   });
 });
+
+/**
+ * Extract tool names from any tools/list response body — handles bare
+ * JSON, SSE-framed `event: message\ndata: ...`, or multi-line SSE with
+ * multiple `data:` lines. Returns [] if the body has no recognizable
+ * tools array.
+ */
+function extractToolNamesAnyFormat(body: string): string[] {
+  if (!body || !body.trim()) return [];
+  const candidates: string[] = [];
+  // Pull every `data: ...` line.
+  for (const line of body.split('\n')) {
+    if (line.startsWith('data:')) candidates.push(line.slice(5).trim());
+  }
+  // If no SSE data lines, treat the whole body as a single JSON candidate.
+  if (candidates.length === 0) candidates.push(body.trim());
+  for (const raw of candidates) {
+    try {
+      const parsed = JSON.parse(raw) as {
+        result?: { tools?: Array<{ name?: string }> };
+      };
+      const tools = parsed?.result?.tools;
+      if (Array.isArray(tools) && tools.length > 0) {
+        return tools.map((t) => t.name ?? '?');
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return [];
+}
 
 // One-off (but idempotent) maintenance: capitalize the first letter of
 // every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
