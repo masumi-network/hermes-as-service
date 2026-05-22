@@ -88,6 +88,16 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     localTime: false,
     minAutonomy: 'high',
   },
+  {
+    slug: 'hermes-executor',
+    kind: 'system_sweep',
+    name: 'Personal-board task executor',
+    description:
+      'Every 5 minutes: scans your personal Sokosumi board for tasks you assigned directly to Hermes (status READY). When one is found, Hermes works through it end-to-end and posts the result as a comment, marking the task COMPLETED. Preprod only for now.',
+    cronExpr: '*/5 * * * *',
+    localTime: false,
+    minAutonomy: 'low',
+  },
 
   // ---------- system_prompt rows (medium+) ----------
   {
@@ -262,7 +272,12 @@ export function systemRowId(slug: string, instanceId: string): string {
  */
 export async function isSystemSweepEnabled(
   instanceId: string,
-  slug: 'sokosumi-sync' | 'inbox-refresh' | 'urgent-interrupts' | 'task-augmentation',
+  slug:
+    | 'sokosumi-sync'
+    | 'inbox-refresh'
+    | 'urgent-interrupts'
+    | 'task-augmentation'
+    | 'hermes-executor',
 ): Promise<boolean> {
   const id = systemRowId(slug, instanceId);
   const row = await prisma.scheduledTask.findUnique({ where: { id }, select: { enabled: true } });

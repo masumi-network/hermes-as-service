@@ -25,7 +25,10 @@ export type ProvisionEventType =
   | 'secret_set'
   | 'destroyed'
   | 'chat_proxied'
-  | 'chat_failed';
+  | 'chat_failed'
+  | 'hermes_task_picked'
+  | 'hermes_task_completed'
+  | 'hermes_task_failed';
 
 /**
  * Persist a lifecycle event to ProvisionEvent. Never throws — auditing must
