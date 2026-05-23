@@ -31,6 +31,19 @@ const SOKOSUMI_OVERRIDES: Record<
   },
 };
 
+/**
+ * Sokosumi's v1 API wraps single-resource responses in {data: ...}. We
+ * unwrap consistently so downstream consumers (orchestrator outbox →
+ * Sokosumi UI parsers) see `id` at the top level. Mirrors the existing
+ * unwrap in getJob; centralised here to avoid drift across endpoints.
+ */
+export function unwrapData(body: unknown): unknown {
+  if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
+    return (body as { data: unknown }).data;
+  }
+  return body;
+}
+
 export function resolveSokosumiTarget(
   rawUserId: string,
   rawEnv: SokosumiEnv | null | undefined,
@@ -171,17 +184,21 @@ export class SokosumiClient {
    * task-augmentation flow (HIGH autonomy) and ad-hoc commenting.
    */
   async addTaskEvent(taskId: string, args: { status?: string; comment?: string }): Promise<unknown> {
-    return this.post(`/tasks/${encodeURIComponent(taskId)}/events`, args);
+    return unwrapData(await this.post(`/tasks/${encodeURIComponent(taskId)}/events`, args));
   }
 
-  /** Create a new task. Free — only the jobs spawned under it cost credits. */
+  /** Create a new task. Free — only the jobs spawned under it cost credits.
+   *  Sokosumi wraps POST /tasks responses in {data: {...}} like most v1
+   *  endpoints. We unwrap so downstream consumers (orchestrator outbox →
+   *  Sokosumi UI TaskCard parser) see `id` at the top level instead of
+   *  `data.id`. Without this unwrap the UI rendered /tasks/undefined → 404. */
   async createTask(args: {
     name: string;
     description?: string | null;
     coworkerId?: string | null;
     status?: 'DRAFT' | 'READY';
   }): Promise<unknown> {
-    return this.post('/tasks', args);
+    return unwrapData(await this.post('/tasks', args));
   }
 
   /**
@@ -199,17 +216,17 @@ export class SokosumiClient {
     taskId?: string | null;
     identifierFromPurchaser?: string;
   }): Promise<unknown> {
-    if (args.taskId) {
-      return this.post(`/tasks/${encodeURIComponent(args.taskId)}/jobs`, {
-        agentId: args.agentId,
-        inputSchema: args.inputSchema,
-        identifierFromPurchaser: args.identifierFromPurchaser,
-      });
-    }
-    return this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
-      inputSchema: args.inputSchema,
-      identifierFromPurchaser: args.identifierFromPurchaser,
-    });
+    const body = args.taskId
+      ? await this.post(`/tasks/${encodeURIComponent(args.taskId)}/jobs`, {
+          agentId: args.agentId,
+          inputSchema: args.inputSchema,
+          identifierFromPurchaser: args.identifierFromPurchaser,
+        })
+      : await this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
+          inputSchema: args.inputSchema,
+          identifierFromPurchaser: args.identifierFromPurchaser,
+        });
+    return unwrapData(body);
   }
 
   /**
@@ -222,15 +239,17 @@ export class SokosumiClient {
     eventId: string;
     inputData: Record<string, unknown>;
   }): Promise<unknown> {
-    return this.post(`/jobs/${encodeURIComponent(args.jobId)}/inputs`, {
-      eventId: args.eventId,
-      inputData: args.inputData,
-    });
+    return unwrapData(
+      await this.post(`/jobs/${encodeURIComponent(args.jobId)}/inputs`, {
+        eventId: args.eventId,
+        inputData: args.inputData,
+      }),
+    );
   }
 
   /** Refund a FAILED job. */
   async refundJob(jobId: string): Promise<unknown> {
-    return this.post(`/jobs/${encodeURIComponent(jobId)}/refund`, {});
+    return unwrapData(await this.post(`/jobs/${encodeURIComponent(jobId)}/refund`, {}));
   }
 
   // ---------- internal: POST helper ----------
