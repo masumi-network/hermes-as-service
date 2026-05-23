@@ -832,6 +832,39 @@ router.get('/admin/chats/:requestId', async (c) => {
       <pre style="white-space:pre-wrap;word-wrap:break-word;margin:0;font-size:13px">${esc(m.content || '(empty)')}</pre>
     </div>
     <div style="height:12px"></div>`;
+  // Pending/resolved confirmations created in the same +/-30s window as
+  // this chat exchange. Helps map "user asked X" → "Hermes proposed
+  // tool call Y" → outcome. Best-effort timestamp correlation since we
+  // don't have a hard requestId link from tool calls to chat messages.
+  const windowMs = 60_000;
+  const winStart = new Date(first.createdAt.getTime() - windowMs);
+  const winEnd = new Date((msgs[msgs.length - 1]?.createdAt ?? first.createdAt).getTime() + windowMs);
+  const relatedConfs = await prisma.pendingConfirmation.findMany({
+    where: {
+      userId: first.userId,
+      createdAt: { gte: winStart, lte: winEnd },
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+  const confSection = relatedConfs.length === 0
+    ? ''
+    : `<h2>Tool calls / confirmations during this turn</h2>
+       <div class="card">
+         <table>
+           <thead><tr><th>Tool</th><th>Status</th><th>Summary</th><th>When</th></tr></thead>
+           <tbody>
+             ${relatedConfs.map((c) => `
+               <tr>
+                 <td class="mono" style="font-size:12px">${esc(c.toolName)}</td>
+                 <td><span class="badge ${c.status === 'pending' ? 'warn' : c.status === 'approved' ? '' : 'danger'}">${esc(c.status)}</span></td>
+                 <td>${esc(c.summary.slice(0, 220))}${c.errorMessage ? `<div class="dim" style="font-size:11px">err: ${esc(c.errorMessage.slice(0, 120))}</div>` : ''}</td>
+                 <td class="mono" style="font-size:11px">${esc(relTime(c.createdAt))}${c.resolvedAt ? ` → ${esc(relTime(c.resolvedAt))}` : ''}</td>
+               </tr>`).join('')}
+           </tbody>
+         </table>
+       </div>
+       <div style="height:12px"></div>`;
+
   const body = `
     <h1>Chat detail</h1>
     <p class="dim">
@@ -843,8 +876,99 @@ router.get('/admin/chats/:requestId', async (c) => {
       ${userMeta?.sokosumiEnv ? ` · env=${esc(userMeta.sokosumiEnv)}` : ''}
     </p>
     ${msgs.map(renderFull).join('')}
+    ${confSection}
     <p class="dim"><a href="/admin/chats">← Back to chats</a></p>`;
   return c.html(layout({ title: 'Chat detail', body, active: '/admin/chats' }));
+});
+
+// ---------- Pending / resolved confirmations firehose ----------
+
+router.get('/admin/confirmations', async (c) => {
+  const statusFilter = c.req.query('status') ?? '';
+  const userFilter = c.req.query('user') ?? '';
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 100), 10), 500);
+
+  const where: { status?: string; userId?: string } = {};
+  if (statusFilter) where.status = statusFilter;
+  if (userFilter) where.userId = userFilter;
+
+  const rows = await prisma.pendingConfirmation.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+  const userIds = Array.from(new Set(rows.map((r) => r.userId)));
+  const users = await prisma.hermesInstance.findMany({
+    where: { userId: { in: userIds } },
+    select: { userId: true, name: true, email: true, autonomyLevel: true, sokosumiEnv: true },
+  });
+  const byUser = new Map(users.map((u) => [u.userId, u]));
+
+  const STATUS_COLORS: Record<string, string> = {
+    pending: 'warn',
+    approved: '',
+    rejected: 'danger',
+    errored: 'danger',
+    expired: 'danger',
+  };
+
+  const renderRow = (r: typeof rows[number]): string => {
+    const u = byUser.get(r.userId);
+    const who = u?.name
+      ? `<strong>${esc(u.name)}</strong><div class="dim mono" style="font-size:11px">${esc(u.email ?? '')}</div>`
+      : `<span class="mono dim">${esc(r.userId.slice(0, 14))}…</span>`;
+    const statusCls = STATUS_COLORS[r.status] ?? '';
+    const resolvedInfo = r.resolvedAt
+      ? `<div class="dim" style="font-size:11px">${esc(relTime(r.resolvedAt))} · ${esc(r.resolvedBy ?? '?')}</div>`
+      : '';
+    const errBadge = r.errorMessage ? `<div><span class="badge danger">${esc(r.errorMessage.slice(0, 80))}</span></div>` : '';
+    return `<tr>
+      <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a></td>
+      <td><span class="badge ${statusCls}">${esc(r.status)}</span>${resolvedInfo}</td>
+      <td class="mono" style="font-size:12px">${esc(r.toolName)}</td>
+      <td>${esc(r.summary.slice(0, 240))}${errBadge}</td>
+      <td class="mono" title="${esc(r.createdAt.toISOString())}">${esc(relTime(r.createdAt))}</td>
+      <td class="mono" style="font-size:11px">${esc(u?.sokosumiEnv ?? '?')} · ${esc(u?.autonomyLevel ?? '?')}</td>
+    </tr>`;
+  };
+
+  const filterForm = `
+    <form method="get" action="/admin/confirmations" class="actions">
+      <input name="user" placeholder="filter by userId" value="${esc(userFilter)}" style="min-width:280px" />
+      <select name="status">
+        <option value="">all statuses</option>
+        ${['pending', 'approved', 'rejected', 'errored', 'expired']
+          .map((s) => `<option value="${s}" ${s === statusFilter ? 'selected' : ''}>${s}</option>`)
+          .join('')}
+      </select>
+      <button type="submit">Apply</button>
+      <a href="/admin/confirmations" style="margin-left:8px">Reset</a>
+    </form>`;
+
+  const counts = await prisma.pendingConfirmation.groupBy({
+    by: ['status'],
+    _count: { status: true },
+  });
+  const countsLine = counts
+    .map((c) => `<span class="badge ${STATUS_COLORS[c.status] ?? ''}">${esc(c.status)}: ${c._count.status}</span>`)
+    .join(' ');
+
+  const body = `
+    <h1>Confirmations</h1>
+    <p class="dim">Medium-autonomy write/spend tool calls Hermes wanted to make, with the user-approval outcome. Pending = task NOT yet created on Sokosumi.</p>
+    <p>${countsLine || '<span class="dim">no confirmations yet</span>'}</p>
+    ${filterForm}
+    <div class="card" style="padding:0;overflow:hidden">
+      ${rows.length === 0 ? '<div class="empty">No confirmations match.</div>' : `
+        <table>
+          <thead><tr>
+            <th>User</th><th>Status</th><th>Tool</th><th>Summary</th><th>Created</th><th>Env · Autonomy</th>
+          </tr></thead>
+          <tbody>${rows.map(renderRow).join('')}</tbody>
+        </table>`}
+    </div>
+    <p class="dim" style="font-size:12px;margin-top:12px">Showing ${rows.length} of up to ${limit}.</p>`;
+  return c.html(layout({ title: 'Confirmations', body, active: '/admin/confirmations' }));
 });
 
 // ---------- Events firehose ----------
