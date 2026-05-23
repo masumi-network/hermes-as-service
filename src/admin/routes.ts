@@ -925,7 +925,7 @@ router.get('/admin/confirmations', async (c) => {
     return `<tr>
       <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a></td>
       <td><span class="badge ${statusCls}">${esc(r.status)}</span>${resolvedInfo}</td>
-      <td class="mono" style="font-size:12px">${esc(r.toolName)}</td>
+      <td class="mono" style="font-size:12px"><a href="/admin/confirmations/${encodeURIComponent(r.id)}">${esc(r.toolName)}</a></td>
       <td>${esc(r.summary.slice(0, 240))}${errBadge}</td>
       <td class="mono" title="${esc(r.createdAt.toISOString())}">${esc(relTime(r.createdAt))}</td>
       <td class="mono" style="font-size:11px">${esc(u?.sokosumiEnv ?? '?')} · ${esc(u?.autonomyLevel ?? '?')}</td>
@@ -969,6 +969,32 @@ router.get('/admin/confirmations', async (c) => {
     </div>
     <p class="dim" style="font-size:12px;margin-top:12px">Showing ${rows.length} of up to ${limit}.</p>`;
   return c.html(layout({ title: 'Confirmations', body, active: '/admin/confirmations' }));
+});
+
+// Admin: inspect a specific PendingConfirmation including resultPayload
+router.get('/admin/confirmations/:id', async (c) => {
+  const id = c.req.param('id');
+  const row = await prisma.pendingConfirmation.findUnique({ where: { id } });
+  if (!row) {
+    return c.html(layout({ title: 'Confirmation', body: '<h1>Not found</h1>', active: '/admin/confirmations' }), 404);
+  }
+  const u = await prisma.hermesInstance.findUnique({
+    where: { userId: row.userId },
+    select: { name: true, email: true, autonomyLevel: true, sokosumiEnv: true },
+  });
+  const dump = (label: string, value: unknown): string =>
+    `<h2>${esc(label)}</h2>
+     <div class="card"><pre style="white-space:pre-wrap;word-wrap:break-word;margin:0;font-size:12px">${esc(JSON.stringify(value, null, 2))}</pre></div>
+     <div style="height:12px"></div>`;
+  const body = `
+    <h1>Confirmation ${esc(id.slice(0, 8))}…</h1>
+    <p class="dim">User <a href="/admin/instances/${encodeURIComponent(row.userId)}">${esc(u?.name ?? row.userId)}</a> ${u?.email ? `· ${esc(u.email)}` : ''} · ${esc(row.status)} · created ${esc(relTime(row.createdAt))}${row.resolvedAt ? ` · resolved ${esc(relTime(row.resolvedAt))}` : ''}</p>
+    ${dump('Tool', { toolName: row.toolName, summary: row.summary })}
+    ${dump('Args (what Hermes wanted to do)', row.toolArgs)}
+    ${row.resultPayload ? dump('Result payload (what Sokosumi UI parses for the TaskCard id)', row.resultPayload) : ''}
+    ${row.errorMessage ? dump('Error', row.errorMessage) : ''}
+    <p class="dim"><a href="/admin/confirmations">← Back</a></p>`;
+  return c.html(layout({ title: 'Confirmation', body, active: '/admin/confirmations' }));
 });
 
 // ---------- Events firehose ----------
