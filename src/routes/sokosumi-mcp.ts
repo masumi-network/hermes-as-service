@@ -196,8 +196,17 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_get_credits',
     description:
-      "Fetch the user's current Sokosumi credit balance. Use before suggesting expensive paid agent jobs.",
-    inputSchema: { type: 'object', properties: {} },
+      "Fetch Sokosumi credit balances. CRITICAL: credits are scoped PER WORKSPACE — the user's personal workspace and each organization (e.g. 'utxo AG', 'Serviceplan Group') has its OWN separate balance. A job in Serviceplan Group cannot spend personal credits, and vice versa. Without organization_id this returns balances for personal AND every organization the user belongs to in one response — read the right one for your context. Pass organization_id to scope to a single workspace. Before any sokosumi_create_job, ALWAYS check the balance of the workspace the job will run in, not personal.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        organization_id: {
+          type: 'string',
+          description:
+            'Optional. If set, returns credits for that organization only. Omit to get personal + all orgs at once.',
+        },
+      },
+    },
   },
   {
     access: 'read',
@@ -605,8 +614,43 @@ export async function executeTool(
     }
 
     case 'sokosumi_get_credits': {
-      const credits = await client.getCredits();
-      return JSON.stringify(credits, null, 2);
+      const orgIdArg = typeof args['organization_id'] === 'string' ? (args['organization_id'] as string) : undefined;
+      if (orgIdArg) {
+        const credits = await client.withOrganization(orgIdArg).getCredits();
+        return JSON.stringify({ scope: 'organization', organizationId: orgIdArg, credits }, null, 2);
+      }
+      // Default: personal + every org the user belongs to. Surfacing them
+      // all in one shot is the whole point of this tool — agents kept
+      // checking personal balance before a job that runs in an org.
+      const personalResult = await client.getCredits().then(
+        (credits) => ({ ok: true, credits }) as const,
+        (err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }) as const,
+      );
+      const orgs = await client.listOrganizations();
+      const settled = await Promise.allSettled(
+        orgs.slice(0, 10).map((org) =>
+          client
+            .withOrganization(org.id)
+            .getCredits()
+            .then((credits) => ({ org, credits })),
+        ),
+      );
+      const orgsCredits: Array<{ orgId: string; orgName?: string; credits: unknown }> = [];
+      for (const r of settled) {
+        if (r.status === 'fulfilled') {
+          orgsCredits.push({ orgId: r.value.org.id, orgName: r.value.org.name, credits: r.value.credits });
+        }
+      }
+      return JSON.stringify(
+        {
+          scope: 'all',
+          note: 'Credits are per-workspace. Use the balance of the workspace the job will run in — NOT personal — when deciding affordability.',
+          personal: personalResult,
+          organizations: orgsCredits,
+        },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_list_agents': {

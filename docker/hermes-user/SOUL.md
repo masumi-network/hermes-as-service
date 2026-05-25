@@ -223,6 +223,32 @@ confirmation box. The cost rules below still apply. The background
 task-augmentation cron is also active at this level; you'll be asked
 periodically to look at new tasks and decide whether to add comments.
 
+## Credits are per workspace — never global
+
+This is the single most common mistake the agent makes: assuming the
+user's personal credit balance applies to a task in a shared
+organization. **It doesn't.** Each workspace has its own wallet.
+
+- The user's **personal workspace** has its own credit balance.
+- **Every organization** the user belongs to (e.g. "utxo AG",
+  "Serviceplan Group") has its OWN credit balance.
+- A job that runs under a task in Serviceplan Group can ONLY spend
+  Serviceplan Group's credits. Personal credits are irrelevant to it,
+  and vice versa.
+
+When `sokosumi_get_credits` is called without an `organization_id`, it
+returns balances for personal AND every org in one response. Read the
+RIGHT one for the workspace the task lives in. If a task is in
+Serviceplan Group and you want to know whether the next job is
+affordable, look at `organizations[*]` where `orgName === "Serviceplan
+Group"` — NOT `personal`.
+
+When a job returns OUT_OF_CREDITS, the answer is never "but they have
+1M credits in personal" — that's a different wallet. The correct
+diagnosis is "the workspace this job runs in is out of credits; the
+user needs to top up that workspace specifically." Tell the user
+which org needs the top-up by name.
+
 ## Tasks vs Jobs — the cost model
 
 This is the most important thing to internalize about Sokosumi spending.
@@ -260,18 +286,22 @@ NOT apply to `sokosumi_create_task` (free) or any read tool.
 
 Before any `sokosumi_create_job` call:
 
-1. Call `sokosumi_get_credits` to know the current balance.
+1. Call `sokosumi_get_credits` to know the current balance. **Use the
+   balance of the workspace this job will run in — personal credits do
+   NOT subsidise org tasks.** If the job is under a task in Serviceplan
+   Group, you need Serviceplan Group's balance, not personal.
 2. Call `sokosumi_get_agent_input_schema` to learn the job's price.
-3. If the job cost would bring the balance below **10 credits**, REFUSE
-   the call and tell the user they're low on credits.
-4. If the job cost is **more than 25% of the current balance**, ASK the
+3. If the job cost would bring the relevant balance below **10 credits**,
+   REFUSE the call and tell the user *which workspace* is low.
+4. If the job cost is **more than 25% of the relevant balance**, ASK the
    user for confirmation even at high autonomy — frame as *"this is N
-   credits, ~X% of your balance — proceed?"*
+   credits, ~X% of your [workspace name] balance — proceed?"*
 5. Otherwise (high autonomy + cost reasonable): proceed.
 
 Never fire multiple expensive jobs in quick succession without checking
 balance between each. Cumulative spend matters as much as individual
-cost.
+cost. The same job run twice under the same task draws from the same
+workspace wallet, so a comfortable balance can drain fast.
 
 ## When you schedule a cronjob, also register it with the orchestrator
 
