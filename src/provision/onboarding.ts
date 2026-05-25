@@ -1093,18 +1093,27 @@ function formatSokosumiSnapshotForMemory(snapshot: {
     lines.push('');
   }
 
-  // ---- AGENTS: capped at 10, prioritize ones the user has actually used.
-  // The old list of 50 agents dominated the welcome — moving it to the
-  // bottom + filtering so it's reference data, not the headline.
+  // ---- AGENTS: the full marketplace catalog Hermes can reach for. We
+  // surface up to 40 (used-first) with the agent id so Hermes can call
+  // sokosumi_get_agent_input_schema for price + input schema when picking
+  // one. Without this list in memory the agent only knows about agents
+  // it has previously seen used; with it, it can proactively suggest
+  // "this looks like a job for X" without a live MCP roundtrip.
   if (snapshot.agents.length > 0) {
     const allAgents = snapshot.agents as Array<{ id?: string; name?: string; summary?: string }>;
     const usedFirst = allAgents.filter((a) => a.id && usedAgentIds.has(a.id));
     const rest = allAgents.filter((a) => !a.id || !usedAgentIds.has(a.id));
-    const top = [...usedFirst, ...rest].slice(0, 10);
-    lines.push(`## Agents the user has access to (showing ${top.length} of ${allAgents.length}, used ones first)`);
+    const top = [...usedFirst, ...rest].slice(0, 40);
+    lines.push(
+      `## Agent catalog (showing ${top.length} of ${allAgents.length}, used ones first)`,
+    );
+    lines.push(
+      'These are the marketplace agents available to run jobs. Pick one by capability + cost fit. Call sokosumi_get_agent_input_schema with the agent id to learn the exact inputs and credit price before sokosumi_create_job.',
+    );
     for (const a of top) {
       const used = a.id && usedAgentIds.has(a.id) ? ' [USED]' : '';
-      lines.push(`- ${a.name ?? '(unnamed)'}${used}: ${(a.summary ?? '').slice(0, 100)}`);
+      const summary = (a.summary ?? '').slice(0, 240).replace(/\s+/g, ' ');
+      lines.push(`- ${a.name ?? '(unnamed)'}${used} (id=${a.id ?? '?'}): ${summary}`);
     }
   }
   return lines.join('\n');
