@@ -88,16 +88,101 @@ interface ApproveResult {
 }
 
 /**
+ * Optional patches applied to the queued tool args at approve time. The
+ * Sokosumi UI surfaces these as inline controls in the confirmation card
+ * (e.g. an org dropdown when the proposed tool is org-aware), so the user
+ * can redirect a proposal without rejecting it.
+ *
+ * Forward-compatible: extra keys are tolerated and silently dropped.
+ */
+export interface ApprovalOverrides {
+  /**
+   * organizationId override. `string` substitutes the id into the args.
+   * `null` means "personal scope" — the key is removed from the args so
+   * the tool's no-org path applies. Distinct from `undefined`, which is
+   * "no override, run with whatever Hermes proposed."
+   */
+  organizationId?: string | null;
+}
+
+/** Tools whose `organization_id` arg can be replaced at approve time.
+ *  Anything not in this set silently drops the override (so the UI can
+ *  evolve without breaking the orchestrator). */
+const ORG_AWARE_TOOLS = new Set<string>([
+  'sokosumi_create_task',
+  'sokosumi_create_job',
+]);
+
+/**
+ * Apply approve-time overrides to the queued tool args. Pure — returns a
+ * shallow copy with the substitutions applied, doesn't mutate the
+ * original. Logs every applied / dropped override at info level so we
+ * can audit "Hermes filed it in the wrong workspace" complaints.
+ */
+export function _applyApprovalOverridesForTests(
+  toolName: string,
+  args: Record<string, unknown>,
+  overrides: ApprovalOverrides | undefined,
+): Record<string, unknown> {
+  return applyApprovalOverrides(toolName, args, overrides, {
+    instanceId: 'test',
+    confirmationId: 'test',
+  });
+}
+
+function applyApprovalOverrides(
+  toolName: string,
+  args: Record<string, unknown>,
+  overrides: ApprovalOverrides | undefined,
+  ctx: { instanceId: string; confirmationId: string },
+): Record<string, unknown> {
+  if (!overrides) return args;
+  if (!('organizationId' in overrides)) return args;
+  if (!ORG_AWARE_TOOLS.has(toolName)) {
+    logger.info(
+      { ...ctx, toolName, overrideKey: 'organizationId' },
+      'approval_override_ignored_tool_not_org_aware',
+    );
+    return args;
+  }
+  const next = { ...args };
+  if (overrides.organizationId === null) {
+    delete next['organization_id'];
+    logger.info(
+      { ...ctx, toolName, from: args['organization_id'] ?? null, to: null },
+      'approval_override_applied',
+    );
+  } else {
+    next['organization_id'] = overrides.organizationId;
+    logger.info(
+      {
+        ...ctx,
+        toolName,
+        from: args['organization_id'] ?? null,
+        to: overrides.organizationId,
+      },
+      'approval_override_applied',
+    );
+  }
+  return next;
+}
+
+/**
  * Approve a pending confirmation: execute the stored tool call, persist
  * the result, push an outbox message back to Hermes so its next chat turn
  * sees the resolution.
  *
  * Idempotent: re-approving an already-resolved row is a no-op that
  * returns the original result.
+ *
+ * `overrides` patches the queued tool args before execution — see
+ * ApprovalOverrides. Used by Sokosumi's UI to redirect a proposed task or
+ * job into a different workspace without rejecting + re-prompting.
  */
 export async function approveConfirmation(
   instanceId: string,
   confirmationId: string,
+  overrides?: ApprovalOverrides,
 ): Promise<ApproveResult> {
   const row = await prisma.pendingConfirmation.findFirst({
     where: { id: confirmationId, instanceId },
@@ -135,11 +220,18 @@ export async function approveConfirmation(
     autonomyLevel: 'high', // bypass the medium gate now that the user approved
   };
 
+  const effectiveArgs = applyApprovalOverrides(
+    row.toolName,
+    row.toolArgs as Record<string, unknown>,
+    overrides,
+    { instanceId: instance.id, confirmationId: row.id },
+  );
+
   let resultText: string;
   let errored = false;
   let errorMessage: string | undefined;
   try {
-    resultText = await executeTool(row.toolName, row.toolArgs as Record<string, unknown>, ctx);
+    resultText = await executeTool(row.toolName, effectiveArgs, ctx);
   } catch (err) {
     errored = true;
     errorMessage = err instanceof Error ? err.message : String(err);
