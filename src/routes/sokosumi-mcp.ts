@@ -101,6 +101,13 @@ interface ToolDef {
 const TOOLS_ALL: ToolDef[] = [
   {
     access: 'read',
+    name: 'sokosumi_list_organizations',
+    description:
+      "List the organizations (shared workspaces) the user belongs to. Each Sokosumi user has a personal workspace plus zero or more organizations (their company, department, team). Tasks in an organization are shared with every member of that org. Returns id, name, and (when available) slug/role for each. Call this when the user asks about their team, when you need to know which workspaces to consider, or when distinguishing personal-vs-shared work matters.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    access: 'read',
     name: 'sokosumi_list_tasks',
     description:
       "List the user's Sokosumi tasks across all orgs they belong to. Returns id, name, status, createdAt for each. Use this to discover what work the user has in flight. Filter by status (e.g. RUNNING, COMPLETED) or search by name substring.",
@@ -491,6 +498,11 @@ export async function executeTool(
   const client = new SokosumiClient(ctx.userId, ctx.env);
 
   switch (name) {
+    case 'sokosumi_list_organizations': {
+      const orgs = await client.listOrganizations();
+      return JSON.stringify({ count: orgs.length, organizations: orgs }, null, 2);
+    }
+
     case 'sokosumi_list_tasks': {
       // Aggregate across orgs in parallel — sequential per-org calls were
       // adding ~500–800ms per extra org for users with multiple workspaces.
