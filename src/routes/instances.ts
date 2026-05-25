@@ -252,14 +252,44 @@ router.get('/v1/instances/:userId', async (c) => {
 router.post('/v1/instances/:userId/integrations', async (c) => {
   const userId = c.req.param('userId');
   const json = await safeJson(c);
+  // Log the inbound attempt BEFORE validation so when a user reports
+  // "Sokosumi showed an unknown connection error" we can tell whether
+  // the POST even reached us (and with what shape) vs. fell over upstream
+  // in the Composio popup / Sokosumi /finalize path. Redact mcpToken; the
+  // URL host is useful but the full URL can carry user_id-style scoping.
+  const inboundShape = (() => {
+    if (!json || typeof json !== 'object') return { shape: 'non-object' as const };
+    const j = json as Record<string, unknown>;
+    let host: string | null = null;
+    if (typeof j.mcpUrl === 'string') {
+      try { host = new URL(j.mcpUrl).host; } catch { host = 'malformed-url'; }
+    }
+    return {
+      provider: j.provider,
+      hasMcpUrl: typeof j.mcpUrl === 'string' && j.mcpUrl.length > 0,
+      mcpUrlHost: host,
+      hasMcpToken: typeof j.mcpToken === 'string' && j.mcpToken.length > 0,
+      mode: j.mode,
+    };
+  })();
+  logger.info({ userId, inbound: inboundShape }, 'integration_post_inbound');
+
   const parsed = integrationBody.safeParse(json);
   if (!parsed.success) {
+    logger.warn(
+      { userId, inbound: inboundShape, issue: parsed.error.issues[0]?.message },
+      'integration_post_rejected_invalid_body',
+    );
     return problemJson(
       c,
       new HttpError(400, 'invalid_body', parsed.error.issues[0]?.message ?? 'invalid body', userId),
     );
   }
   if (!isSupportedProvider(parsed.data.provider)) {
+    logger.warn(
+      { userId, provider: parsed.data.provider },
+      'integration_post_rejected_unsupported_provider',
+    );
     return problemJson(
       c,
       new HttpError(400, 'unsupported_provider', `provider must be one of: ${SUPPORTED_PROVIDERS.join(', ')}`, userId),
