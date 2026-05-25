@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   aggregateCrons,
   aggregateOutbox,
+  composeSummary,
   currentLocalHour,
+  renderCron,
+  renderOutbox,
   startOfLocalDay,
 } from '../src/eod-report/sweep.js';
 
@@ -146,5 +149,137 @@ describe('aggregateOutbox', () => {
     expect(stats.taskResult.lastSnippet).toMatch(/…$/);
     expect(stats.taskResult.lastSnippet!.length).toBeLessThanOrEqual(201);
     expect(stats.taskResult.lastSnippet).toContain('line1 line2 line3');
+  });
+});
+
+describe('renderCron', () => {
+  it('renders "no activity" when neither ran nor failed', () => {
+    expect(renderCron('Inbox refresh', { ran: 0, failed: 0 })).toBe(
+      '- Inbox refresh: _no activity_',
+    );
+  });
+
+  it('renders run count alone when no failures', () => {
+    expect(renderCron('Inbox refresh', { ran: 1, failed: 0 })).toBe('- Inbox refresh: 1 run');
+    expect(renderCron('Inbox refresh', { ran: 4, failed: 0 })).toBe('- Inbox refresh: 4 runs');
+  });
+
+  it('renders failed alone when no successful runs', () => {
+    expect(renderCron('Sokosumi sync', { ran: 0, failed: 1 })).toBe('- Sokosumi sync: 1 failed');
+  });
+
+  it('combines ran + failed counts', () => {
+    expect(renderCron('Inbox refresh', { ran: 3, failed: 2 })).toBe('- Inbox refresh: 3 runs, 2 failed');
+  });
+
+  it('appends a lastDetail snippet when present', () => {
+    expect(renderCron('Inbox refresh', { ran: 1, failed: 0, lastDetail: 'gmail' })).toBe(
+      '- Inbox refresh: 1 run — _gmail_',
+    );
+  });
+
+  it('respects a custom run word', () => {
+    expect(renderCron('Urgent interrupts', { ran: 5, failed: 0 }, 'check')).toBe(
+      '- Urgent interrupts: 5 checks',
+    );
+    expect(renderCron('Personal-board executor', { ran: 1, failed: 0 }, 'task')).toBe(
+      '- Personal-board executor: 1 task',
+    );
+  });
+});
+
+describe('renderOutbox', () => {
+  it('renders count alone when no lastSnippet', () => {
+    expect(renderOutbox('Daily brief', { count: 3 })).toBe('- Daily brief: 3 messages');
+  });
+
+  it('renders the snippet on a quoted second line', () => {
+    expect(renderOutbox('Daily brief', { count: 1, lastSnippet: 'Today: 2 meetings.' })).toBe(
+      '- Daily brief: 1 message\n  > Today: 2 meetings.',
+    );
+  });
+
+  it('singularizes "message" for count == 1', () => {
+    expect(renderOutbox('Task results', { count: 1 })).toBe('- Task results: 1 message');
+  });
+});
+
+describe('composeSummary', () => {
+  // Force the rendering tests into a stable TZ so the date-label doesn't
+  // depend on the machine running CI.
+  const tz = 'Europe/Berlin';
+  // 2026-05-25T00:00 in Berlin (CEST = UTC+2) is 2026-05-24T22:00Z.
+  const startOfDay = new Date('2026-05-24T22:00:00Z');
+
+  it('builds a quiet-day summary when nothing happened', () => {
+    const out = composeSummary([], [], startOfDay, tz);
+    expect(out).toContain('**Your cron summary — Monday, May 25**');
+    expect(out).toContain('_Background sweeps_');
+    expect(out).toContain('- Inbox refresh: _no activity_');
+    expect(out).toContain('- Sokosumi sync: _no activity_');
+    expect(out).toContain('- Urgent interrupts: _no activity_');
+    expect(out).toContain('- Task augmentation: _no activity_');
+    expect(out).toContain('- Personal-board executor: _no activity_');
+    expect(out).not.toContain('_Messages sent to your chat today_');
+    expect(out).not.toContain('failure');
+  });
+
+  it('renders a full active day with cron stats + outbox snippet', () => {
+    const events = [
+      {
+        event: 'onboarding_step',
+        detail: { step: 'inbox_refresh', status: 'done', providers: ['gmail'] },
+        createdAt: startOfDay,
+      },
+      {
+        event: 'chat_proxied',
+        detail: { source: 'urgent_interrupt', events: 2, reason: 'completed-jobs' },
+        createdAt: startOfDay,
+      },
+    ];
+    const outbox = [
+      { kind: 'daily_brief', content: 'Today: light schedule.', createdAt: startOfDay },
+    ];
+    const out = composeSummary(events, outbox, startOfDay, tz);
+    expect(out).toContain('- Inbox refresh: 1 run — _gmail_');
+    expect(out).toContain('- Urgent interrupts: 1 check — _2 event(s) considered_');
+    expect(out).toContain('_Messages sent to your chat today_');
+    expect(out).toContain('- Daily brief: 1 message');
+    expect(out).toContain('> Today: light schedule.');
+    expect(out).not.toContain('failure');
+  });
+
+  it('appends a failure footer when totalFailed > 0', () => {
+    const events = [
+      {
+        event: 'hermes_task_failed',
+        detail: { taskId: 't1', error: 'timeout' },
+        createdAt: startOfDay,
+      },
+    ];
+    const out = composeSummary(events, [], startOfDay, tz);
+    expect(out).toContain('- Personal-board executor: 1 failed');
+    expect(out).toContain('_1 failure today');
+  });
+
+  it('pluralizes the failure footer for >1', () => {
+    const events = [
+      { event: 'hermes_task_failed', detail: {}, createdAt: startOfDay },
+      { event: 'hermes_task_failed', detail: {}, createdAt: startOfDay },
+    ];
+    const out = composeSummary(events, [], startOfDay, tz);
+    expect(out).toContain('_2 failures today');
+  });
+
+  it('omits outbox section when no proactive messages were sent', () => {
+    const events = [
+      {
+        event: 'onboarding_step',
+        detail: { step: 'inbox_refresh', status: 'done', providers: ['gmail'] },
+        createdAt: startOfDay,
+      },
+    ];
+    const out = composeSummary(events, [], startOfDay, tz);
+    expect(out).not.toContain('_Messages sent to your chat today_');
   });
 });

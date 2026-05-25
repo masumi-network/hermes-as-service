@@ -104,7 +104,19 @@ async function buildSummary(
       select: { kind: true, content: true, createdAt: true },
     }),
   ]);
+  return composeSummary(events, outboxMessages, startOfDay, tz);
+}
 
+/**
+ * Pure renderer for the EOD summary. Splitting from buildSummary lets us
+ * unit-test the markdown output without a DB.
+ */
+export function composeSummary(
+  events: Array<{ event: string; detail: unknown; createdAt: Date }>,
+  outboxMessages: Array<{ kind: string; content: string; createdAt: Date }>,
+  startOfDay: Date,
+  tz: string,
+): string {
   const cronStats = aggregateCrons(events);
   const outboxStats = aggregateOutbox(outboxMessages);
   const dateLabel = formatLocalDate(startOfDay, tz);
@@ -141,6 +153,51 @@ async function buildSummary(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Single-user driver used by the admin smoke endpoint and the sweep.
+ * `force` bypasses the local-hour and already-sent gates so we can
+ * verify the report end-to-end without waiting for 22:00.
+ * `dryRun` skips enqueue + recordEvent and just returns the summary.
+ */
+export async function runEodReportForInstance(
+  instanceId: string,
+  opts: { force?: boolean; dryRun?: boolean } = {},
+): Promise<{ delivered: boolean; reason?: string; summary?: string }> {
+  const inst = await prisma.hermesInstance.findUnique({
+    where: { id: instanceId },
+    select: { id: true, userId: true, timezone: true, status: true, destroyedAt: true, onboardedAt: true },
+  });
+  if (!inst) return { delivered: false, reason: 'instance not found' };
+  if (inst.destroyedAt) return { delivered: false, reason: 'instance destroyed' };
+  if (!inst.onboardedAt) return { delivered: false, reason: 'instance not onboarded' };
+  const tz = inst.timezone || 'UTC';
+  if (!opts.force && currentLocalHour(tz) !== DELIVER_HOUR_LOCAL) {
+    return { delivered: false, reason: `local hour ${currentLocalHour(tz)} != ${DELIVER_HOUR_LOCAL}` };
+  }
+  if (!opts.force && !(await isSystemSweepEnabled(inst.id, 'eod-report'))) {
+    return { delivered: false, reason: 'eod-report sweep muted' };
+  }
+  const startOfDay = startOfLocalDay(tz);
+  if (!opts.force && (await alreadySentSince(inst.userId, startOfDay))) {
+    return { delivered: false, reason: 'already sent today' };
+  }
+  const summary = await buildSummary(inst.id, inst.userId, startOfDay, tz);
+  if (opts.dryRun) return { delivered: false, reason: 'dry run', summary };
+  await enqueueOutboxMessage({
+    instanceId: inst.id,
+    userId: inst.userId,
+    kind: 'eod_report',
+    content: summary,
+  });
+  await recordEvent({
+    userId: inst.userId,
+    instanceId: inst.id,
+    event: 'eod_report_sent',
+    detail: { tz, forced: !!opts.force },
+  });
+  return { delivered: true, summary };
 }
 
 export interface AggregatedCrons {
@@ -250,7 +307,7 @@ function pickStat(out: AggregatedOutbox, kind: string): OutboxStat | null {
   }
 }
 
-function renderCron(label: string, s: CronStat, runWord = 'run'): string {
+export function renderCron(label: string, s: CronStat, runWord = 'run'): string {
   if (s.ran === 0 && s.failed === 0) return `- ${label}: _no activity_`;
   const parts: string[] = [];
   if (s.ran > 0) parts.push(`${s.ran} ${runWord}${s.ran === 1 ? '' : 's'}`);
@@ -259,7 +316,7 @@ function renderCron(label: string, s: CronStat, runWord = 'run'): string {
   return s.lastDetail ? `${head} — _${s.lastDetail}_` : head;
 }
 
-function renderOutbox(label: string, s: OutboxStat): string {
+export function renderOutbox(label: string, s: OutboxStat): string {
   const head = `- ${label}: ${s.count} message${s.count === 1 ? '' : 's'}`;
   if (!s.lastSnippet) return head;
   return `${head}\n  > ${s.lastSnippet}`;

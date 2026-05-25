@@ -668,6 +668,26 @@ router.post('/admin/instances/:userId/test/run-hermes-executor', async (c) => {
   }
 });
 
+/**
+ * Admin-only — run the EOD report sweep for a single instance right now,
+ * bypassing the 22:00-local-hour gate and the already-sent gate so we
+ * can verify the report shape without waiting until tonight. Pass
+ * ?dry=1 to return the rendered markdown without enqueuing.
+ */
+router.post('/admin/instances/:userId/test/run-eod-report', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const dry = c.req.query('dry') === '1';
+  const { runEodReportForInstance } = await import('../eod-report/sweep.js');
+  try {
+    const res = await runEodReportForInstance(row.id, { force: true, dryRun: dry });
+    return c.json({ ok: true, ...res });
+  } catch (err) {
+    return c.json({ error: 'eod report failed', detail: String(err) }, 500);
+  }
+});
+
 // One-off (but idempotent) maintenance: capitalize the first letter of
 // every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
 // those quoted strings as clickable action buttons and lowercase looked
