@@ -674,6 +674,30 @@ router.post('/admin/instances/:userId/test/run-hermes-executor', async (c) => {
  * can verify the report shape without waiting until tonight. Pass
  * ?dry=1 to return the rendered markdown without enqueuing.
  */
+/**
+ * Admin-only — manually nudge the running Hermes agent that an
+ * integration is connected, in case it learned the opposite before
+ * we wired the automatic post-connect nudge. One-shot recovery for
+ * users stuck in "Gmail isn't connected" state.
+ *
+ * Body: { provider: "gmail" | ... }
+ */
+router.post('/admin/instances/:userId/test/notify-integration', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as { provider?: string };
+  const provider = body.provider;
+  if (!provider) return c.json({ error: 'provider required' }, 400);
+  const { notifyIntegrationConnected } = await import('../integrations/notify-connected.js');
+  try {
+    await notifyIntegrationConnected(row.id, provider);
+    return c.json({ ok: true });
+  } catch (err) {
+    return c.json({ error: 'notify failed', detail: String(err) }, 500);
+  }
+});
+
 router.post('/admin/instances/:userId/test/run-eod-report', async (c) => {
   const userId = c.req.param('userId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });

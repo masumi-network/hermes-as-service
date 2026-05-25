@@ -215,6 +215,18 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
       event: 'integration_connected',
       detail: { provider: input.provider },
     });
+    // Fire-and-forget: tell the agent its memory needs to drop any
+    // "<provider> isn't connected" note. The POST has already returned
+    // to Sokosumi — this just runs in the background. See
+    // notifyIntegrationConnected for the rationale.
+    void (async () => {
+      try {
+        const { notifyIntegrationConnected } = await import('./notify-connected.js');
+        await notifyIntegrationConnected(instance.id, input.provider);
+      } catch (err) {
+        logger.warn({ err, userId: input.userId, provider: input.provider }, 'integration_notify_threw');
+      }
+    })();
     return toView(updated);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
