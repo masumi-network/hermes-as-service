@@ -21,6 +21,7 @@ import {
   startUrgentInterruptCron,
   startTaskAugmentationCron,
   startHermesExecutorCron,
+  startEodReportCron,
 } from './cron.js';
 // On Fly always-on hosts, Hermes' own gateway daemon ticks its built-in
 // cron every 60s. We no longer need the orchestrator-side scheduler.
@@ -77,6 +78,7 @@ startInboxRefreshCron();
 startUrgentInterruptCron();
 startTaskAugmentationCron();
 startHermesExecutorCron();
+startEodReportCron();
 
 // On boot, resume any onboarding pipelines that died with a previous pod.
 void (async () => {

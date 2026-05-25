@@ -98,6 +98,16 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     localTime: false,
     minAutonomy: 'low',
   },
+  {
+    slug: 'eod-report',
+    kind: 'system_sweep',
+    name: 'End-of-day cron summary',
+    description:
+      'Each evening at 10 PM (your time): a brief recap of what Hermes’ background sweeps did for you today — inbox refreshes, Sokosumi syncs, urgent interrupts, auto-comments, executor runs, and any proactive messages sent to your chat.',
+    cronExpr: '0 22 * * *',
+    localTime: true,
+    minAutonomy: 'low',
+  },
 
   // ---------- system_prompt rows (medium+) ----------
   {
@@ -277,7 +287,8 @@ export async function isSystemSweepEnabled(
     | 'inbox-refresh'
     | 'urgent-interrupts'
     | 'task-augmentation'
-    | 'hermes-executor',
+    | 'hermes-executor'
+    | 'eod-report',
 ): Promise<boolean> {
   const id = systemRowId(slug, instanceId);
   const row = await prisma.scheduledTask.findUnique({ where: { id }, select: { enabled: true } });

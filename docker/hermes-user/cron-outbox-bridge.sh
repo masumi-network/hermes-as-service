@@ -37,6 +37,16 @@ if [ -z "$response" ]; then
   exit 0
 fi
 
+# Drop placeholder replies the LLM emits when a cron prompt told it to act
+# silently. Without this, sentinels like "[SILENT]" leak into the user's
+# chat via the outbox.
+case "$(printf '%s' "$response" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+  ""|"[silent]"|"[noreply]"|"[noop]"|"[none]"|"ok"|"done")
+    printf '{}\n'
+    exit 0
+    ;;
+esac
+
 # Read the originating cron job's name (when present) so the orchestrator
 # can tag the outbox row with the right `kind`. Hermes injects the job name
 # into the extra payload as `cron_job_name`. Fallbacks: default to

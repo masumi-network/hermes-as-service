@@ -7,6 +7,7 @@ import { runInboxRefreshSweep } from './inbox/refresh.js';
 import { runUrgentInterruptSweep } from './notifications/urgent.js';
 import { runTaskAugmentationSweep } from './notifications/augment.js';
 import { runHermesExecutorSweep } from './notifications/hermes-executor.js';
+import { runEodReportSweep } from './eod-report/sweep.js';
 
 let scheduled: cron.ScheduledTask | null = null;
 let sokosumiScheduled: cron.ScheduledTask | null = null;
@@ -14,6 +15,7 @@ let inboxRefreshScheduled: cron.ScheduledTask | null = null;
 let urgentInterruptScheduled: cron.ScheduledTask | null = null;
 let taskAugmentationScheduled: cron.ScheduledTask | null = null;
 let hermesExecutorScheduled: cron.ScheduledTask | null = null;
+let eodReportScheduled: cron.ScheduledTask | null = null;
 
 /**
  * Marks idle instances as suspended in the DB. Sprites itself releases compute
@@ -190,5 +192,35 @@ export function stopHermesExecutorCron(): void {
   if (hermesExecutorScheduled) {
     hermesExecutorScheduled.stop();
     hermesExecutorScheduled = null;
+  }
+}
+
+/**
+ * Hourly cron — end-of-day personal cron summary. Fires every hour; the
+ * sweep itself filters by current local hour (22:00) per-user via the
+ * instance's stored timezone, and gates on the user's "eod-report"
+ * system_sweep toggle. Each delivery is idempotent (skipped if today's
+ * report already sits in the user's outbox).
+ */
+export function startEodReportCron(): void {
+  if (eodReportScheduled) return;
+  eodReportScheduled = cron.schedule(
+    '0 * * * *',
+    async () => {
+      try {
+        await runEodReportSweep();
+      } catch (err) {
+        logger.error({ err }, 'eod_report_sweep_threw');
+      }
+    },
+    { scheduled: true },
+  );
+  logger.info('eod_report_cron_started');
+}
+
+export function stopEodReportCron(): void {
+  if (eodReportScheduled) {
+    eodReportScheduled.stop();
+    eodReportScheduled = null;
   }
 }
