@@ -134,6 +134,13 @@ export async function runOnboarding(
   }
 
   // ---- 2. inbox scan (only if integrations connected AND MCPs loaded) ----
+  // First pass uses a generous 7-minute budget and the full prompt
+  // (~30 messages + 21 days of calendar). If that aborts on timeout —
+  // typically a slow Gmail OAuth path or a large mailbox racing the
+  // outbound fetch — we retry once with a trimmed prompt (~10 messages,
+  // 7 days of calendar) and a tighter 4-minute budget. Onboarding never
+  // fails on inbox_scan alone; the surrounding intro_draft falls back
+  // to web-only research when both attempts whiff.
   let inboxSummary = '';
   if (hasInbox && mcpsLoaded) {
     await markStep(instanceId, 'inbox_scan', 'running');
@@ -142,12 +149,31 @@ export async function runOnboarding(
         row.endpointUrl,
         apiKey,
         buildInboxScanPrompt(connectedProviders, row.name, row.role, row.company),
-        4 * 60_000,
+        7 * 60_000,
       );
       await markStep(instanceId, 'inbox_scan', 'done');
     } catch (err) {
-      log.error({ err }, 'inbox_scan_failed');
-      await markStep(instanceId, 'inbox_scan', 'failed', errToMessage(err));
+      const wasTimeout = isAbortTimeout(err);
+      log.warn(
+        { err, wasTimeout },
+        wasTimeout ? 'inbox_scan_timeout_retrying' : 'inbox_scan_failed_no_retry',
+      );
+      if (wasTimeout) {
+        try {
+          inboxSummary = await callHermes(
+            row.endpointUrl,
+            apiKey,
+            buildInboxScanPromptFast(connectedProviders, row.name, row.role, row.company),
+            4 * 60_000,
+          );
+          await markStep(instanceId, 'inbox_scan', 'done');
+        } catch (retryErr) {
+          log.error({ err: retryErr }, 'inbox_scan_failed_after_retry');
+          await markStep(instanceId, 'inbox_scan', 'failed', errToMessage(retryErr));
+        }
+      } else {
+        await markStep(instanceId, 'inbox_scan', 'failed', errToMessage(err));
+      }
     }
   } else if (hasInbox && !mcpsLoaded) {
     // Mark the inbox_scan step as skipped so the loader UI shows
@@ -664,6 +690,61 @@ Output a tight prose summary (300–500 words) in the structure:
 
 Be honest if a tool fails or returns nothing — don't invent. The user's \
 name${name ? ` is "${name}"` : ' is unknown'}; use that as a focal point for whose mailbox you're reading.`;
+}
+
+/**
+ * Retry variant: cut tool-call volume roughly in half so a sluggish
+ * Gmail/Composio path or a large mailbox doesn't blow the orchestrator's
+ * outbound budget twice. Same output shape so intro_draft doesn't care.
+ */
+function buildInboxScanPromptFast(
+  providers: string[],
+  name: string | null,
+  role: string | null = null,
+  company: string | null = null,
+): string {
+  const list = providers.join(', ');
+  const roleLine = role ? `Role: ${role}.` : '';
+  const companyLine = company ? `Company: ${company}.` : '';
+  return `Internal task — your response will be passed verbatim to the next \
+step, NOT shown to the user. Do not greet, do not format as a chat reply.
+
+This is a RETRY after a previous slower scan timed out. Stay tight — \
+fewer tool calls, faster summary.
+
+Use your connected MCPs (${list}) to scan the user's recent activity. \
+${roleLine}${companyLine ? ' ' + companyLine : ''}
+
+Specifically:
+- For Gmail / Outlook (mail): read at most the 10 most recent messages they \
+have sent or received. Identify the 2–3 most relevant ongoing threads.
+- For calendar (Google / Outlook): read upcoming events for the next 7 days. \
+Note any standout meetings.
+
+Output a tight prose summary (150–250 words) in the structure:
+
+  ## Current focus
+  ...
+  ## Recurring threads / people
+  ...
+  ## Upcoming
+  ...
+
+Be honest if a tool fails or returns nothing — don't invent. The user's \
+name${name ? ` is "${name}"` : ' is unknown'}.`;
+}
+
+/**
+ * AbortSignal.timeout throws a DOMException with name === "TimeoutError"
+ * (Node 20+ fetch wraps it). Anything else is a real failure that we
+ * should NOT retry — retrying a 401 or a Composio 5xx just wastes time.
+ */
+function isAbortTimeout(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const msg = (err as { message?: unknown }).message;
+  return typeof msg === 'string' && /aborted due to timeout|timed out/i.test(msg);
 }
 
 function buildWebResearchPrompt(
