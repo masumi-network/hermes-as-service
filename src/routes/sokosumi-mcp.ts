@@ -251,7 +251,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_create_task',
     description:
-      "Create a new task in the user's workspace and ASSIGN IT TO A COWORKER. FREE — tasks themselves cost zero credits and have NO upfront price; spending only happens later when jobs run under the task. Don't conflate this with sokosumi_create_job (which spends). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). NEVER omit coworker_id — an unassigned task is dead on arrival. Tasks live on the user's board going DRAFT → READY → RUNNING → COMPLETED as the coworker drives jobs underneath.",
+      "Create a new task in a specific workspace and ASSIGN IT TO A COWORKER. FREE — tasks themselves cost zero credits and have NO upfront price; spending only happens later when jobs run under the task. Don't conflate this with sokosumi_create_job (which spends). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). STRONGLY RECOMMENDED: organization_id — coworkers like Hannah and Elena exist in MULTIPLE orgs (utxo AG, Serviceplan Group, etc.) and without organization_id the task lands in whichever org gets enumerated first, which is rarely what the user wants. Read organization_id from sokosumi_list_coworkers' output (each entry is tagged with orgId/orgName) or from sokosumi_list_organizations. When the user names a workspace (\"in utxo AG\", \"for Serviceplan\"), you MUST pass the matching organization_id. Tasks live on the user's board going DRAFT → READY → RUNNING → COMPLETED as the coworker drives jobs underneath.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -260,6 +260,10 @@ const TOOLS_ALL: ToolDef[] = [
         coworker_id: {
           type: 'string',
           description: 'REQUIRED. The Sokosumi coworker who will do the work. Pick from sokosumi_list_coworkers. Must NOT be the Hermes coworker.',
+        },
+        organization_id: {
+          type: 'string',
+          description: 'Workspace where the task lives. REQUIRED whenever the user names a workspace, and whenever the chosen coworker exists in more than one org (almost always true for Hannah, Elena, Pheme, Alex). Match against orgId from sokosumi_list_coworkers or sokosumi_list_organizations. Omitting this falls back to the first org that has the coworker, which is often wrong.',
         },
         status: {
           type: 'string',
@@ -709,6 +713,7 @@ export async function executeTool(
     case 'sokosumi_create_task': {
       const name = String(args['name'] ?? '');
       const coworkerId = String(args['coworker_id'] ?? '');
+      const organizationIdArg = typeof args['organization_id'] === 'string' ? (args['organization_id'] as string) : undefined;
       const description = typeof args['description'] === 'string' ? (args['description'] as string) : undefined;
       const status = typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined;
 
@@ -719,36 +724,74 @@ export async function executeTool(
         );
       }
 
-      // Find which org this coworker belongs to. We iterate user's orgs
-      // looking for the coworker; create the task in the matching org.
       const orgs = await client.listOrganizations();
       if (orgs.length === 0) throw new Error('user has no orgs to create the task in');
 
       let targetOrgId: string | null = null;
       let coworkerSlug: string | undefined;
       let coworkerName: string | undefined;
-      for (const org of orgs.slice(0, 5)) {
+
+      if (organizationIdArg) {
+        // Caller specified the org. Validate the coworker exists there
+        // before committing — wrong org + valid coworker would silently
+        // land the task somewhere else if we skipped this check.
+        const targetOrg = orgs.find((o) => o.id === organizationIdArg);
+        if (!targetOrg) {
+          const known = orgs.map((o) => `${o.name ?? '?'} (${o.id})`).join(', ');
+          throw new Error(
+            `organization_id ${organizationIdArg} is not one of the user's orgs. The user belongs to: ${known}. Pick one and retry.`,
+          );
+        }
         try {
-          const list = (await client.withOrganization(org.id).listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
+          const list = (await client
+            .withOrganization(targetOrg.id)
+            .listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
             id?: string;
             slug?: string;
             name?: string;
           }>;
           const match = list.find((c) => c.id === coworkerId);
-          if (match) {
-            targetOrgId = org.id;
-            coworkerSlug = match.slug;
-            coworkerName = match.name;
-            break;
+          if (!match) {
+            throw new Error(
+              `coworker_id ${coworkerId} is not whitelisted in organization "${targetOrg.name ?? targetOrg.id}". Call sokosumi_list_coworkers and pick a coworker that exists in that org.`,
+            );
           }
-        } catch {
-          /* try next org */
+          targetOrgId = targetOrg.id;
+          coworkerSlug = match.slug;
+          coworkerName = match.name;
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('coworker_id ')) throw err;
+          throw new Error(
+            `failed to verify coworker ${coworkerId} in org ${organizationIdArg}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
-      }
-      if (!targetOrgId) {
-        throw new Error(
-          `coworker_id ${coworkerId} not found in any of the user's orgs. Call sokosumi_list_coworkers to see available coworkers.`,
-        );
+      } else {
+        // Legacy fallback: iterate orgs, take the first match. Hermes is
+        // strongly nudged in the tool description NOT to rely on this —
+        // it produces wrong-org tasks for users with multi-org coworkers.
+        for (const org of orgs.slice(0, 5)) {
+          try {
+            const list = (await client.withOrganization(org.id).listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
+              id?: string;
+              slug?: string;
+              name?: string;
+            }>;
+            const match = list.find((c) => c.id === coworkerId);
+            if (match) {
+              targetOrgId = org.id;
+              coworkerSlug = match.slug;
+              coworkerName = match.name;
+              break;
+            }
+          } catch {
+            /* try next org */
+          }
+        }
+        if (!targetOrgId) {
+          throw new Error(
+            `coworker_id ${coworkerId} not found in any of the user's orgs. Call sokosumi_list_coworkers to see available coworkers.`,
+          );
+        }
       }
       // Refuse self-assignment to the Hermes coworker — Hermes coordinates,
       // doesn't execute. Sokosumi may attribute jobs to Hermes if the user
