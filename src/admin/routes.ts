@@ -11,6 +11,26 @@ import { runDueOnce } from '../schedules/scheduler.js';
 
 const router = new Hono();
 
+// ---------- Version (build identity) ----------
+
+/**
+ * Tiny ping endpoint that returns the git SHA we built with + the time
+ * the orchestrator booted. Lets the dashboard / external scripts confirm
+ * which commit is actually live after a Railway deploy — useful when
+ * we ship a change and want to verify it's serving before testing.
+ *
+ * Mounted under /admin so it inherits Basic Auth.
+ */
+const BOOTED_AT = new Date().toISOString();
+router.get('/admin/version', (c) => {
+  return c.json({
+    sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
+    branch: process.env.RAILWAY_GIT_BRANCH ?? null,
+    bootedAt: BOOTED_AT,
+    nodeEnv: process.env.NODE_ENV ?? null,
+  });
+});
+
 // ---------- Overview ----------
 
 router.get('/admin', async (c) => {
