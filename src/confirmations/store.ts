@@ -145,25 +145,23 @@ function applyApprovalOverrides(
     );
     return args;
   }
+  // For null we KEEP organization_id present but set to null so the
+  // downstream dispatcher can distinguish "user explicitly chose
+  // personal scope" (null) from "Hermes didn't propose an org and the
+  // user didn't override either" (undefined / absent). Stripping the
+  // key collapses those two cases and the dispatcher falls back to
+  // iterate-orgs, which is wrong for an explicit personal click.
   const next = { ...args };
-  if (overrides.organizationId === null) {
-    delete next['organization_id'];
-    logger.info(
-      { ...ctx, toolName, from: args['organization_id'] ?? null, to: null },
-      'approval_override_applied',
-    );
-  } else {
-    next['organization_id'] = overrides.organizationId;
-    logger.info(
-      {
-        ...ctx,
-        toolName,
-        from: args['organization_id'] ?? null,
-        to: overrides.organizationId,
-      },
-      'approval_override_applied',
-    );
-  }
+  next['organization_id'] = overrides.organizationId;
+  logger.info(
+    {
+      ...ctx,
+      toolName,
+      from: args['organization_id'] ?? null,
+      to: overrides.organizationId,
+    },
+    'approval_override_applied',
+  );
   return next;
 }
 

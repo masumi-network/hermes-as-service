@@ -262,8 +262,8 @@ const TOOLS_ALL: ToolDef[] = [
           description: 'REQUIRED. The Sokosumi coworker who will do the work. Pick from sokosumi_list_coworkers. Must NOT be the Hermes coworker.',
         },
         organization_id: {
-          type: 'string',
-          description: 'Workspace where the task lives. REQUIRED whenever the user names a workspace, and whenever the chosen coworker exists in more than one org (almost always true for Hannah, Elena, Pheme, Alex). Match against orgId from sokosumi_list_coworkers or sokosumi_list_organizations. Omitting this falls back to the first org that has the coworker, which is often wrong.',
+          type: ['string', 'null'],
+          description: 'Workspace where the task lives. Pass an org id string to file in a shared organization (utxo AG, Serviceplan Group, etc.). Pass `null` (literal JSON null, not the string "null") for the user\'s personal workspace — useful when the work is private. REQUIRED whenever the user names a workspace, and whenever the chosen coworker exists in more than one org (almost always true for Hannah, Elena, Pheme, Alex). Match against orgId from sokosumi_list_coworkers or sokosumi_list_organizations. Omitting this entirely falls back to the first org that has the coworker, which is rarely what the user wants.',
         },
         status: {
           type: 'string',
@@ -713,7 +713,11 @@ export async function executeTool(
     case 'sokosumi_create_task': {
       const name = String(args['name'] ?? '');
       const coworkerId = String(args['coworker_id'] ?? '');
-      const organizationIdArg = typeof args['organization_id'] === 'string' ? (args['organization_id'] as string) : undefined;
+      // Three-way: string = a specific org, null = personal scope (no org),
+      // undefined = neither specified, fall back to legacy iterate-orgs.
+      const rawOrgArg = args['organization_id'];
+      const isPersonalScope = rawOrgArg === null;
+      const organizationIdArg = typeof rawOrgArg === 'string' ? rawOrgArg : undefined;
       const description = typeof args['description'] === 'string' ? (args['description'] as string) : undefined;
       const status = typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined;
 
@@ -721,6 +725,41 @@ export async function executeTool(
       if (!coworkerId) {
         throw new Error(
           "missing required arg: coworker_id. Tasks must be assigned to a coworker who will do the work. Call sokosumi_list_coworkers first to see who's available, then pick the right one for this task (e.g., research → Hannah, project management → Elena). DO NOT assign tasks to Hermes (slug=hermes) — Hermes is the coordinator, not the executor.",
+        );
+      }
+
+      // Personal-scope path — explicit null override from Sokosumi's UI
+      // dropdown ("Personal" selected). Creates the task without any
+      // X-Delegation-Organization-Id header, which Sokosumi treats as
+      // the user's private workspace. Coworkers exist in personal scope
+      // too (Hannah, Elena, etc.), so we validate the coworker is
+      // whitelisted there before firing.
+      if (isPersonalScope) {
+        const personalCoworkers = (await client.listCoworkers({
+          scope: 'whitelisted',
+          limit: 50,
+        })) as Array<{ id?: string; slug?: string; name?: string }>;
+        const match = personalCoworkers.find((c) => c.id === coworkerId);
+        if (!match) {
+          throw new Error(
+            `coworker_id ${coworkerId} is not whitelisted in the user's personal workspace. Call sokosumi_list_coworkers (without organization_id) to see who's available there, or pick an organization to file the task under.`,
+          );
+        }
+        if (match.slug === 'hermes') {
+          throw new Error(
+            `Refusing to assign task to coworker '${match.name ?? 'Hermes'}' (slug=hermes) — Hermes is the coordinator, not the executor. Pick a different coworker.`,
+          );
+        }
+        const result = await client.createTask({ name, description, status, coworkerId });
+        return JSON.stringify(
+          {
+            orgId: null,
+            scope: 'personal',
+            assignedTo: { id: coworkerId, slug: match.slug, name: match.name },
+            task: result,
+          },
+          null,
+          2,
         );
       }
 

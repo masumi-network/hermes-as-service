@@ -23,23 +23,28 @@ describe('applyApprovalOverrides — substitution rules', () => {
       expect(out['organization_id']).toBe('new_org');
     });
 
-    it('deletes organization_id when override is null (personal scope)', () => {
+    it('sets organization_id to null when override is null (personal scope)', () => {
       const out = apply(
         'sokosumi_create_task',
         { name: 'task', coworker_id: 'cw_1', organization_id: 'old_org' },
         { organizationId: null },
       );
-      expect('organization_id' in out).toBe(false);
+      // Distinct from "key absent" — the dispatcher uses null to route
+      // to personal workspace, vs undefined which falls back to
+      // iterate-orgs.
+      expect('organization_id' in out).toBe(true);
+      expect(out['organization_id']).toBeNull();
       expect(out['name']).toBe('task');
     });
 
-    it('null override is a no-op when args already had no org', () => {
+    it('null override inserts the key when args had no org', () => {
       const out = apply(
         'sokosumi_create_task',
         { name: 'task', coworker_id: 'cw_1' },
         { organizationId: null },
       );
-      expect('organization_id' in out).toBe(false);
+      expect('organization_id' in out).toBe(true);
+      expect(out['organization_id']).toBeNull();
     });
 
     it('does NOT mutate the original args object', () => {
