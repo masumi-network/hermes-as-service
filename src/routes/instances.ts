@@ -64,11 +64,12 @@ const patchInstanceBody = z.object({
   timezone: z.string().min(1).max(80).optional(),
   role: z.string().min(1).max(64).optional(),
   company: z.string().min(1).max(120).optional(),
-  /** Persona controls — see provisionBody. Pass empty string to clear a
-   *  field back to default; omit to leave unchanged. */
+  /** Persona controls — see provisionBody. To CLEAR a field back to
+   *  default voice: send "" for personaName, or null for verbosity/tone.
+   *  Omit a field to leave it unchanged. */
   personaName: z.string().max(60).optional(),
-  verbosity: z.enum(['brief', 'balanced', 'detailed']).optional(),
-  tone: z.enum(['professional', 'friendly', 'playful']).optional(),
+  verbosity: z.enum(['brief', 'balanced', 'detailed']).nullable().optional(),
+  tone: z.enum(['professional', 'friendly', 'playful']).nullable().optional(),
 });
 
 const secretBody = z.object({
