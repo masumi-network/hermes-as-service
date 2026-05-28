@@ -109,6 +109,18 @@ model HermesInstance {
   /// morning-brief or weekly-wrap. Defaults to UTC when null. Sokosumi
   /// passes this at provision time if known.
   timezone       String?
+  /// Optional persona customization, set at provision/onboard or via
+  /// PATCH. All nullable — unset means default behavior (nothing is
+  /// injected, agent behaves exactly as before). These shape the agent's
+  /// VOICE only; they never affect accuracy, structure, cost-gating, or
+  /// correctness, and never apply to artifacts that leave the user
+  /// (drafted emails, task comments, documents stay professional).
+  ///   personaName — what the agent calls itself, e.g. "Athena". Free text.
+  ///   verbosity   — "brief" | "balanced" | "detailed".
+  ///   tone        — "professional" | "friendly" | "playful".
+  personaName    String?
+  verbosity      String?
+  tone           String?
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's

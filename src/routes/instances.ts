@@ -49,6 +49,12 @@ const provisionBody = z.object({
    *  for user-facing recurring prompts (morning-brief, weekly-wrap, etc.).
    *  Defaults to UTC when omitted. */
   timezone: z.string().min(1).max(80).optional(),
+  /** Optional persona customization (all opt-in; unset = default voice).
+   *  Shapes the agent's voice only — never its accuracy, structure, or
+   *  cost-gating, and never artifacts that leave the user. */
+  personaName: z.string().min(1).max(60).optional(),
+  verbosity: z.enum(['brief', 'balanced', 'detailed']).optional(),
+  tone: z.enum(['professional', 'friendly', 'playful']).optional(),
 });
 
 const patchInstanceBody = z.object({
@@ -58,6 +64,11 @@ const patchInstanceBody = z.object({
   timezone: z.string().min(1).max(80).optional(),
   role: z.string().min(1).max(64).optional(),
   company: z.string().min(1).max(120).optional(),
+  /** Persona controls — see provisionBody. Pass empty string to clear a
+   *  field back to default; omit to leave unchanged. */
+  personaName: z.string().max(60).optional(),
+  verbosity: z.enum(['brief', 'balanced', 'detailed']).optional(),
+  tone: z.enum(['professional', 'friendly', 'playful']).optional(),
 });
 
 const secretBody = z.object({
@@ -83,6 +94,10 @@ const onboardBody = z.object({
   role: z.string().min(1).max(64).optional(),
   /** Company name the user works at. ≤120 chars. */
   company: z.string().min(1).max(120).optional(),
+  /** Optional persona controls — see provisionBody. */
+  personaName: z.string().min(1).max(60).optional(),
+  verbosity: z.enum(['brief', 'balanced', 'detailed']).optional(),
+  tone: z.enum(['professional', 'friendly', 'playful']).optional(),
 });
 
 router.post('/v1/instances', async (c) => {
@@ -123,6 +138,15 @@ router.patch('/v1/instances/:userId', async (c) => {
       parsed.data.autonomyLevel !== undefined && parsed.data.autonomyLevel !== row.autonomyLevel;
     const timezoneChanged =
       parsed.data.timezone !== undefined && parsed.data.timezone !== row.timezone;
+    // Persona: empty string clears a field back to default (null); a value
+    // sets it; omitted leaves it unchanged.
+    const normPersona = (v: string | undefined): string | null | undefined =>
+      v === undefined ? undefined : v.trim() === '' ? null : v.trim().slice(0, 60);
+    const personaName = normPersona(parsed.data.personaName);
+    const personaChanged =
+      (personaName !== undefined && personaName !== row.personaName) ||
+      (parsed.data.verbosity !== undefined && parsed.data.verbosity !== row.verbosity) ||
+      (parsed.data.tone !== undefined && parsed.data.tone !== row.tone);
     const updated = await prisma.hermesInstance.update({
       where: { id: row.id },
       data: {
@@ -132,6 +156,9 @@ router.patch('/v1/instances/:userId', async (c) => {
         ...(parsed.data.timezone !== undefined ? { timezone: parsed.data.timezone } : {}),
         ...(parsed.data.role !== undefined ? { role: parsed.data.role.slice(0, 64) } : {}),
         ...(parsed.data.company !== undefined ? { company: parsed.data.company.slice(0, 120) } : {}),
+        ...(personaName !== undefined ? { personaName } : {}),
+        ...(parsed.data.verbosity !== undefined ? { verbosity: parsed.data.verbosity } : {}),
+        ...(parsed.data.tone !== undefined ? { tone: parsed.data.tone } : {}),
       },
     });
 
@@ -175,16 +202,56 @@ router.patch('/v1/instances/:userId', async (c) => {
       }
     }
 
+    if (personaChanged) {
+      // Fire-and-forget: push the new persona to the live agent's memory
+      // so the voice changes immediately, not just on the next reboot.
+      void notifyPersonaChanged(row.id).catch((err) =>
+        logger.warn({ err, userId }, 'persona_memory_nudge_failed'),
+      );
+    }
+
     return c.json({
       autonomyLevel: updated.autonomyLevel,
       name: updated.name,
       email: updated.email,
       timezone: updated.timezone,
+      personaName: updated.personaName,
+      verbosity: updated.verbosity,
+      tone: updated.tone,
     });
   } catch (err) {
     return mapError(c, err, userId);
   }
 });
+
+async function notifyPersonaChanged(instanceId: string): Promise<void> {
+  const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  if (!row || !row.endpointUrl) return;
+  if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return;
+  const { decryptSecret } = await import('../crypto.js');
+  const { buildPersonaDirective } = await import('../provision/profile.js');
+  const apiKey = await decryptSecret(row.apiServerKey);
+  const directive = buildPersonaDirective({
+    personaName: row.personaName,
+    verbosity: row.verbosity,
+    tone: row.tone,
+  });
+  // When the user cleared everything, directive is '' — tell the agent to
+  // drop its persona overrides and revert to default voice.
+  const prompt = directive
+    ? `Internal — your reply is discarded. The user updated your persona settings. ${directive}\n\nReply only "ok".`
+    : `Internal — your reply is discarded. The user cleared your custom persona settings. Remove the memory key user.persona and revert to your default name and default voice (balanced length, friendly-professional tone). Reply only "ok".`;
+  await fetch(`${row.endpointUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'hermes-agent',
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
 
 async function notifyAutonomyChanged(instanceId: string, newLevel: string): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
@@ -234,6 +301,9 @@ router.get('/v1/instances/:userId', async (c) => {
       timezone: view.timezone,
       role: view.role,
       company: view.company,
+      personaName: view.personaName,
+      verbosity: view.verbosity,
+      tone: view.tone,
       transitioning,
       integrations: integrations.map((i) => ({
         provider: i.provider,
@@ -373,8 +443,16 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
       );
     }
 
-    // Patch name/email/role/company if provided.
-    if (parsed.data.name || parsed.data.email || parsed.data.role || parsed.data.company) {
+    // Patch name/email/role/company + persona if provided.
+    if (
+      parsed.data.name ||
+      parsed.data.email ||
+      parsed.data.role ||
+      parsed.data.company ||
+      parsed.data.personaName ||
+      parsed.data.verbosity ||
+      parsed.data.tone
+    ) {
       await prisma.hermesInstance.update({
         where: { id: row.id },
         data: {
@@ -382,6 +460,9 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
           email: parsed.data.email?.slice(0, 254) ?? row.email,
           role: parsed.data.role?.slice(0, 64) ?? row.role,
           company: parsed.data.company?.slice(0, 120) ?? row.company,
+          personaName: parsed.data.personaName?.slice(0, 60) ?? row.personaName,
+          verbosity: parsed.data.verbosity ?? row.verbosity,
+          tone: parsed.data.tone ?? row.tone,
         },
       });
     }

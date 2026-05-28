@@ -21,6 +21,10 @@ export interface ProvisionInput {
   autonomyLevel?: 'low' | 'medium' | 'high';
   /** IANA timezone for user-facing recurring prompts. Defaults to UTC. */
   timezone?: string;
+  /** Optional persona customization. All unset = default behavior. */
+  personaName?: string;
+  verbosity?: 'brief' | 'balanced' | 'detailed';
+  tone?: 'professional' | 'friendly' | 'playful';
 }
 
 export interface InstanceView {
@@ -38,6 +42,9 @@ export interface InstanceView {
   timezone: string | null;
   role: string | null;
   company: string | null;
+  personaName: string | null;
+  verbosity: string | null;
+  tone: string | null;
 }
 
 /**
@@ -77,6 +84,9 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
       sokosumiEnv: input.sokosumiEnv ?? null,
       autonomyLevel: input.autonomyLevel ?? 'medium',
       timezone: input.timezone ?? null,
+      personaName: input.personaName?.slice(0, 60) ?? null,
+      verbosity: input.verbosity ?? null,
+      tone: input.tone ?? null,
       status: 'provisioning',
     },
   });
@@ -402,6 +412,9 @@ function toView(row: {
   timezone: string | null;
   role: string | null;
   company: string | null;
+  personaName: string | null;
+  verbosity: string | null;
+  tone: string | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -418,6 +431,9 @@ function toView(row: {
     timezone: row.timezone,
     role: row.role,
     company: row.company,
+    personaName: row.personaName,
+    verbosity: row.verbosity,
+    tone: row.tone,
   };
 }
 

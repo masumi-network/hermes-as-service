@@ -5,6 +5,7 @@ import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { buildPersonaDirective } from './profile.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
 export interface OnboardingStep {
@@ -97,7 +98,13 @@ export async function runOnboarding(
     await callHermes(
       row.endpointUrl,
       apiKey,
-      buildBootPrompt(row.name, row.email, row.role, row.company),
+      buildBootPrompt(
+        row.name,
+        row.email,
+        row.role,
+        row.company,
+        buildPersonaDirective({ personaName: row.personaName, verbosity: row.verbosity, tone: row.tone }),
+      ),
       5 * 60_000,
     );
     await markStep(instanceId, 'memory', 'done');
@@ -327,7 +334,13 @@ export async function runReturningUserBoot(instanceId: string): Promise<void> {
     await callHermes(
       row.endpointUrl,
       apiKey,
-      buildReturningBootPrompt(row.name, row.email, row.role, row.company),
+      buildReturningBootPrompt(
+        row.name,
+        row.email,
+        row.role,
+        row.company,
+        buildPersonaDirective({ personaName: row.personaName, verbosity: row.verbosity, tone: row.tone }),
+      ),
       3 * 60_000,
     );
   } catch (err) {
@@ -572,6 +585,7 @@ function buildBootPrompt(
   email: string | null,
   role: string | null = null,
   company: string | null = null,
+  persona: string = '',
 ): string {
   const identityParts: string[] = [];
   if (name) identityParts.push(`their name is "${name}"`);
@@ -582,11 +596,14 @@ function buildBootPrompt(
     identityParts.length > 0
       ? `The user identity: ${identityParts.join(', ')}. Save all of this to your memory under explicit keys (user.name, user.email, user.role, user.company) so subsequent threads can reference them without re-fetching.`
       : 'The user has not given any identity details yet.';
+  // Opt-in persona block. Empty string when the user set nothing, so this
+  // line vanishes and onboarding behaves exactly as before.
+  const personaLine = persona ? `\n\n${persona}` : '';
 
   return `Onboarding setup. This message is orchestration, not a user-visible \
 chat. Your response is discarded — do not greet me.
 
-1. **Memory** — ${identityLine}
+1. **Memory** — ${identityLine}${personaLine}
 
 2. **Daily-brief task** — schedule a cronjob firing every day at \
 07:00 UTC (cron expression "0 7 * * *"). Set name to "daily-brief" and \
@@ -900,6 +917,7 @@ function buildReturningBootPrompt(
   email: string | null,
   role: string | null = null,
   company: string | null = null,
+  persona: string = '',
 ): string {
   const idParts: string[] = [];
   if (name) idParts.push(name);
@@ -907,10 +925,13 @@ function buildReturningBootPrompt(
   if (role) idParts.push(`role: ${role}`);
   if (company) idParts.push(`at ${company}`);
   const idLine = idParts.length > 0 ? ` (${idParts.join(', ')})` : '';
+  // Re-assert persona on every fresh machine so it survives the volume
+  // wipe between sessions. Empty when unset → no behavior change.
+  const personaLine = persona ? `\n\n${persona}` : '';
   return `Internal — your reply is discarded. Briefly re-read your memory. \
 The user${idLine} is returning for a new session. The Fly machine is fresh, \
 so any in-flight state from last time is gone; only your memory file \
-survived. Reply "ok".`;
+survived.${personaLine} Reply "ok".`;
 }
 
 function returningWelcome(name: string | null): string {
