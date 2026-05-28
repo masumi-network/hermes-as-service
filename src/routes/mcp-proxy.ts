@@ -80,6 +80,30 @@ async function forward(c: Context): Promise<Response> {
   const auth = await authenticate(instanceId, c.req.header('Authorization'));
   if (!auth.ok) return jsonResponse(auth.status, { error: { message: auth.message } });
 
+  // MCP streamable_http clients open a GET to this endpoint for the
+  // OPTIONAL server->client SSE stream. Composio is stateless and offers
+  // no such stream — a GET there 307-redirects to /sse, which 405s. If we
+  // forward the GET, our upstream fetch follows that redirect and hands the
+  // client a 405-with-JSON-body delivered after a redirect hop. The Python
+  // streamable_http client's stream-reader task chokes on that
+  // ("unhandled errors in a TaskGroup"), declares the connection lost,
+  // reconnects, hits the same response, and after 5 attempts GIVES UP —
+  // disabling the integration for the whole gateway session. That's the
+  // bug behind "Gmail isn't connected" despite a healthy connection.
+  //
+  // Per the MCP spec, a server with no server->client stream MUST answer
+  // GET with 405. Return that cleanly and directly — never forward GET —
+  // so the client drops into correct POST-only operation instead of
+  // cascading. POST/DELETE still forward normally below.
+  const reqMethod = c.req.method.toUpperCase();
+  if (reqMethod === 'GET' || reqMethod === 'HEAD') {
+    logger.info({ instanceId, provider, method: reqMethod }, 'mcp_proxy_get_rejected');
+    return new Response(null, {
+      status: 405,
+      headers: { Allow: 'POST, DELETE', 'Content-Type': 'application/json' },
+    });
+  }
+
   const integration = await prisma.integration.findUnique({
     where: { userId_provider: { userId: auth.row.userId, provider } },
   });
@@ -173,14 +197,33 @@ async function forward(c: Context): Promise<Response> {
     }
   }
 
+  // Cap the upstream call. A hung Composio request that runs to the
+  // client's own 120s ceiling is part of what triggers the
+  // connection-lost -> reconnect -> give-up cascade. Failing fast with a
+  // clean error lets the client retry the single call instead of tearing
+  // down the whole server. 60s is generous for a Gmail/Calendar read.
+  const UPSTREAM_TIMEOUT_MS = 60_000;
+  const t0 = Date.now();
   let upstream: Response;
   try {
     upstream = await fetch(upstreamUrl, {
       method,
       headers: upstreamHeaders,
       body: bodyText,
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
   } catch (err) {
+    const isTimeout =
+      err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    if (isTimeout) {
+      logger.warn(
+        { instanceId, provider, ms: Date.now() - t0, timeoutMs: UPSTREAM_TIMEOUT_MS },
+        'mcp_proxy_upstream_timeout',
+      );
+      return jsonResponse(504, {
+        error: { message: `upstream timed out after ${UPSTREAM_TIMEOUT_MS}ms` },
+      });
+    }
     logger.error({ err, instanceId, provider }, 'mcp_proxy_upstream_failed');
     return jsonResponse(502, { error: { message: 'upstream fetch failed' } });
   }
