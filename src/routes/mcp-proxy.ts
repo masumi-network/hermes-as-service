@@ -81,26 +81,74 @@ async function forward(c: Context): Promise<Response> {
   if (!auth.ok) return jsonResponse(auth.status, { error: { message: auth.message } });
 
   // MCP streamable_http clients open a GET to this endpoint for the
-  // OPTIONAL server->client SSE stream. Composio is stateless and offers
-  // no such stream — a GET there 307-redirects to /sse, which 405s. If we
-  // forward the GET, our upstream fetch follows that redirect and hands the
-  // client a 405-with-JSON-body delivered after a redirect hop. The Python
-  // streamable_http client's stream-reader task chokes on that
-  // ("unhandled errors in a TaskGroup"), declares the connection lost,
-  // reconnects, hits the same response, and after 5 attempts GIVES UP —
-  // disabling the integration for the whole gateway session. That's the
-  // bug behind "Gmail isn't connected" despite a healthy connection.
+  // server->client SSE stream, then call response.raise_for_status() on it.
+  // ANY non-2xx there throws inside the client's connection TaskGroup
+  // ("unhandled errors in a TaskGroup"), which it treats as "connection
+  // lost" -> reconnect -> after 5 accumulated failures it GIVES UP and
+  // disables the integration for the whole gateway session. That is the
+  // root cause of "Gmail isn't connected" despite a healthy connection —
+  // confirmed from the gateway traceback:
+  //   httpx.HTTPStatusError: ... for url .../v1/mcp/<id>/google_calendar
+  //   at response.raise_for_status()
   //
-  // Per the MCP spec, a server with no server->client stream MUST answer
-  // GET with 405. Return that cleanly and directly — never forward GET —
-  // so the client drops into correct POST-only operation instead of
-  // cascading. POST/DELETE still forward normally below.
+  // Composio answers GET with a 307 -> /sse -> 405 (it's stateless and
+  // pushes nothing server-initiated; every tool result comes back inline
+  // on the POST). So forwarding the GET can only ever produce a non-2xx.
+  // A "clean 405" doesn't help either — 405 is still non-2xx and trips
+  // raise_for_status the same way.
+  //
+  // The fix: answer GET ourselves with 200 + an idle text/event-stream
+  // that we keep alive with periodic SSE comments and never forward
+  // upstream. raise_for_status() passes, the client has a valid (silent)
+  // server->client channel, the connection stays up, and the give-up
+  // cascade never starts. Keepalive comments also stop edge proxies
+  // (Railway/Fly) from reaping the idle connection.
   const reqMethod = c.req.method.toUpperCase();
-  if (reqMethod === 'GET' || reqMethod === 'HEAD') {
-    logger.info({ instanceId, provider, method: reqMethod }, 'mcp_proxy_get_rejected');
-    return new Response(null, {
-      status: 405,
-      headers: { Allow: 'POST, DELETE', 'Content-Type': 'application/json' },
+  if (reqMethod === 'HEAD') {
+    return new Response(null, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  }
+  if (reqMethod === 'GET') {
+    logger.info({ instanceId, provider }, 'mcp_proxy_sse_stream_opened');
+    const encoder = new TextEncoder();
+    const KEEPALIVE_MS = 20_000;
+    const stream = new ReadableStream({
+      start(controller) {
+        let closed = false;
+        const safeClose = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(iv);
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        };
+        // Open the stream immediately so the client's raise_for_status()
+        // sees a live 200 response, then heartbeat. If an enqueue throws
+        // the client has gone away — tear down so we don't leak the timer.
+        controller.enqueue(encoder.encode(': mcp keepalive stream\n\n'));
+        const iv = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(': ka\n\n'));
+          } catch {
+            safeClose();
+          }
+        }, KEEPALIVE_MS);
+        const signal = c.req.raw.signal;
+        if (signal) {
+          if (signal.aborted) safeClose();
+          else signal.addEventListener('abort', safeClose);
+        }
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+      },
     });
   }
 
