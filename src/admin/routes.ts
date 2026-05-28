@@ -695,6 +695,59 @@ router.post('/admin/instances/:userId/test/run-hermes-executor', async (c) => {
  * ?dry=1 to return the rendered markdown without enqueuing.
  */
 /**
+ * Admin-only — re-run syncSystemSchedules for a user (or every active
+ * user with ?all=1). Needed to push updated system_prompt/sweep specs
+ * (e.g. a reworded morning-brief) to EXISTING instances, since the
+ * scheduler dispatches the prompt stored on the ScheduledTask row and
+ * that row only refreshes when this sync runs. Idempotent.
+ */
+router.post('/admin/maintenance/resync-system-schedules', async (c) => {
+  const all = c.req.query('all') === '1';
+  const oneUser = c.req.query('userId') ?? undefined;
+  const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
+  const where = all
+    ? { destroyedAt: null, onboardedAt: { not: null } }
+    : { userId: oneUser, destroyedAt: null };
+  if (!all && !oneUser) {
+    return c.json({ error: 'pass ?all=1 or ?userId=<id>' }, 400);
+  }
+  const rows = await prisma.hermesInstance.findMany({
+    where,
+    select: { id: true, userId: true, autonomyLevel: true, timezone: true },
+  });
+  let synced = 0;
+  const failures: Array<{ userId: string; error: string }> = [];
+  for (const row of rows) {
+    try {
+      const integrations = await prisma.integration.findMany({
+        where: { instanceId: row.id, status: 'connected' },
+        select: { provider: true },
+      });
+      const providers = new Set(integrations.map((i) => i.provider));
+      const hasMailOrCalendar =
+        providers.has('gmail') ||
+        providers.has('outlook') ||
+        providers.has('google_calendar') ||
+        providers.has('outlook_calendar');
+      const autonomy =
+        row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+      await syncSystemSchedules({
+        instanceId: row.id,
+        userId: row.userId,
+        autonomy: autonomy as 'low' | 'medium' | 'high',
+        timezone: row.timezone ?? 'UTC',
+        sokosumiConfigured: true,
+        hasMailOrCalendar,
+      });
+      synced++;
+    } catch (err) {
+      failures.push({ userId: row.userId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return c.json({ ok: true, scanned: rows.length, synced, failures });
+});
+
+/**
  * Admin-only — manually nudge the running Hermes agent that an
  * integration is connected, in case it learned the opposite before
  * we wired the automatic post-connect nudge. One-shot recovery for

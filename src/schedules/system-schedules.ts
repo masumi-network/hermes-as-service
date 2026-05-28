@@ -115,12 +115,18 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     kind: 'system_prompt',
     name: 'Weekday morning brief',
     description:
-      'Mon–Fri 8am brief: yesterday’s completed jobs, today’s calendar, top open tasks needing action.',
+      'Mon–Fri 8am brief: yesterday’s completed jobs, today’s calendar, notable email, anything actionable from your connected tools, and the top open tasks needing action.',
     cronExpr: '0 8 * * 1-5',
     localTime: true,
     minAutonomy: 'medium',
     prompt:
-      'Good morning. Give the user their weekday brief: (a) Sokosumi jobs that completed since their last brief — names + 1-line takeaway each, (b) today’s calendar at a glance if a calendar MCP is connected, (c) the 2–3 open Sokosumi tasks most worth touching today. Keep it tight — under 180 words, no preamble.',
+      'Good morning. Give the user their weekday brief. Pull from EVERY data source you actually have connected MCP tools for — skip any section you have no tools for, and never tell the user a source is missing (just omit it silently):\n' +
+      '(a) Sokosumi jobs that completed since their last brief — names + 1-line takeaway each.\n' +
+      '(b) Today’s calendar at a glance, if a calendar MCP (Google/Outlook) is connected.\n' +
+      '(c) Notable email since yesterday, if a mail MCP (Gmail/Outlook) is connected — urgent threads, anything awaiting your reply, and anything tied to today’s meetings. Don’t list every message; surface what matters and who’s waiting on you.\n' +
+      '(d) Anything actionable from your OTHER connected integrations — check each one you have tools for (Slack, Linear, GitHub, Notion, HubSpot, X/Twitter, etc.): unread mentions/DMs, issues or PRs assigned to or awaiting the user, review requests, stalled threads. Only the integrations actually connected; only items worth acting on today.\n' +
+      '(e) The 2–3 open Sokosumi tasks most worth touching today.\n' +
+      'Lead with whatever is most time-sensitive across all of the above. Group by source so it’s scannable. Keep it tight — under 250 words, no preamble.',
   },
   {
     slug: 'weekly-wrap',
