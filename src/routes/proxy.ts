@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
+import { Agent } from 'undici';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
@@ -7,6 +8,23 @@ import { HttpError, notFound, problemJson, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 
 const router = new Hono();
+
+// Long-running agent turns (30+ tool calls, several minutes) blew through
+// undici's default 5-minute headersTimeout: for a non-streaming request the
+// agent doesn't send headers until the WHOLE turn is done, so a 5+ min loop
+// surfaced to Sokosumi as "fetch failed: Headers Timeout Error". The fix is
+// a dedicated dispatcher with both header- and body-timeout disabled (and a
+// generous keep-alive) for the chat-completions proxy. The connect timeout
+// stays short so genuine DNS/TLS failures still fail fast.
+const CHAT_PROXY_AGENT = new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+  connectTimeout: 10_000,
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 10 * 60_000,
+});
+
+const SSE_KEEPALIVE_MS = 20_000;
 
 interface OpenAIMessage {
   role: string;
@@ -88,12 +106,16 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         Accept: isStreaming ? 'text/event-stream' : 'application/json',
       },
       body: bodyText,
+      // @ts-expect-error — undici dispatcher is valid on Node's fetch impl
+      dispatcher: CHAT_PROXY_AGENT,
     });
 
     if (isStreaming && upstreamRes.body) {
       // Tee the stream: one branch goes to the client unchanged, the other
       // is consumed in the background to capture the assembled assistant
-      // response.
+      // response. Then wrap the client-facing branch with a keepalive ping
+      // so quiet stretches between tool calls don't get reaped by edge
+      // proxies on the Sokosumi side.
       const [toClient, toCapture] = upstreamRes.body.tee();
       void captureSseStream(toCapture, {
         instanceId: row.id,
@@ -103,11 +125,11 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         upstreamStatus: upstreamRes.status,
       }).catch((err) => logger.error({ err, userId, requestId }, 'sse_capture_failed'));
 
-      return new Response(toClient, {
+      return new Response(withSseKeepalive(toClient), {
         status: upstreamRes.status,
         headers: {
           'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'no-cache, no-transform',
           Connection: 'keep-alive',
         },
       });
@@ -203,6 +225,84 @@ async function captureNonStreaming(respText: string, ctx: CaptureCtx): Promise<v
     instanceId: ctx.instanceId,
     event: errorMessage ? 'chat_failed' : 'chat_proxied',
     detail: { requestId: ctx.requestId, latencyMs, status: ctx.upstreamStatus, ...(errorMessage ? { errorMessage } : {}) },
+  });
+}
+
+/**
+ * Pass an SSE stream through unchanged, but inject `: ka\n\n` keepalive
+ * comments every SSE_KEEPALIVE_MS during quiet stretches. Real agent turns
+ * can sit silent for minutes between tool calls — without keepalive, an
+ * intermediary (Railway edge, Sokosumi's load balancer, the browser) can
+ * reap the idle connection and the user sees a hang. SSE comments are
+ * protocol-legal no-ops the client ignores.
+ *
+ * The timer is reset every time we forward a real chunk, so the keepalive
+ * never duplicates legitimate traffic.
+ */
+function withSseKeepalive(upstream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const KEEPALIVE = encoder.encode(': ka\n\n');
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      let timer: NodeJS.Timeout | null = null;
+      const stopTimer = () => {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        stopTimer();
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+      const armTimer = () => {
+        stopTimer();
+        timer = setInterval(() => {
+          try {
+            controller.enqueue(KEEPALIVE);
+          } catch {
+            safeClose();
+          }
+        }, SSE_KEEPALIVE_MS);
+      };
+      armTimer();
+
+      const reader = upstream.getReader();
+      const pump = async (): Promise<void> => {
+        try {
+          while (!closed) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              controller.enqueue(value);
+              armTimer(); // reset so we don't ping right after a real chunk
+            }
+          }
+        } catch (err) {
+          logger.warn({ err }, 'sse_keepalive_upstream_error');
+          try {
+            controller.error(err);
+          } catch {
+            /* ignore */
+          }
+          stopTimer();
+          closed = true;
+          return;
+        }
+        safeClose();
+      };
+      void pump();
+    },
+    cancel(reason) {
+      logger.info({ reason: String(reason) }, 'sse_keepalive_client_disconnected');
+    },
   });
 }
 
