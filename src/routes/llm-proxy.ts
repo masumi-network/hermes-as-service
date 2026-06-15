@@ -7,7 +7,7 @@ import { decryptSecret } from '../crypto.js';
 import { ensurePricingLoaded } from '../llm/pricing.js';
 import { checkUserCap, recordLlmUsage } from '../llm/spend.js';
 import { publishProgress, hasProgressSubscribers } from './progress-bus.js';
-import { labelForBuiltinTool } from './tool-labels.js';
+import { labelForBuiltinTool, summarizeResult } from './tool-labels.js';
 
 const router = new Hono();
 
@@ -153,6 +153,10 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   // with a confusing error that masks the caller's real mistake).
   const forwardedBody = parsedOk ? JSON.stringify(parsed) : bodyText;
 
+  // Announce the just-completed tool round (if any) as tool_done chips,
+  // derived from the trailing tool-result messages in this request.
+  if (parsedOk) publishToolResults(auth.row.id, parsed);
+
   const upstreamHeaders: Record<string, string> = {
     Authorization: `Bearer ${cfg.OPENROUTER_API_KEY}`,
     'Content-Type': 'application/json',
@@ -203,7 +207,7 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
  */
 function publishToolCalls(
   instanceId: string,
-  calls: Array<{ name?: string; args?: string }>,
+  calls: Array<{ name?: string; args?: string; id?: string }>,
 ): void {
   if (!hasProgressSubscribers(instanceId)) return;
   for (const call of calls) {
@@ -212,11 +216,74 @@ function publishToolCalls(
     publishProgress(instanceId, {
       phase: 'tool',
       tool: call.name,
+      ...(call.id ? { id: call.id } : {}),
       label,
       ...(detail ? { detail } : {}),
       ts: Date.now(),
     });
   }
+}
+
+/**
+ * Every tool's result flows back into the NEXT LLM call as trailing
+ * `role:"tool"` messages — so on each forwarded request we can announce the
+ * just-completed round as `tool_done` chips (with a short result summary).
+ * The trailing consecutive tool block is exactly one round's results, so no
+ * cross-request dedup is needed. Covers built-in AND MCP tools uniformly.
+ */
+function publishToolResults(instanceId: string, parsed: Record<string, unknown>): void {
+  if (!hasProgressSubscribers(instanceId)) return;
+  for (const r of extractTrailingToolResults(parsed['messages'])) {
+    publishProgress(instanceId, {
+      phase: 'tool_done',
+      ...(r.name ? { tool: r.name } : {}),
+      ...(r.id ? { id: r.id } : {}),
+      label: r.name ? labelForBuiltinTool(r.name).label : 'Tool finished',
+      ...(r.summary ? { detail: r.summary } : {}),
+      ts: Date.now(),
+    });
+  }
+}
+
+interface ToolResult {
+  id?: string;
+  name?: string;
+  summary: string;
+}
+
+/**
+ * Pure: from an OpenAI `messages` array, return the trailing run of tool
+ * results (the most recent round), each labelled with its tool name (mapped
+ * via tool_call_id from the assistant tool_calls) and a short summary.
+ */
+export function extractTrailingToolResults(messages: unknown): ToolResult[] {
+  if (!Array.isArray(messages)) return [];
+  const idToName = new Map<string, string>();
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const msg = m as { role?: string; tool_calls?: { id?: string; function?: { name?: string } }[] };
+    if (msg.role !== 'assistant' || !Array.isArray(msg.tool_calls)) continue;
+    for (const tc of msg.tool_calls) {
+      if (typeof tc?.id === 'string' && typeof tc.function?.name === 'string') {
+        idToName.set(tc.id, tc.function.name);
+      }
+    }
+  }
+  const trailing: { tool_call_id?: string; name?: string; content?: unknown }[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    const role = m && typeof m === 'object' ? (m as { role?: string }).role : undefined;
+    if (role === 'tool' || role === 'function') {
+      trailing.unshift(m as { tool_call_id?: string; name?: string; content?: unknown });
+    } else {
+      break;
+    }
+  }
+  return trailing.map((m) => {
+    const id = typeof m.tool_call_id === 'string' ? m.tool_call_id : undefined;
+    const name = (id && idToName.get(id)) || (typeof m.name === 'string' ? m.name : undefined);
+    return { id, name, summary: summarizeResult(m.content) };
+  });
 }
 
 async function forwardGenericGet(c: Context, pathSuffix: string): Promise<Response> {
@@ -273,14 +340,14 @@ async function captureNonStreaming(respText: string, ref: InstanceRef): Promise<
       model?: string;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
       choices?: {
-        message?: { tool_calls?: { function?: { name?: string; arguments?: string } }[] };
+        message?: { tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] };
       }[];
     };
     const toolCalls = json.choices?.[0]?.message?.tool_calls;
     if (Array.isArray(toolCalls) && toolCalls.length > 0) {
       publishToolCalls(
         ref.id,
-        toolCalls.map((tc) => ({ name: tc.function?.name, args: tc.function?.arguments })),
+        toolCalls.map((tc) => ({ name: tc.function?.name, args: tc.function?.arguments, id: tc.id })),
       );
     }
     const promptTokens = json.usage?.prompt_tokens ?? 0;
@@ -310,7 +377,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   // for an index, arguments stream in fragments across later deltas. We
   // flush one progress event per tool when the stream ends (the whole
   // tool-decision turn is short, so this is still well ahead of execution).
-  const toolPartials = new Map<number, { name: string; args: string }>();
+  const toolPartials = new Map<number, { name: string; args: string; id: string }>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -329,7 +396,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
           usage?: { prompt_tokens?: number; completion_tokens?: number };
           choices?: {
             delta?: {
-              tool_calls?: { index?: number; function?: { name?: string; arguments?: string } }[];
+              tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
             };
           }[];
         };
@@ -342,10 +409,10 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
         if (Array.isArray(deltaCalls)) {
           for (const tc of deltaCalls) {
             const idx = tc.index ?? 0;
-            const cur = toolPartials.get(idx) ?? { name: '', args: '' };
-            // Both name and args are accumulated: the name normally arrives
-            // whole in the first delta, but some providers fragment it, and
-            // appending an empty/absent field is a no-op either way.
+            const cur = toolPartials.get(idx) ?? { name: '', args: '', id: '' };
+            // name/id normally arrive whole in the first delta; args stream in
+            // fragments. Appending an empty/absent field is a no-op either way.
+            if (tc.id) cur.id = tc.id;
             if (tc.function?.name) cur.name += tc.function.name;
             if (tc.function?.arguments) cur.args += tc.function.arguments;
             toolPartials.set(idx, cur);
@@ -360,7 +427,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   if (toolPartials.size > 0) {
     publishToolCalls(
       ref.id,
-      [...toolPartials.values()].map((p) => ({ name: p.name, args: p.args })),
+      [...toolPartials.values()].map((p) => ({ name: p.name, args: p.args, id: p.id })),
     );
   }
 

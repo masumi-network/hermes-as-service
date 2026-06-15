@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { labelForBuiltinTool } from '../src/routes/tool-labels.js';
+import { labelForBuiltinTool, summarizeResult } from '../src/routes/tool-labels.js';
 
 describe('labelForBuiltinTool', () => {
   it('labels a coworker hand-off with the agent name and topic', () => {
@@ -78,6 +78,24 @@ describe('labelForBuiltinTool', () => {
     const r = labelForBuiltinTool('web_search', JSON.stringify({ query: long }));
     expect(r.detail!.length).toBeLessThanOrEqual(80);
     expect(r.detail!.endsWith('…')).toBe(true);
+  });
+});
+
+describe('summarizeResult', () => {
+  it('truncates long string content to one line', () => {
+    const r = summarizeResult('a'.repeat(300));
+    expect(r.length).toBeLessThanOrEqual(100);
+    expect(r.endsWith('…')).toBe(true);
+  });
+  it('collapses whitespace/newlines', () => {
+    expect(summarizeResult('line one\n\n  line two')).toBe('line one line two');
+  });
+  it('extracts text from OpenAI array content', () => {
+    expect(summarizeResult([{ type: 'text', text: 'found 5 results' }])).toBe('found 5 results');
+  });
+  it('stringifies objects/other as a fallback', () => {
+    expect(summarizeResult({ ok: true })).toBe('{"ok":true}');
+    expect(summarizeResult(null)).toBe('');
   });
 });
 

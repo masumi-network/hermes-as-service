@@ -132,6 +132,33 @@ function truncate(s: string, max = 80): string {
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
+/**
+ * Turn a tool-result payload into a short, single-line summary for a
+ * `tool_done` chip. Tool results can be JSON, big text, or arrays; we just
+ * want a legible hint, not the whole thing.
+ */
+export function summarizeResult(content: unknown, max = 100): string {
+  let text: string;
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    // OpenAI tool content can be an array of {type:'text', text} parts.
+    text = content
+      .map((p) =>
+        p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+          ? (p as { text: string }).text
+          : '',
+      )
+      .join(' ');
+    if (!text.trim()) text = JSON.stringify(content);
+  } else if (content == null) {
+    text = '';
+  } else {
+    text = JSON.stringify(content);
+  }
+  return truncate(text, max);
+}
+
 /** "GMAIL_FETCH_EMAILS" / "web_search" → "Gmail fetch emails" / "Web search". */
 function humanize(name: string): string {
   const words = name

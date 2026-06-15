@@ -34,6 +34,8 @@ export interface ProgressEvent {
   phase: ProgressPhase;
   /** Machine tool id, e.g. "web_search", "gmail/GMAIL_FETCH_EMAILS". */
   tool?: string;
+  /** Provider tool_call_id, so the UI can pair a `tool` chip with its `tool_done`. */
+  id?: string;
   /** Human label the UI shows, e.g. "Searching the web". */
   label?: string;
   /** Optional secondary line, e.g. the search query or "Hannah". */

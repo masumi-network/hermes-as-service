@@ -76,9 +76,10 @@ data: {"phase":"answering","elapsedMs":8400,"ts":...}
 ```ts
 {
   phase: "thinking" | "tool" | "tool_done" | "working" | "answering",
-  tool?:   string,   // machine id, e.g. "web_search", "gmail/GMAIL_FETCH_EMAILS"
+  tool?:   string,   // machine id, e.g. "web_search", "GMAIL_FETCH_EMAILS"
+  id?:     string,   // tool_call_id — pair a `tool` chip with its `tool_done`
   label?:  string,   // SHORT human label to show: "Searching the web"
-  detail?: string,   // optional secondary line: a query, a topic, a coworker name
+  detail?: string,   // tool: the query/topic. tool_done: a short result summary.
   elapsedMs: number, // ms since the turn started — drive an elapsed timer
   ts: number         // epoch ms the event was emitted
 }
@@ -90,9 +91,11 @@ Phases:
 |---|---|---|
 | `thinking` | immediately, at t=0 | flip from "sending" to "Hermes is thinking…" |
 | `tool` | the agent invoked a tool | show/append a chip from `label` (+ `detail`) |
-| `tool_done` | (reserved) a tool finished | optional: mark the chip complete |
+| `tool_done` | that tool's result came back | mark the matching chip complete; `detail` is a short result summary ("found 5 results…") |
 | `working` | heartbeat during a silent stretch (~every 20s) | keep the "thinking…" state alive + update elapsed timer |
 | `answering` | the answer has started streaming | clear the chips; render the answer |
+
+**Pairing `tool` ↔ `tool_done`:** match on `id` (the `tool_call_id`) when present; fall back to `tool` (name) otherwise. A `tool` chip is followed by its `tool_done` once the result returns — render it as the chip completing (e.g. spinner → check, with the summary as a subtitle). Parallel tool calls in one round each get their own `tool`/`tool_done` pair. Like all progress, `tool_done` is advisory — if one is missing, just leave the chip in its last state; the answer is unaffected.
 
 **`label` is always present and always safe to display** — for unknown tools we humanise the name (e.g. `NOTION_SEARCH_PAGES` → "Notion search pages") rather than send nothing. `detail` is best-effort (a search query, a coworker's name, a task topic) and may be absent.
 
