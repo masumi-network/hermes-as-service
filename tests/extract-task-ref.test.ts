@@ -8,10 +8,11 @@ describe('extractTaskRef', () => {
     task: { id: 'task_abc123', status: 'READY', name: 'Research MoE' },
   });
 
-  it('pulls taskId / taskStatus / coworker from a create_task result', () => {
+  it('pulls taskId / taskStatus / taskTitle / coworker from a create_task result', () => {
     expect(extractTaskRef('sokosumi_create_task', result)).toEqual({
       taskId: 'task_abc123',
       taskStatus: 'READY',
+      taskTitle: 'Research MoE',
       coworker: 'Hannah',
     });
   });

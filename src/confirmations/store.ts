@@ -88,6 +88,7 @@ interface ApproveResult {
   /** First-class fields for a created task, so the UI needn't parse `resultText`. */
   taskId?: string;
   taskStatus?: string;
+  taskTitle?: string;
   coworker?: string;
 }
 
@@ -101,16 +102,17 @@ interface ApproveResult {
 export function extractTaskRef(
   toolName: string,
   resultText: string | undefined,
-): { taskId?: string; taskStatus?: string; coworker?: string } {
+): { taskId?: string; taskStatus?: string; taskTitle?: string; coworker?: string } {
   if (toolName !== 'sokosumi_create_task' || !resultText) return {};
   try {
     const parsed = JSON.parse(resultText) as {
-      task?: { id?: unknown; status?: unknown };
+      task?: { id?: unknown; status?: unknown; name?: unknown };
       assignedTo?: { name?: unknown };
     };
-    const out: { taskId?: string; taskStatus?: string; coworker?: string } = {};
+    const out: { taskId?: string; taskStatus?: string; taskTitle?: string; coworker?: string } = {};
     if (typeof parsed.task?.id === 'string') out.taskId = parsed.task.id;
     if (typeof parsed.task?.status === 'string') out.taskStatus = parsed.task.status;
+    if (typeof parsed.task?.name === 'string') out.taskTitle = parsed.task.name;
     if (typeof parsed.assignedTo?.name === 'string') out.coworker = parsed.assignedTo.name;
     return out;
   } catch {
@@ -286,13 +288,27 @@ export async function approveConfirmation(
     },
   });
 
-  // Push a follow-up message to Hermes' outbox so the next chat turn
-  // sees the resolution and can act on it.
+  // Push to the outbox. This lands in the user's chat — often a minute+
+  // after approval, once they've scrolled on — so it MUST stand on its own:
+  // lead with the task title + status, not read as a reply to whatever they
+  // just typed. Sokosumi renders the trailing JSON as the /tasks/:id card.
   try {
     const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
-    const head = errored
-      ? `Your earlier ${row.toolName} call was approved by the user but failed when executed: ${errorMessage}`
-      : `The user approved your earlier ${row.toolName} request. The action was executed; here's the result you can act on:`;
+    const ref = extractTaskRef(row.toolName, resultText);
+    const argName = (row.toolArgs as Record<string, unknown>)?.['name'];
+    const title = ref.taskTitle ?? (typeof argName === 'string' ? argName : undefined);
+    let head: string;
+    if (errored) {
+      head = title
+        ? `Heads-up — the task you approved earlier, "${title}", couldn't be created: ${errorMessage}.`
+        : `Heads-up — your approved ${row.toolName} request couldn't be completed: ${errorMessage}.`;
+    } else if (row.toolName === 'sokosumi_create_task' && title) {
+      const status = ref.taskStatus ? ` (${ref.taskStatus})` : '';
+      const who = ref.coworker ? ` for ${ref.coworker}` : '';
+      head = `Here's the task you set up earlier${who} — "${title}"${status}. It's ready to view.`;
+    } else {
+      head = `Done — your earlier ${row.toolName} request was approved and completed.`;
+    }
     await enqueueOutboxMessage({
       instanceId: instance.id,
       userId: instance.userId,
