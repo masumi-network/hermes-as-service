@@ -85,6 +85,37 @@ interface ApproveResult {
   status: 'approved' | 'errored' | 'not_found' | 'already_resolved';
   resultText?: string;
   errorMessage?: string;
+  /** First-class fields for a created task, so the UI needn't parse `resultText`. */
+  taskId?: string;
+  taskStatus?: string;
+  coworker?: string;
+}
+
+/**
+ * Pull the created task's id/status/coworker out of a sokosumi_create_task
+ * result so the approve response can expose them as first-class fields. The
+ * result text is the JSON `executeTool` returns:
+ *   { scope, assignedTo:{name,...}, task:{ id, status, ... } }
+ * Returns {} for other tools or anything unparseable — best-effort.
+ */
+export function extractTaskRef(
+  toolName: string,
+  resultText: string | undefined,
+): { taskId?: string; taskStatus?: string; coworker?: string } {
+  if (toolName !== 'sokosumi_create_task' || !resultText) return {};
+  try {
+    const parsed = JSON.parse(resultText) as {
+      task?: { id?: unknown; status?: unknown };
+      assignedTo?: { name?: unknown };
+    };
+    const out: { taskId?: string; taskStatus?: string; coworker?: string } = {};
+    if (typeof parsed.task?.id === 'string') out.taskId = parsed.task.id;
+    if (typeof parsed.task?.status === 'string') out.taskStatus = parsed.task.status;
+    if (typeof parsed.assignedTo?.name === 'string') out.coworker = parsed.assignedTo.name;
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -187,16 +218,20 @@ export async function approveConfirmation(
   });
   if (!row) return { ok: false, status: 'not_found' };
   if (row.status !== 'pending') {
-    return {
-      ok: row.status === 'approved',
-      status: row.status === 'approved' ? 'approved' : 'already_resolved',
-      resultText:
-        typeof row.resultPayload === 'string'
+    const priorText =
+      row.resultPayload && typeof row.resultPayload === 'object' && 'text' in row.resultPayload
+        ? String((row.resultPayload as { text?: unknown }).text ?? '')
+        : typeof row.resultPayload === 'string'
           ? row.resultPayload
           : row.resultPayload
             ? JSON.stringify(row.resultPayload)
-            : undefined,
+            : undefined;
+    return {
+      ok: row.status === 'approved',
+      status: row.status === 'approved' ? 'approved' : 'already_resolved',
+      resultText: priorText,
       errorMessage: row.errorMessage ?? undefined,
+      ...extractTaskRef(row.toolName, priorText),
     };
   }
 
@@ -269,6 +304,7 @@ export async function approveConfirmation(
     status: errored ? 'errored' : 'approved',
     resultText,
     errorMessage,
+    ...(errored ? {} : extractTaskRef(row.toolName, resultText)),
   };
 }
 

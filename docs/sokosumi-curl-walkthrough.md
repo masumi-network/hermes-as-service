@@ -370,6 +370,31 @@ is internal — we hide destroyed rows from the public API). Re-POST
 | 401 | `unauthorized` | Bearer token wrong/missing | Check `$TOKEN` |
 | 502 | `upstream_error` | Fly API failure | Almost always transient; the row goes to `status=error` with `errorMessage` populated — surface the error to the user, retry |
 
+## Approving a confirmation (task gate)
+
+`POST /v1/instances/:userId/confirmations/:confirmationId/approve` runs the
+gated tool **synchronously** and returns the result the instant it completes
+— no agent turn, no reasoning/prose in the path:
+
+```json
+{
+  "status": "approved",
+  "result": "{ \"scope\":\"personal\", \"assignedTo\":{...}, \"task\":{ \"id\":\"...\", \"status\":\"READY\" } }",
+  "taskId": "task_abc123",
+  "taskStatus": "READY",
+  "coworker": "Hannah"
+}
+```
+
+For `sokosumi_create_task`, `taskId` / `taskStatus` / `coworker` are
+first-class fields — use them to swap an optimistic card for the real
+`/tasks/:id` link without parsing `result`. They're also returned on a
+repeat (already-resolved) approve, so double-clicks are safe. Other tools
+omit them and you read `result`. The `confirmation_resolved` outbox message
+is a separate note for the agent's next turn — not the UI fast-path.
+
+---
+
 All errors follow [RFC 7807 Problem Details](https://datatracker.ietf.org/doc/html/rfc7807):
 
 ```json

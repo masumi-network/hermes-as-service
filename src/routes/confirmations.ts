@@ -89,6 +89,11 @@ router.post('/v1/instances/:userId/confirmations/:confirmationId/approve', async
     status: result.status,
     result: result.resultText,
     error: result.errorMessage,
+    // First-class task fields for sokosumi_create_task approvals, so the UI
+    // can link the card without parsing `result`. Omitted for other tools.
+    ...(result.taskId ? { taskId: result.taskId } : {}),
+    ...(result.taskStatus ? { taskStatus: result.taskStatus } : {}),
+    ...(result.coworker ? { coworker: result.coworker } : {}),
   });
 });
 
