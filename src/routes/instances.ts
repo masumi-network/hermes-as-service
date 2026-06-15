@@ -278,7 +278,7 @@ router.get('/v1/instances/:userId', async (c) => {
     const view = await getInstance(userId);
     const integrations = await listIntegrations(userId);
     const { listPendingConfirmations } = await import('../confirmations/store.js');
-    const pendingConfirmations = await listPendingConfirmations(view.instanceId);
+    const pendingConfirmations = await listPendingConfirmations(userId);
     // `transitioning: true` when any integration is mid-apply OR the
     // instance lifecycle is itself unsettled. Sokosumi gates the
     // "Hermes is applying your change…" banner on this so the chat is

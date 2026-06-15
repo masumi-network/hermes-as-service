@@ -81,7 +81,9 @@ router.post('/v1/instances/:userId/confirmations/:confirmationId/approve', async
     }
   }
 
-  const result = await approveConfirmation(instance.id, confirmationId, overrides);
+  // Scope by userId, not instance.id — a confirmation queued under a prior
+  // (now-recycled) instance must still be approvable in the current session.
+  const result = await approveConfirmation(userId, confirmationId, overrides);
   if (result.status === 'not_found') {
     return c.json({ error: { message: 'confirmation not found' } }, 404);
   }
@@ -116,7 +118,7 @@ router.post('/v1/instances/:userId/confirmations/:confirmationId/reject', async 
   } catch {
     // empty body is fine
   }
-  const result = await rejectConfirmation(instance.id, confirmationId, reason);
+  const result = await rejectConfirmation(userId, confirmationId, reason);
   if (result.status === 'not_found') {
     return c.json({ error: { message: 'confirmation not found' } }, 404);
   }
@@ -134,7 +136,7 @@ router.get('/v1/instances/:userId/confirmations', async (c) => {
     return c.json({ error: { message: 'instance not found' } }, 404);
   }
   const { listPendingConfirmations } = await import('../confirmations/store.js');
-  const pending = await listPendingConfirmations(instance.id);
+  const pending = await listPendingConfirmations(userId);
   return c.json({ confirmations: pending });
 });
 

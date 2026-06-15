@@ -209,12 +209,12 @@ function applyApprovalOverrides(
  * job into a different workspace without rejecting + re-prompting.
  */
 export async function approveConfirmation(
-  instanceId: string,
+  userId: string,
   confirmationId: string,
   overrides?: ApprovalOverrides,
 ): Promise<ApproveResult> {
   const row = await prisma.pendingConfirmation.findFirst({
-    where: { id: confirmationId, instanceId },
+    where: { id: confirmationId, userId },
   });
   if (!row) return { ok: false, status: 'not_found' };
   if (row.status !== 'pending') {
@@ -235,13 +235,16 @@ export async function approveConfirmation(
     };
   }
 
-  const instance = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  // Resolve the user's CURRENT live instance. The confirmation may have been
+  // orphaned (instanceId = null) by a prior instance destroy — we run against
+  // whatever instance is live now and re-bind the row to it below.
+  const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!instance || instance.destroyedAt) {
     await prisma.pendingConfirmation.update({
       where: { id: row.id },
-      data: { status: 'errored', resolvedAt: new Date(), errorMessage: 'instance gone' },
+      data: { status: 'errored', resolvedAt: new Date(), errorMessage: 'no live instance to execute' },
     });
-    return { ok: false, status: 'errored', errorMessage: 'instance gone' };
+    return { ok: false, status: 'errored', errorMessage: 'no live instance to execute' };
   }
 
   const { executeTool } = await import('../routes/sokosumi-mcp.js');
@@ -274,6 +277,7 @@ export async function approveConfirmation(
   await prisma.pendingConfirmation.update({
     where: { id: row.id },
     data: {
+      instanceId: instance.id, // re-bind in case it was orphaned by a prior destroy
       status: errored ? 'errored' : 'approved',
       resolvedAt: new Date(),
       resolvedBy: 'user',
@@ -309,12 +313,12 @@ export async function approveConfirmation(
 }
 
 export async function rejectConfirmation(
-  instanceId: string,
+  userId: string,
   confirmationId: string,
   reason?: string,
 ): Promise<{ ok: boolean; status: 'rejected' | 'not_found' | 'already_resolved' }> {
   const row = await prisma.pendingConfirmation.findFirst({
-    where: { id: confirmationId, instanceId },
+    where: { id: confirmationId, userId },
   });
   if (!row) return { ok: false, status: 'not_found' };
   if (row.status !== 'pending') return { ok: true, status: 'already_resolved' };
@@ -329,15 +333,19 @@ export async function rejectConfirmation(
     },
   });
 
+  // Tell the user's current live instance (if any) so the next turn knows.
   try {
-    const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
-    const reasonText = reason ? ` Reason: "${reason}".` : '';
-    await enqueueOutboxMessage({
-      instanceId,
-      userId: row.userId,
-      kind: 'confirmation_resolved',
-      content: `The user rejected your earlier ${row.toolName} request.${reasonText} Do not retry the same call. Ask them what they'd prefer instead, or move on.`,
-    });
+    const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
+    if (instance && !instance.destroyedAt) {
+      const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
+      const reasonText = reason ? ` Reason: "${reason}".` : '';
+      await enqueueOutboxMessage({
+        instanceId: instance.id,
+        userId,
+        kind: 'confirmation_resolved',
+        content: `The user rejected your earlier ${row.toolName} request.${reasonText} Do not retry the same call. Ask them what they'd prefer instead, or move on.`,
+      });
+    }
   } catch (err) {
     logger.warn({ err, confirmationId }, 'confirmation_outbox_enqueue_failed');
   }
@@ -345,7 +353,7 @@ export async function rejectConfirmation(
   return { ok: true, status: 'rejected' };
 }
 
-export async function listPendingConfirmations(instanceId: string): Promise<
+export async function listPendingConfirmations(userId: string): Promise<
   Array<{
     id: string;
     toolName: string;
@@ -354,7 +362,7 @@ export async function listPendingConfirmations(instanceId: string): Promise<
   }>
 > {
   const rows = await prisma.pendingConfirmation.findMany({
-    where: { instanceId, status: 'pending' },
+    where: { userId, status: 'pending' },
     orderBy: { createdAt: 'desc' },
     select: { id: true, toolName: true, summary: true, createdAt: true },
   });

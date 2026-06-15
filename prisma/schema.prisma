@@ -289,7 +289,11 @@ model ScheduledTask {
 /// the actual tool execution and an outbox message back to Hermes.
 model PendingConfirmation {
   id            String   @id @default(uuid())
-  instanceId    String
+  // Nullable + SetNull: a confirmation is a USER action, not tied to one
+  // sprite's lifetime. When the instance is destroyed (Sokosumi recycles
+  // sessions), the confirmation survives with instanceId=null and is
+  // re-bound to the user's next live instance on approve. Keyed by userId.
+  instanceId    String?
   userId        String
   /// MCP tool name, e.g. "sokosumi_create_task", "sokosumi_create_job".
   toolName      String
@@ -309,7 +313,7 @@ model PendingConfirmation {
   createdAt     DateTime @default(now())
   resolvedAt    DateTime?
 
-  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instance HermesInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
 
   @@index([instanceId, status])
   @@index([userId, createdAt])
