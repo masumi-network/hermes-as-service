@@ -75,7 +75,7 @@ data: {"phase":"answering","elapsedMs":8400,"ts":...}
 
 ```ts
 {
-  phase: "thinking" | "tool" | "tool_done" | "working" | "answering",
+  phase: "thinking" | "reasoning" | "tool" | "tool_done" | "working" | "answering",
   tool?:   string,   // machine id, e.g. "web_search", "GMAIL_FETCH_EMAILS"
   id?:     string,   // tool_call_id — pair a `tool` chip with its `tool_done`
   label?:  string,   // SHORT human label to show: "Searching the web"
@@ -90,6 +90,7 @@ Phases:
 | phase | when | suggested UI |
 |---|---|---|
 | `thinking` | immediately, at t=0 | flip from "sending" to "Hermes is thinking…" |
+| `reasoning` | the agent's own thought before an action/answer | show `detail` as a transient "💭 thinking" line (a short snippet of the model's reasoning) |
 | `tool` | the agent invoked a tool | show/append a chip from `label` (+ `detail`) |
 | `tool_done` | that tool's result came back | mark the matching chip complete; `detail` is a short result summary ("found 5 results…") |
 | `working` | heartbeat during a silent stretch (~every 20s) | keep the "thinking…" state alive + update elapsed timer |

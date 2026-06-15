@@ -27,7 +27,13 @@
 // the SSE wire or the assistant content (those are per-request streams). The
 // UI is told to treat progress as advisory. Effectively single-active-turn.
 
-export type ProgressPhase = 'thinking' | 'tool' | 'tool_done' | 'working' | 'answering';
+export type ProgressPhase =
+  | 'thinking'
+  | 'reasoning'
+  | 'tool'
+  | 'tool_done'
+  | 'working'
+  | 'answering';
 
 export interface ProgressEvent {
   /** Coarse lifecycle phase the UI can switch render style on. */

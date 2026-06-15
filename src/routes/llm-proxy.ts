@@ -225,6 +225,20 @@ function publishToolCalls(
 }
 
 /**
+ * Surface the model's own `reasoning` (chain-of-thought) as a short
+ * thinking-step chip. The model emits this on every call; the orchestrator
+ * sees it because llm-proxy sits between the gateway and OpenRouter (the
+ * gateway strips it before its API clients). Truncated to a snippet — a
+ * legible step, not a wall of raw CoT.
+ */
+function publishReasoning(instanceId: string, text: string): void {
+  if (!hasProgressSubscribers(instanceId)) return;
+  const detail = summarizeResult(text, 160);
+  if (!detail) return;
+  publishProgress(instanceId, { phase: 'reasoning', label: 'Thinking', detail, ts: Date.now() });
+}
+
+/**
  * Every tool's result flows back into the NEXT LLM call as trailing
  * `role:"tool"` messages — so on each forwarded request we can announce the
  * just-completed round as `tool_done` chips (with a short result summary).
@@ -340,10 +354,17 @@ async function captureNonStreaming(respText: string, ref: InstanceRef): Promise<
       model?: string;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
       choices?: {
-        message?: { tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] };
+        message?: {
+          reasoning?: string;
+          reasoning_content?: string;
+          tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[];
+        };
       }[];
     };
-    const toolCalls = json.choices?.[0]?.message?.tool_calls;
+    const message = json.choices?.[0]?.message;
+    const reasoning = message?.reasoning ?? message?.reasoning_content;
+    if (typeof reasoning === 'string' && reasoning) publishReasoning(ref.id, reasoning);
+    const toolCalls = message?.tool_calls;
     if (Array.isArray(toolCalls) && toolCalls.length > 0) {
       publishToolCalls(
         ref.id,
@@ -378,6 +399,8 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   // flush one progress event per tool when the stream ends (the whole
   // tool-decision turn is short, so this is still well ahead of execution).
   const toolPartials = new Map<number, { name: string; args: string; id: string }>();
+  let reasoningBuf = '';
+  let reasoningPublished = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -396,6 +419,9 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
           usage?: { prompt_tokens?: number; completion_tokens?: number };
           choices?: {
             delta?: {
+              content?: string;
+              reasoning?: string;
+              reasoning_content?: string;
               tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
             };
           }[];
@@ -405,7 +431,20 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
           promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
           completionTokens = chunk.usage.completion_tokens ?? completionTokens;
         }
-        const deltaCalls = chunk.choices?.[0]?.delta?.tool_calls;
+        const delta = chunk.choices?.[0]?.delta;
+        const rdelta = delta?.reasoning ?? delta?.reasoning_content;
+        if (typeof rdelta === 'string') reasoningBuf += rdelta;
+        // Flush the reasoning snippet the moment real output (content or a
+        // tool call) begins — so the "thinking" step shows during the wait,
+        // before the answer/tool chip, not after.
+        const realOutputStarted =
+          (typeof delta?.content === 'string' && delta.content.length > 0) ||
+          Array.isArray(delta?.tool_calls);
+        if (!reasoningPublished && reasoningBuf && realOutputStarted) {
+          publishReasoning(ref.id, reasoningBuf);
+          reasoningPublished = true;
+        }
+        const deltaCalls = delta?.tool_calls;
         if (Array.isArray(deltaCalls)) {
           for (const tc of deltaCalls) {
             const idx = tc.index ?? 0;
@@ -423,6 +462,9 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
       }
     }
   }
+
+  // Reasoning-only call (no content/tool_calls observed) — flush at end.
+  if (reasoningBuf && !reasoningPublished) publishReasoning(ref.id, reasoningBuf);
 
   if (toolPartials.size > 0) {
     publishToolCalls(
