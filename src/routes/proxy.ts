@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
 import { prisma } from '../db.js';
@@ -6,6 +7,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { HttpError, notFound, problemJson, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
+import { subscribeProgress, type ProgressEvent } from './progress-bus.js';
 
 const router = new Hono();
 
@@ -111,11 +113,8 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
     });
 
     if (isStreaming && upstreamRes.body) {
-      // Tee the stream: one branch goes to the client unchanged, the other
-      // is consumed in the background to capture the assembled assistant
-      // response. Then wrap the client-facing branch with a keepalive ping
-      // so quiet stretches between tool calls don't get reaped by edge
-      // proxies on the Sokosumi side.
+      // Tee the stream: one branch goes to the client, the other is consumed
+      // in the background to capture the assembled assistant response.
       const [toClient, toCapture] = upstreamRes.body.tee();
       void captureSseStream(toCapture, {
         instanceId: row.id,
@@ -125,7 +124,20 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         upstreamStatus: upstreamRes.status,
       }).catch((err) => logger.error({ err, userId, requestId }, 'sse_capture_failed'));
 
-      return new Response(withSseKeepalive(toClient), {
+      // When the caller opts in (Sokosumi sends `X-Hermes-Progress: 1`), we
+      // inject `event: hermes.status` frames so the UI can show what the
+      // agent is doing mid-turn instead of a silent spinner. Otherwise we
+      // fall back to the invisible keepalive (pure pass-through, safe for any
+      // vanilla OpenAI client).
+      const clientStream = wantsProgress(c)
+        ? withProgressStream(toClient, {
+            instanceId: row.id,
+            startedAt: t0,
+            signal: c.req.raw.signal,
+          })
+        : withSseKeepalive(toClient);
+
+      return new Response(clientStream, {
         status: upstreamRes.status,
         headers: {
           'Content-Type': 'text/event-stream',
@@ -302,6 +314,206 @@ function withSseKeepalive(upstream: ReadableStream<Uint8Array>): ReadableStream<
     },
     cancel(reason) {
       logger.info({ reason: String(reason) }, 'sse_keepalive_client_disconnected');
+    },
+  });
+}
+
+/** Opt-in flag: header `X-Hermes-Progress: 1` or query `?progress=1`. */
+function wantsProgress(c: Context): boolean {
+  const h = c.req.header('x-hermes-progress');
+  if (h && h !== '0' && h.toLowerCase() !== 'false') return true;
+  const q = c.req.query('progress');
+  return !!q && q !== '0' && q.toLowerCase() !== 'false';
+}
+
+const SSE_FRAME_SEP = '\n\n';
+// Safety cap so a stream that never emits a frame separator can't grow the
+// buffer without bound. A real SSE frame is never this large; if we ever
+// exceed it we flush the raw bytes and move on.
+const MAX_FRAME_BUFFER = 1_000_000;
+
+function statusFrame(event: ProgressEvent): Uint8Array {
+  return new TextEncoder().encode(`event: hermes.status\ndata: ${JSON.stringify(event)}${SSE_FRAME_SEP}`);
+}
+
+/**
+ * End offset (exclusive, including the separator) of the first COMPLETE SSE
+ * frame in `buffer`, or null if none yet. The SSE spec permits LF, CRLF, or
+ * CR line endings, so a blank-line frame boundary can be `\n\n`, `\r\n\r\n`,
+ * or `\r\r` — we accept any. We slice the raw bytes (keeping the original
+ * terminator) rather than rewriting framing.
+ */
+function nextFrameEnd(buffer: string): number | null {
+  const m = buffer.match(/\r\n\r\n|\n\n|\r\r/);
+  if (!m || m.index === undefined) return null;
+  return m.index + m[0].length;
+}
+
+/** True if a complete SSE frame carries a non-empty assistant content delta. */
+export function frameHasContent(frame: string): boolean {
+  for (const line of frame.split('\n')) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const chunk = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length > 0) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+/**
+ * Forward the gateway SSE stream while injecting `event: hermes.status`
+ * frames the UI renders as live progress:
+ *   - an immediate `thinking` frame so the UI flips off "sending" at t=0;
+ *   - `tool` frames from the progress bus as the agent calls tools;
+ *   - a `working` heartbeat (carrying elapsedMs) during silent stretches,
+ *     replacing the invisible `: ka` keepalive;
+ *   - one `answering` frame when the final answer starts streaming.
+ *
+ * Frame-safety: bus/heartbeat callbacks fire asynchronously, so they could
+ * otherwise land in the middle of a forwarded gateway frame and corrupt the
+ * wire. We only ever enqueue COMPLETE frames — upstream bytes are buffered
+ * and split on the SSE frame separator, and the frame-extraction block runs
+ * synchronously (no await), so an async injection can only ever happen at a
+ * frame boundary (while the reader is parked on the next read).
+ */
+export function withProgressStream(
+  upstream: ReadableStream<Uint8Array>,
+  opts: { instanceId: string; startedAt: number; keepaliveMs?: number; signal?: AbortSignal },
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const keepaliveMs = opts.keepaliveMs ?? SSE_KEEPALIVE_MS;
+  let closed = false;
+  let answering = false;
+  let timer: NodeJS.Timeout | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  const stopTimer = () => {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+  // Release timer + subscription + upstream reader exactly once. Called on
+  // normal end, enqueue failure, error, client cancel, and request abort.
+  const release = () => {
+    if (closed) return;
+    closed = true;
+    stopTimer();
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    if (reader) reader.cancel().catch(() => {});
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      let buffer = '';
+
+      const safeEnqueue = (bytes: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(bytes);
+        } catch {
+          release();
+        }
+      };
+      const armTimer = () => {
+        stopTimer();
+        // Once the answer is streaming, its own tokens are the keepalive —
+        // a `working` heartbeat then would wrongly flip the UI back out of
+        // the answering state, so we stop heartbeating.
+        if (closed || answering) return;
+        timer = setInterval(() => {
+          if (answering) {
+            stopTimer();
+            return;
+          }
+          safeEnqueue(
+            statusFrame({ phase: 'working', elapsedMs: Date.now() - opts.startedAt, ts: Date.now() }),
+          );
+        }, keepaliveMs);
+      };
+
+      // Reap promptly if the client connection is aborted (a half-open or
+      // stalled reader that never surfaces as a stream cancel()).
+      if (opts.signal) {
+        if (opts.signal.aborted) release();
+        else opts.signal.addEventListener('abort', release, { once: true });
+      }
+
+      // Instant acknowledgement.
+      safeEnqueue(statusFrame({ phase: 'thinking', elapsedMs: 0, ts: Date.now() }));
+      // Live tool progress from the bus.
+      unsubscribe = subscribeProgress(opts.instanceId, (e) => {
+        safeEnqueue(statusFrame({ ...e, elapsedMs: Date.now() - opts.startedAt }));
+      });
+      armTimer();
+
+      const r = upstream.getReader();
+      reader = r;
+      const pump = async (): Promise<void> => {
+        try {
+          while (!closed) {
+            const { value, done } = await r.read();
+            if (done) break;
+            if (!value) continue;
+            buffer += decoder.decode(value, { stream: true });
+            // Synchronous block (no await): extract + enqueue every COMPLETE
+            // frame, preserving its original terminator. Because nothing here
+            // awaits, an async bus/heartbeat injection can only land between
+            // complete frames, never mid-frame.
+            let end: number | null;
+            while ((end = nextFrameEnd(buffer)) !== null) {
+              const frame = buffer.slice(0, end);
+              buffer = buffer.slice(end);
+              if (!answering && frameHasContent(frame)) {
+                answering = true;
+                stopTimer(); // content is now the keepalive
+                safeEnqueue(
+                  statusFrame({ phase: 'answering', elapsedMs: Date.now() - opts.startedAt, ts: Date.now() }),
+                );
+              }
+              safeEnqueue(encoder.encode(frame));
+            }
+            // Bound memory if a separator never arrives (pathological frame).
+            if (buffer.length > MAX_FRAME_BUFFER) {
+              safeEnqueue(encoder.encode(buffer));
+              buffer = '';
+            }
+            armTimer(); // reset heartbeat after real traffic (no-op once answering)
+          }
+          if (!closed && buffer.length > 0) safeEnqueue(encoder.encode(buffer));
+        } catch (err) {
+          logger.warn({ err }, 'progress_stream_upstream_error');
+          release();
+          try {
+            controller.error(err);
+          } catch {
+            /* already closed/errored */
+          }
+          return;
+        }
+        release();
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+      void pump();
+    },
+    cancel(reason) {
+      logger.info({ reason: String(reason) }, 'progress_stream_client_disconnected');
+      release();
     },
   });
 }

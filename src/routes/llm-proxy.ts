@@ -6,6 +6,8 @@ import { loadConfig } from '../config.js';
 import { decryptSecret } from '../crypto.js';
 import { ensurePricingLoaded } from '../llm/pricing.js';
 import { checkUserCap, recordLlmUsage } from '../llm/spend.js';
+import { publishProgress, hasProgressSubscribers } from './progress-bus.js';
+import { labelForBuiltinTool } from './tool-labels.js';
 
 const router = new Hono();
 
@@ -123,10 +125,11 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   // can't bill streamed calls accurately.
   const bodyText = await c.req.text();
   let parsed: Record<string, unknown> = {};
+  let parsedOk = true;
   try {
     parsed = JSON.parse(bodyText) as Record<string, unknown>;
   } catch {
-    // forward as-is; OpenRouter will reject if malformed
+    parsedOk = false; // unparseable — forward the original bytes untouched
   }
   const isStreaming = parsed['stream'] === true;
   if (isStreaming) {
@@ -134,13 +137,21 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
     so['include_usage'] = true;
     parsed['stream_options'] = so;
   }
+  // Latency: let OpenRouter pick the fastest provider for this model unless
+  // the caller already pinned routing. Additive — doesn't change the model.
+  if (parsed['provider'] === undefined) {
+    parsed['provider'] = { sort: 'throughput' };
+  }
   // If the request contains image_url parts, swap the model to a
   // vision-capable one. MiMo (our default text model) returns
   // "No endpoints found that support image input" otherwise.
   if (hasImageContent(parsed)) {
     parsed['model'] = cfg.VISION_MODEL;
   }
-  const forwardedBody = JSON.stringify(parsed);
+  // If we couldn't parse the body, forward it verbatim rather than sending a
+  // synthesized object with no model/messages (which OpenRouter would reject
+  // with a confusing error that masks the caller's real mistake).
+  const forwardedBody = parsedOk ? JSON.stringify(parsed) : bodyText;
 
   const upstreamHeaders: Record<string, string> = {
     Authorization: `Bearer ${cfg.OPENROUTER_API_KEY}`,
@@ -183,6 +194,29 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
     logger.error({ err, instanceId }, 'llm_proxy_sse_capture_failed'),
   );
   return new Response(toClient, { status: upstream.status, headers: outHeaders });
+}
+
+/**
+ * Publish a "tool" progress event for each tool call the agent decided to
+ * make, so the chat proxy can surface it to the user mid-turn. Cheap no-op
+ * when no chat stream is listening for this instance.
+ */
+function publishToolCalls(
+  instanceId: string,
+  calls: Array<{ name?: string; args?: string }>,
+): void {
+  if (!hasProgressSubscribers(instanceId)) return;
+  for (const call of calls) {
+    if (!call.name) continue;
+    const { label, detail } = labelForBuiltinTool(call.name, call.args);
+    publishProgress(instanceId, {
+      phase: 'tool',
+      tool: call.name,
+      label,
+      ...(detail ? { detail } : {}),
+      ts: Date.now(),
+    });
+  }
 }
 
 async function forwardGenericGet(c: Context, pathSuffix: string): Promise<Response> {
@@ -238,7 +272,17 @@ async function captureNonStreaming(respText: string, ref: InstanceRef): Promise<
     const json = JSON.parse(respText) as {
       model?: string;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
+      choices?: {
+        message?: { tool_calls?: { function?: { name?: string; arguments?: string } }[] };
+      }[];
     };
+    const toolCalls = json.choices?.[0]?.message?.tool_calls;
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+      publishToolCalls(
+        ref.id,
+        toolCalls.map((tc) => ({ name: tc.function?.name, args: tc.function?.arguments })),
+      );
+    }
     const promptTokens = json.usage?.prompt_tokens ?? 0;
     const completionTokens = json.usage?.completion_tokens ?? 0;
     if (promptTokens === 0 && completionTokens === 0) return;
@@ -262,6 +306,11 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   let model = 'unknown';
   let promptTokens = 0;
   let completionTokens = 0;
+  // Accumulate streamed tool_calls by index: name lands in the first delta
+  // for an index, arguments stream in fragments across later deltas. We
+  // flush one progress event per tool when the stream ends (the whole
+  // tool-decision turn is short, so this is still well ahead of execution).
+  const toolPartials = new Map<number, { name: string; args: string }>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -278,16 +327,41 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
         const chunk = JSON.parse(payload) as {
           model?: string;
           usage?: { prompt_tokens?: number; completion_tokens?: number };
+          choices?: {
+            delta?: {
+              tool_calls?: { index?: number; function?: { name?: string; arguments?: string } }[];
+            };
+          }[];
         };
         if (chunk.model) model = chunk.model;
         if (chunk.usage) {
           promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
           completionTokens = chunk.usage.completion_tokens ?? completionTokens;
         }
+        const deltaCalls = chunk.choices?.[0]?.delta?.tool_calls;
+        if (Array.isArray(deltaCalls)) {
+          for (const tc of deltaCalls) {
+            const idx = tc.index ?? 0;
+            const cur = toolPartials.get(idx) ?? { name: '', args: '' };
+            // Both name and args are accumulated: the name normally arrives
+            // whole in the first delta, but some providers fragment it, and
+            // appending an empty/absent field is a no-op either way.
+            if (tc.function?.name) cur.name += tc.function.name;
+            if (tc.function?.arguments) cur.args += tc.function.arguments;
+            toolPartials.set(idx, cur);
+          }
+        }
       } catch {
         /* ignore malformed lines */
       }
     }
+  }
+
+  if (toolPartials.size > 0) {
+    publishToolCalls(
+      ref.id,
+      [...toolPartials.values()].map((p) => ({ name: p.name, args: p.args })),
+    );
   }
 
   if (promptTokens === 0 && completionTokens === 0) return;
