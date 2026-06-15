@@ -147,6 +147,10 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   // "No endpoints found that support image input" otherwise.
   if (hasImageContent(parsed)) {
     parsed['model'] = cfg.VISION_MODEL;
+  } else if (cfg.TEXT_MODEL_OVERRIDE) {
+    // A/B: force a specific text model for the whole agent loop (tool
+    // decisions included). Set via the TEXT_MODEL_OVERRIDE env var.
+    parsed['model'] = cfg.TEXT_MODEL_OVERRIDE;
   }
   // If we couldn't parse the body, forward it verbatim rather than sending a
   // synthesized object with no model/messages (which OpenRouter would reject

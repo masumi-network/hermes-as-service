@@ -62,6 +62,11 @@ const schema = z.object({
   // The default text model (MiMo) has no vision endpoint on OpenRouter, so
   // we transparently swap when images are detected.
   VISION_MODEL: z.string().default('anthropic/claude-haiku-4.5'),
+  // Optional A/B override: force the TEXT model the agent uses, regardless of
+  // what the gateway sends — for testing a stronger model's tool-call
+  // reliability without rebuilding the sprite image. Empty = passthrough.
+  // Vision requests still use VISION_MODEL.
+  TEXT_MODEL_OVERRIDE: z.string().optional().default(''),
 });
 
 export type Config = z.infer<typeof schema>;
