@@ -436,8 +436,3 @@ function toView(row: {
     tone: row.tone,
   };
 }
-
-// Re-export the install-skills script content so sync-config can still
-// reference it (even though it's now a no-op on Fly — image bakes skills).
-// Kept as an empty placeholder so the existing import chain doesn't break.
-export const INSTALL_SKILLS_SCRIPT = '#!/usr/bin/env bash\n# Skills are baked into the image on Fly; this is a no-op.\nexit 0\n';

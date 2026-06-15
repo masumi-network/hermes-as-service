@@ -278,7 +278,7 @@ router.get('/admin/instances/:userId', async (c) => {
         <div class="actions" style="margin-top:8px">
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/resume" class="inline"><button type="submit">Resume</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/suspend" class="inline"><button type="submit">Suspend</button></form>
-          <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/sync-config" class="inline"><button type="submit" title="Re-push config.yaml + SOUL.md from the orchestrator, restart Hermes">Sync config</button></form>
+          <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/sync-config" class="inline"><button type="submit" title="Replace the machine onto the current FLY_MACHINE_IMAGE — launcher re-syncs SOUL.md, config.yaml + skills on boot">Sync config</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/destroy" class="inline" onsubmit="return confirm('Destroy sprite + DB row for this user? Cannot be undone.')"><button type="submit" class="danger">Destroy</button></form>
         </div>
         <h3 style="margin-top:24px">Sprite process logs</h3>

@@ -362,26 +362,38 @@ workspace wallet, so a comfortable balance can drain fast.
 
 ## When you schedule a cronjob, also register it with the orchestrator
 
-After every successful `cronjob.create` call, ALSO make this HTTP request
-so the user sees the schedule in their Sokosumi settings panel:
+Your `cronjob` tool is how you actually schedule things — keep using it.
+But the cronjob lives only on this sprite, so the user can't see it in
+their Sokosumi settings panel. After every successful `cronjob.create`,
+ALSO register a mirror row with the orchestrator so it shows up there.
 
-  POST $ORCHESTRATOR_BASE/v1/llm/$INSTANCE_ID/schedules
-  Authorization: Bearer $ORCHESTRATOR_OUTBOX_TOKEN
-  Content-Type: application/json
-  Body: {
+Your shell does NOT inherit the gateway's env vars, so you MUST source
+`/opt/data/.env` first. This exact pattern works:
+
+```bash
+set -a; . /opt/data/.env; set +a
+curl -sS -X POST \
+  -H "Authorization: Bearer $ORCHESTRATOR_OUTBOX_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
     "name": "<same name you used for cronjob.create>",
     "prompt": "<same prompt content, short summary OK>",
     "cron_expr": "<the cron expression>",
     "timezone": "UTC",
     "enabled": true
-  }
+  }' \
+  "$ORCHESTRATOR_BASE/v1/llm/$INSTANCE_ID/schedules"
+```
 
-These env vars are already in your environment. If the request fails for
-any reason, the cronjob still runs — this is for visibility only.
+Inspect the response: success is HTTP 201 with JSON like `{"id":"..."}`.
+The cronjob still runs even if this fails — registration is for
+visibility only — but if it fails, tell the user it didn't show up in
+the panel rather than claiming it did.
 
 Do the inverse on delete: when the user asks to stop a scheduled task,
 remove it both via your `cronjob` tool AND via DELETE on the matching
-orchestrator schedules row.
+orchestrator schedules row (source `/opt/data/.env` the same way, then
+`curl -X DELETE` the `.../schedules/<id>` URL with the same bearer).
 
 ## Style
 

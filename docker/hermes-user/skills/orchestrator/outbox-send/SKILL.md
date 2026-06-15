@@ -1,16 +1,4 @@
-// The outbox-send skill. Written by the orchestrator into
-// /opt/data/skills/orchestrator/outbox-send/SKILL.md so Hermes knows how to
-// push proactive messages to the user via the orchestrator's outbox.
-//
-// The outbox is the one-way channel Hermes uses to surface things to the
-// user BETWEEN chat turns — long-running task results, scheduled outputs,
-// or any moment the agent decides the user should know something
-// proactively. Sokosumi polls the outbox and renders new messages in the
-// user's chat thread.
-
-export const OUTBOX_SKILL_PATH = '/opt/data/skills/orchestrator/outbox-send/SKILL.md';
-
-export const OUTBOX_SKILL_MD = `---
+---
 name: outbox-send
 description: Send a proactive message to the user (outside the current chat turn). Use for long-running task completions, follow-ups the user asked you to surface later, or anything the user should see now even though they didn't just ask. The message lands in their chat thread on next page load.
 version: 1.0.0
@@ -39,28 +27,28 @@ You should NOT use it for:
 ## How to push
 
 Your sandbox shell does NOT inherit the gateway's env vars, so source
-\`/opt/data/.env\` first — without it the bearer is empty and the call fails
+`/opt/data/.env` first — without it the bearer is empty and the call fails
 with "missing bearer".
 
-\`\`\`bash
+```bash
 set -a; . /opt/data/.env; set +a
-curl -sS -X POST \\
-  -H "Authorization: Bearer $OPENROUTER_API_KEY" \\
-  -H "Content-Type: application/json" \\
+curl -sS -X POST \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
   -d '{
     "content": "<plain text or markdown the user should see>",
     "kind": "task_result"
-  }' \\
+  }' \
   "$OPENROUTER_BASE_URL/outbox"
-\`\`\`
+```
 
-**Inspect the response.** Success returns HTTP 201 with \`{"id":"msg_...","createdAt":"..."}\`.
+**Inspect the response.** Success returns HTTP 201 with `{"id":"msg_...","createdAt":"..."}`.
 Anything else is a failure — tell the user, don't claim success.
 
-\`kind\` is one of:
-- \`text\` (default) — generic message
-- \`task_result\` — completion of a long-running task
-- \`reminder\` — a follow-up you promised earlier
+`kind` is one of:
+- `text` (default) — generic message
+- `task_result` — completion of a long-running task
+- `reminder` — a follow-up you promised earlier
 
 ## Constraints
 
@@ -76,4 +64,3 @@ Anything else is a failure — tell the user, don't claim success.
 Write outbox messages as if they're the next thing the user will read when
 they open the app. Lead with the point. No "Hi again!" or "I wanted to let
 you know that…". Just the fact + the action it implies.
-`;

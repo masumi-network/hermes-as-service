@@ -642,22 +642,19 @@ deliver to "local". Prompt content:
 Run the cronjob.create call now.
 
 3. **Register the schedule with the orchestrator** — immediately after \
-the cronjob.create call succeeds, make this HTTP request so the user can \
-see the schedule in their Sokosumi settings panel:
+the cronjob.create call succeeds, run this in your shell so the user can \
+see the schedule in their Sokosumi settings panel. Your shell does NOT \
+inherit the gateway env, so source /opt/data/.env first:
 
-   POST \${ORCHESTRATOR_BASE}/v1/llm/\${INSTANCE_ID}/schedules
-   Authorization: Bearer \${ORCHESTRATOR_OUTBOX_TOKEN}
-   Content-Type: application/json
-   Body: {
-     "name": "daily-brief",
-     "prompt": "Daily morning brief — Sokosumi changes, mail, calendar, next action.",
-     "cron_expr": "0 7 * * *",
-     "timezone": "UTC",
-     "enabled": true
-   }
+   set -a; . /opt/data/.env; set +a
+   curl -sS -X POST \\
+     -H "Authorization: Bearer \$ORCHESTRATOR_OUTBOX_TOKEN" \\
+     -H "Content-Type: application/json" \\
+     -d '{"name":"daily-brief","prompt":"Daily morning brief — Sokosumi changes, mail, calendar, next action.","cron_expr":"0 7 * * *","timezone":"UTC","enabled":true}' \\
+     "\$ORCHESTRATOR_BASE/v1/llm/\$INSTANCE_ID/schedules"
 
-These env vars are in your environment. If the request fails, the cronjob \
-still runs — this is for UI visibility only.
+If the request fails, the cronjob still runs — this is for UI visibility \
+only.
 
 Once both steps are done, reply "ok".`;
 }

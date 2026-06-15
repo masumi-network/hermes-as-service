@@ -1,21 +1,26 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { SpritesClient } from '../sprites/client.js';
-import { configYaml, SOUL_MD } from './profile.js';
-import { INSTALL_SKILLS_SCRIPT } from './provision.js';
-import { SCHEDULE_SKILL_MD, SCHEDULE_SKILL_PATH } from './schedule-skill.js';
-import { OUTBOX_SKILL_MD, OUTBOX_SKILL_PATH } from './outbox-skill.js';
+import { loadConfig } from '../config.js';
+import { FlyClient } from '../fly/client.js';
 import { notFound, conflict } from '../errors.js';
 
 /**
- * Re-push config.yaml + SOUL.md from the orchestrator's source of truth onto
- * a live sprite, then restart the Hermes service so it picks up the changes.
+ * Apply the current baked operator profile to a live instance.
  *
- * Use this whenever you change `src/provision/profile.ts` (model, persona,
- * tool config) and want to roll it out without a full ~5-minute bootstrap.
+ * On Fly there is no file-push channel into a machine — the image
+ * filesystem (/opt/hermes-user-config/*) is the source of truth and the
+ * launcher re-syncs it onto /opt/data on every boot. So "sync config"
+ * means: update the machine to the current FLY_MACHINE_IMAGE. Fly
+ * replaces the machine in-place, the launcher runs, and the instance
+ * comes back with the image's SOUL.md, config.yaml, and skills.
  *
- * Does NOT touch /opt/data/.env (which contains per-instance secrets that
- * must not be re-derived).
+ * To roll out a profile change: edit docker/hermes-user/*, rebuild the
+ * image (scripts/build-hermes-image.sh), bump FLY_MACHINE_IMAGE, then
+ * run this per instance. Running it without an image bump is still a
+ * clean way to restore drifted /opt/data files.
+ *
+ * Never touches /opt/data persistent state: .env (per-instance secrets),
+ * memories, sessions, or cron/jobs.json (the agent's own cronjobs).
  */
 export async function syncConfig(userId: string): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
@@ -23,27 +28,15 @@ export async function syncConfig(userId: string): Promise<void> {
   if (row.status === 'provisioning') {
     throw conflict(userId, 'Instance still provisioning');
   }
-  const sprites = new SpritesClient();
-  await sprites.writeFile(row.spriteName, '/opt/data/config.yaml', configYaml(), '0640');
-  await sprites.writeFile(row.spriteName, '/opt/data/SOUL.md', SOUL_MD, '0644');
-  // Orchestrator-owned skills (separate from the third-party skill packs
-  // which install-skills.sh handles).
-  await sprites.writeFile(row.spriteName, SCHEDULE_SKILL_PATH, SCHEDULE_SKILL_MD, '0644');
-  await sprites.writeFile(row.spriteName, OUTBOX_SKILL_PATH, OUTBOX_SKILL_MD, '0644');
-  // Wipe any cron jobs Hermes' built-in cron tool may have registered
-  // before we disabled it — those still tick locally otherwise and produce
-  // output that Sokosumi never sees.
-  await sprites.writeFile(row.spriteName, '/opt/data/cron/jobs.json', '{"jobs": []}\n', '0600');
-
-  // Refresh curated skills via the install script. Idempotent — clones if
-  // missing, fetch + reset if present. ~10–30s typical.
-  await sprites.writeFile(row.spriteName, '/tmp/install-skills.sh', INSTALL_SKILLS_SCRIPT, '0755');
-  try {
-    await sprites.exec(row.spriteName, '/tmp/install-skills.sh', { timeoutMs: 5 * 60_000 });
-  } catch (err) {
-    logger.warn({ err, userId }, 'sync_config_skills_install_failed');
+  if (row.destroyedAt || !row.spriteId) {
+    throw conflict(userId, 'Instance has no machine');
   }
-
-  await sprites.restartService(row.spriteName, 'hermes');
-  logger.info({ userId, spriteName: row.spriteName }, 'sync_config_done');
+  const cfg = loadConfig();
+  const fly = new FlyClient();
+  await fly.updateMachineImage(row.spriteName, row.spriteId, cfg.FLY_MACHINE_IMAGE);
+  await fly.waitForState(row.spriteName, row.spriteId, 'started', 90);
+  logger.info(
+    { userId, spriteName: row.spriteName, image: cfg.FLY_MACHINE_IMAGE },
+    'sync_config_done',
+  );
 }

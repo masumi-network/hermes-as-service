@@ -196,6 +196,30 @@ export class FlyClient {
   }
 
   /**
+   * Update a machine to a new image, keeping the rest of its spec (env,
+   * guest, mounts, services). Fly replaces the machine in-place
+   * (`started → replacing → started`), which reboots it — on our user
+   * image that re-runs the launcher, re-syncing SOUL.md / config.yaml /
+   * skills from the image filesystem onto /opt/data.
+   */
+  async updateMachineImage(
+    appName: string,
+    machineId: string,
+    image: string,
+  ): Promise<FlyMachine> {
+    const current = await this.getMachine(appName, machineId);
+    if (!current) {
+      throw upstream(undefined, `updateMachineImage: machine ${machineId} not found`);
+    }
+    const nextConfig: FlyMachineConfig = { ...current.config, image };
+    return this.json<FlyMachine>(
+      'POST',
+      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}`,
+      { body: { config: nextConfig } },
+    );
+  }
+
+  /**
    * Restart a machine, state-aware. Fly's POST /restart 412s when the
    * machine is in any state other than `started` or `stopped` (in particular
    * `suspended`, which is where idle Fly machines end up by default). We

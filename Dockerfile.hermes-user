@@ -43,6 +43,11 @@ RUN mkdir -p /opt/hermes-user-config/skills /opt/hermes-user-config/skills/meta 
  && rm -rf /tmp/marketingskills /tmp/avoid-ai-writing /tmp/hermes-skill-factory /tmp/claude-ads /tmp/toprank \
  && chmod -R a+rX /opt/hermes-user-config/skills
 
+# ----- orchestrator-owned skills (schedule-task mirror, outbox-send) -----
+# Layered AFTER the third-party packs so ours win on any name collision.
+
+COPY docker/hermes-user/skills/ /opt/hermes-user-config/skills/
+
 # ----- operator SOUL + config (image-fs) -----
 
 COPY docker/hermes-user/SOUL.md /opt/hermes-user-config/SOUL.md
