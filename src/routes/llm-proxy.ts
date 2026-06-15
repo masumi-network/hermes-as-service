@@ -157,6 +157,33 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   // with a confusing error that masks the caller's real mistake).
   const forwardedBody = parsedOk ? JSON.stringify(parsed) : bodyText;
 
+  // TEMP DEBUG (reasoning-echo investigation): the gateway assembles the
+  // multi-turn history; we're the only vantage point that sees it. Log
+  // whether prior assistant TOOL-CALL turns carry reasoning — if they never
+  // do, the gateway isn't echoing it back and reasoning models lose context.
+  if (parsedOk && Array.isArray(parsed['messages'])) {
+    const msgs = parsed['messages'] as Array<Record<string, unknown>>;
+    const toolTurns = msgs.filter(
+      (m) => m && m['role'] === 'assistant' && Array.isArray(m['tool_calls']) && (m['tool_calls'] as unknown[]).length > 0,
+    );
+    if (toolTurns.length > 0) {
+      logger.info(
+        {
+          instanceId,
+          model: parsed['model'],
+          msgCount: msgs.length,
+          assistantToolTurns: toolTurns.length,
+          reasoningPresence: toolTurns.map((m) => ({
+            r: m['reasoning'] != null && m['reasoning'] !== '',
+            rc: m['reasoning_content'] != null && m['reasoning_content'] !== '',
+            rd: m['reasoning_details'] != null,
+          })),
+        },
+        'DEBUG_reasoning_echo_check',
+      );
+    }
+  }
+
   // Announce the just-completed tool round (if any) as tool_done chips,
   // derived from the trailing tool-result messages in this request.
   if (parsedOk) publishToolResults(auth.row.id, parsed);
