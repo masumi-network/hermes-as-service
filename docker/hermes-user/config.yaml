@@ -5,6 +5,14 @@
 model:
   default: deepseek/deepseek-v4-flash
 
+# Force tool-use enforcement for ALL models. Default "auto" only injects the
+# anti-narration steering for name-matched models, so some models (and older
+# image versions for deepseek) get none and "narrate" a tool call as text
+# instead of emitting it — the intermittent "I've queued the task" with no
+# actual tool call on multi-turn requests. `true` forces it on universally.
+agent:
+  tool_use_enforcement: true
+
 terminal:
   backend: local
 
