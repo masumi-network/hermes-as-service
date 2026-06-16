@@ -369,23 +369,41 @@ export async function rejectConfirmation(
   return { ok: true, status: 'rejected' };
 }
 
+/** Pull the workspace the agent proposed for an org-aware tool call out of
+ *  the stored args. Returns null for personal-scope or non-org tools. The
+ *  Sokosumi UI uses this to pre-select the confirmation card's workspace
+ *  dropdown to what Hermes actually chose (instead of defaulting to
+ *  Personal and clobbering it on approve). */
+function extractOrganizationId(toolArgs: unknown): string | null {
+  if (toolArgs && typeof toolArgs === 'object' && 'organization_id' in toolArgs) {
+    const v = (toolArgs as Record<string, unknown>)['organization_id'];
+    return typeof v === 'string' && v.length > 0 ? v : null;
+  }
+  return null;
+}
+
 export async function listPendingConfirmations(userId: string): Promise<
   Array<{
     id: string;
     toolName: string;
     summary: string;
     createdAt: string;
+    /** Workspace Hermes proposed for this action (null = personal scope or
+     *  not an org-aware tool). The org NAME is resolved separately by the
+     *  route that needs it (avoids a network call on every list). */
+    organizationId: string | null;
   }>
 > {
   const rows = await prisma.pendingConfirmation.findMany({
     where: { userId, status: 'pending' },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, toolName: true, summary: true, createdAt: true },
+    select: { id: true, toolName: true, summary: true, createdAt: true, toolArgs: true },
   });
   return rows.map((r) => ({
     id: r.id,
     toolName: r.toolName,
     summary: r.summary,
     createdAt: r.createdAt.toISOString(),
+    organizationId: extractOrganizationId(r.toolArgs),
   }));
 }

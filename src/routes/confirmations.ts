@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
+import { logger } from '../logger.js';
 import { approveConfirmation, rejectConfirmation, type ApprovalOverrides } from '../confirmations/store.js';
 
 const router = new Hono();
@@ -137,7 +138,32 @@ router.get('/v1/instances/:userId/confirmations', async (c) => {
   }
   const { listPendingConfirmations } = await import('../confirmations/store.js');
   const pending = await listPendingConfirmations(userId);
-  return c.json({ confirmations: pending });
+
+  // Resolve the proposed-workspace NAME so the UI can show + pre-select it on
+  // the confirmation card (it already gets the id from the store). Best-effort:
+  // one org lookup, only when an org-scoped confirmation is present, and never
+  // let a Sokosumi hiccup break the confirmations list — fall back to null.
+  const orgIds = new Set(
+    pending.map((p) => p.organizationId).filter((x): x is string => typeof x === 'string'),
+  );
+  const nameById = new Map<string, string>();
+  if (orgIds.size > 0) {
+    try {
+      const { SokosumiClient } = await import('../sokosumi/client.js');
+      const { isValidSokosumiEnv } = await import('../config.js');
+      const env = isValidSokosumiEnv(instance.sokosumiEnv) ? instance.sokosumiEnv : null;
+      const orgs = await new SokosumiClient(userId, env).listOrganizations();
+      for (const o of orgs) if (o.name) nameById.set(o.id, o.name);
+    } catch (err) {
+      logger.warn({ err, userId }, 'confirmation_org_name_resolve_failed');
+    }
+  }
+
+  const confirmations = pending.map((p) => ({
+    ...p,
+    organizationName: p.organizationId ? nameById.get(p.organizationId) ?? null : null,
+  }));
+  return c.json({ confirmations });
 });
 
 export { router as confirmationsRouter };
