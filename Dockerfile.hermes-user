@@ -7,10 +7,21 @@
 # Build + push to Fly registry:
 #   docker login registry.fly.io -u x --password "$FLY_API_TOKEN"
 #   docker build --platform linux/amd64 -f Dockerfile.hermes-user \
-#       -t registry.fly.io/hermes-user-image:v17 .
-#   docker push registry.fly.io/hermes-user-image:v17
+#       -t registry.fly.io/hermes-user-image:v20 .
+#   docker push registry.fly.io/hermes-user-image:v20
+#
+# Base is PINNED to v2026.5.16 — the newest tini-based (pre-s6) upstream tag.
+# Why pinned, not :latest:
+#   - :latest switched to s6-overlay (PID1 = /init) ~2026-05-28, which breaks
+#     our custom-launcher CMD (s6 ignores CMD; the container crash-loops).
+#   - v17's Hermes predates `agent.tool_use_enforcement` (added 2026-03-28), so
+#     that config key was silently ignored — the tool-call hallucination fix
+#     never applied.
+#   v2026.5.16 is the sweet spot: tini entrypoint (our launcher works) AND it
+#   honors tool_use_enforcement. Do NOT bump to :latest without porting the
+#   launcher to s6 first.
 
-FROM nousresearch/hermes-agent:latest
+FROM nousresearch/hermes-agent:v2026.5.16
 
 USER root
 
