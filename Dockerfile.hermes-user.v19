@@ -1,0 +1,22 @@
+# v19 — overlay on the known-good v17 image.
+#
+# WHY: Dockerfile.hermes-user does `FROM nousresearch/hermes-agent:latest`,
+# and upstream switched :latest to an s6-overlay supervised architecture that
+# no longer runs our `hermes-user-launcher` CMD — v18 crash-looped on it.
+# v17 was built from the pre-s6 Hermes and works. So pin to v17's exact
+# runtime and overlay ONLY the changed files. This keeps the working launcher
+# + Hermes and adds: agent.tool_use_enforcement, the SOUL ground-truth
+# guardrail, and the orchestrator skills (schedule-task, outbox-send).
+#
+# Follow-up (not now): properly migrate Dockerfile.hermes-user to the s6
+# image (rework the launcher into an s6 service) and pin a real upstream tag.
+
+FROM registry.fly.io/hermes-user-image:v17
+
+# The launcher syncs /opt/hermes-user-config/* -> /opt/data on boot, so
+# overwriting these in the image config dir is enough.
+COPY docker/hermes-user/config.yaml /opt/hermes-user-config/config.yaml
+COPY docker/hermes-user/SOUL.md     /opt/hermes-user-config/SOUL.md
+COPY docker/hermes-user/skills/     /opt/hermes-user-config/skills/
+
+RUN chmod -R a+rX /opt/hermes-user-config
