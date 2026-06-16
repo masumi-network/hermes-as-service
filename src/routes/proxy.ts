@@ -366,6 +366,130 @@ export function frameHasContent(frame: string): boolean {
   return false;
 }
 
+// Reasoning models (deepseek, minimax "mm") sometimes emit chain-of-thought
+// wrapped in <think>…</think> or <mm:think>…</mm:think> INSIDE the assistant
+// content delta when STREAMING — their non-streaming response is clean. We
+// relay content verbatim, so without this the raw CoT + tags leak into the
+// Sokosumi answer channel (and trip the UI into "answering" while CoT is still
+// flowing). The structured reasoning chips are unaffected — they come from the
+// separate reasoning/reasoning_content field, not from parsing content.
+const THINK_OPEN = ['<think>', '<mm:think>'] as const;
+const THINK_CLOSE = ['</think>', '</mm:think>'] as const;
+
+/** Length of the longest suffix of `s` that is a PROPER prefix of some tag —
+ *  i.e. the tail we must hold back because it could still grow into a tag on
+ *  the next streamed piece (e.g. "<thi" before "nk>" arrives). */
+function heldTagPrefixLen(s: string, tags: readonly string[]): number {
+  const max = Math.min(s.length, Math.max(...tags.map((t) => t.length)) - 1);
+  for (let len = max; len > 0; len--) {
+    const suf = s.slice(s.length - len);
+    if (tags.some((t) => t.length > suf.length && t.startsWith(suf))) return len;
+  }
+  return 0;
+}
+
+/**
+ * Streaming-safe think-block stripper. Returns a `push(piece)` that strips
+ * <think>/<mm:think> … </think>/</mm:think> blocks from a sequence of content
+ * pieces, carrying a small `pending` buffer so a tag split across SSE frames
+ * is still recognized. Stateful — make one per stream. Exported for tests.
+ *
+ * Edge at stream end: a trailing `pending` (an unresolved partial tag) is
+ * dropped. It's at most a few chars and only ever a viable tag-prefix, so the
+ * loss is negligible; an unterminated think block is correctly discarded.
+ */
+export function makeThinkFilter(): (piece: string) => string {
+  let mode: 'pass' | 'inside' = 'pass';
+  let pending = '';
+  return (piece: string): string => {
+    const input = pending + piece;
+    pending = '';
+    let out = '';
+    let i = 0;
+    while (i < input.length) {
+      if (mode === 'pass') {
+        let at = -1;
+        let len = 0;
+        for (const t of THINK_OPEN) {
+          const idx = input.indexOf(t, i);
+          if (idx !== -1 && (at === -1 || idx < at)) {
+            at = idx;
+            len = t.length;
+          }
+        }
+        if (at !== -1) {
+          out += input.slice(i, at);
+          i = at + len;
+          mode = 'inside';
+        } else {
+          const rest = input.slice(i);
+          const held = heldTagPrefixLen(rest, THINK_OPEN);
+          out += rest.slice(0, rest.length - held);
+          pending = rest.slice(rest.length - held);
+          break;
+        }
+      } else {
+        let at = -1;
+        let len = 0;
+        for (const t of THINK_CLOSE) {
+          const idx = input.indexOf(t, i);
+          if (idx !== -1 && (at === -1 || idx < at)) {
+            at = idx;
+            len = t.length;
+          }
+        }
+        if (at !== -1) {
+          i = at + len;
+          mode = 'pass';
+        } else {
+          const rest = input.slice(i);
+          pending = rest.slice(rest.length - heldTagPrefixLen(rest, THINK_CLOSE));
+          break;
+        }
+      }
+    }
+    return out;
+  };
+}
+
+/**
+ * Apply a think-filter to one COMPLETE SSE frame's assistant content delta,
+ * preserving all framing (data: prefix, terminator). Returns the rewritten
+ * frame, the original frame if nothing changed, or null if the frame carried
+ * ONLY think content and is now empty (caller drops it). Non-content frames
+ * (role, tool_calls, finish_reason, usage, [DONE]) pass through untouched.
+ */
+export function filterThinkFromFrame(
+  frame: string,
+  push: (piece: string) => string,
+): string | null {
+  const dataIdx = frame.indexOf('data:');
+  if (dataIdx === -1) return frame;
+  const lineStart = dataIdx + 'data:'.length;
+  let lineEnd = frame.indexOf('\n', lineStart);
+  if (lineEnd === -1) lineEnd = frame.length;
+  const payload = frame.slice(lineStart, lineEnd).trim();
+  if (!payload || payload === '[DONE]') return frame;
+  let chunk: { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: unknown }> };
+  try {
+    chunk = JSON.parse(payload);
+  } catch {
+    return frame;
+  }
+  const choice = chunk.choices?.[0];
+  const delta = choice?.delta;
+  if (!delta || typeof delta.content !== 'string') return frame;
+  const orig = delta.content;
+  const filtered = push(orig);
+  if (filtered === orig) return frame;
+  const hasOtherDelta = Object.keys(delta).some((k) => k !== 'content');
+  if (filtered === '' && !hasOtherDelta && choice?.finish_reason == null) return null;
+  delta.content = filtered;
+  const newPayload = JSON.stringify(chunk);
+  const payloadIdx = frame.indexOf(payload, dataIdx);
+  return frame.slice(0, payloadIdx) + newPayload + frame.slice(payloadIdx + payload.length);
+}
+
 /**
  * Forward the gateway SSE stream while injecting `event: hermes.status`
  * frames the UI renders as live progress:
@@ -417,6 +541,9 @@ export function withProgressStream(
   return new ReadableStream<Uint8Array>({
     start(controller) {
       let buffer = '';
+      // Per-stream think-block stripper (state carries across frames so a tag
+      // split across deltas is still caught). One instance per stream.
+      const thinkFilter = makeThinkFilter();
 
       const safeEnqueue = (bytes: Uint8Array) => {
         if (closed) return;
@@ -473,8 +600,13 @@ export function withProgressStream(
             // complete frames, never mid-frame.
             let end: number | null;
             while ((end = nextFrameEnd(buffer)) !== null) {
-              const frame = buffer.slice(0, end);
+              const rawFrame = buffer.slice(0, end);
               buffer = buffer.slice(end);
+              // Strip any <think>/<mm:think> CoT before it reaches the client.
+              const frame = filterThinkFromFrame(rawFrame, thinkFilter);
+              if (frame === null) continue; // frame was entirely think content
+              // Flip to "answering" on POST-strip content, so the UI doesn't
+              // leave "thinking" the moment a (now-suppressed) think block opens.
               if (!answering && frameHasContent(frame)) {
                 answering = true;
                 stopTimer(); // content is now the keepalive
