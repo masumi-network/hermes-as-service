@@ -163,6 +163,49 @@ export async function listInstalledSkills(userId: string): Promise<InstalledSkil
   }));
 }
 
+/**
+ * Re-push a user's installed skills onto a (re)started machine. Best-effort +
+ * idempotent. Called after provision/reprovision so skills survive a fresh
+ * volume (the DB row is the source of truth), and to retry any install that was
+ * queued (`status='installing'`) while the machine was down — covering the
+ * setup flow (skills picked during onboarding) and returning users alike.
+ */
+export async function replayInstalledSkills(instanceId: string): Promise<{ replayed: number; failed: number }> {
+  const instance = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  if (!instance || instance.destroyedAt || !instance.spriteId || !instance.spriteName) {
+    return { replayed: 0, failed: 0 };
+  }
+  const rows = await prisma.installedSkill.findMany({ where: { instanceId } });
+  if (rows.length === 0) return { replayed: 0, failed: 0 };
+
+  const machine = await new FlyClient().getMachine(instance.spriteName, instance.spriteId);
+  if (machine?.state !== 'started') return { replayed: 0, failed: 0 };
+
+  let replayed = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const files = Array.isArray(row.filesJson) ? (row.filesJson as unknown as SkillFile[]) : [];
+      const prepared = prepareSkill(row.slug, files);
+      await writeSkillToMachine(instance.spriteName, instance.spriteId, prepared);
+      await prisma.installedSkill.update({
+        where: { id: row.id },
+        data: { status: 'installed', installedAt: new Date(), lastError: null },
+      });
+      replayed++;
+    } catch (err) {
+      failed++;
+      logger.warn({ err, instanceId, slug: row.slug }, 'skill_replay_failed');
+      await prisma.installedSkill.update({
+        where: { id: row.id },
+        data: { lastError: err instanceof Error ? err.message.slice(0, 300) : 'replay failed' },
+      });
+    }
+  }
+  logger.info({ instanceId, replayed, failed }, 'skills_replayed');
+  return { replayed, failed };
+}
+
 export async function removeSkill(userId: string, slug: string): Promise<{ removed: boolean }> {
   const row = await prisma.installedSkill.findUnique({ where: { userId_slug: { userId, slug } } });
   if (!row) return { removed: false };

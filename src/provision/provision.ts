@@ -223,6 +223,17 @@ async function runFlyPipeline(
     // are now live — flip them connected so Sokosumi sees green checkmarks.
     await markPendingIntegrationsConnected(row.userId);
 
+    // Re-apply the user's installed marketplace skills onto this (possibly
+    // fresh) machine. Idempotent + best-effort: makes skills survive a
+    // destroy/re-create (the DB row is the source of truth) and retries any
+    // install queued while the machine was down (setup-time picks included).
+    try {
+      const { replayInstalledSkills } = await import('../skills/manager.js');
+      await replayInstalledSkills(instanceId);
+    } catch (err) {
+      log.warn({ err }, 'skills_replay_failed');
+    }
+
     // Returning vs new user — decided by whether onboardedAt is set on this
     // HermesInstance row (which survives Fly destroy/re-create since the row
     // is keyed on userId, not Fly app id).
