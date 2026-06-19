@@ -307,6 +307,35 @@ export class FlyClient {
     }
   }
 
+  /**
+   * Run a command inside a RUNNING machine via the Machines `exec` endpoint.
+   * Used to drop marketplace skill files onto /opt/data without a reboot.
+   * Synchronous and capped by Fly at 60s — only for fast, non-backgrounding
+   * commands (a mkdir + base64-decode write finishes in well under a second).
+   * Runs as ROOT, so callers that write files must chmod them readable for the
+   * `hermes` user. Returns the process exit code + captured stdout/stderr.
+   */
+  async execMachine(
+    appName: string,
+    machineId: string,
+    command: string[],
+    opts: { stdin?: string; timeoutSec?: number } = {},
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const timeoutSec = Math.min(opts.timeoutSec ?? 30, 60);
+    const body: Record<string, unknown> = { command, timeout: timeoutSec };
+    if (opts.stdin !== undefined) body['stdin'] = opts.stdin;
+    const res = await this.raw(
+      'POST',
+      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/exec`,
+      { body, timeoutMs: (timeoutSec + 15) * 1000 },
+    );
+    const parsed = await this.expectJson<{ exit_code?: number; stdout?: string; stderr?: string }>(
+      res,
+      'execMachine',
+    );
+    return { exitCode: parsed.exit_code ?? -1, stdout: parsed.stdout ?? '', stderr: parsed.stderr ?? '' };
+  }
+
   // ---------- internals ----------
 
   private async json<T>(

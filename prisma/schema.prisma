@@ -139,9 +139,49 @@ model HermesInstance {
   outbox                OutboxMessage[]
   integrations          Integration[]
   pendingConfirmations  PendingConfirmation[]
+  installedSkills       InstalledSkill[]
 
   @@index([status])
   @@index([lastActivityAt])
+}
+
+/// Marketplace skills (skills.sh) a user has 1-click-installed. Source of
+/// truth that survives instance destroy/re-create: on a fresh provision and
+/// on every boot the launcher replays these into the machine's skills dir.
+/// The audited file bytes are stored in `filesJson` so we never re-fetch from
+/// skills.sh (a Railway backend can't — the API is Vercel-OIDC-only) and the
+/// pinned `hash` lets a periodic job re-check the audit verdict.
+model InstalledSkill {
+  id          String   @id @default(uuid())
+  instanceId  String
+  userId      String
+  /// skills.sh stable id, "{source}/{slug}" e.g. "vercel-labs/skills/find-skills"
+  skillId     String
+  /// "owner/repo" (github) or "domain.com" (well-known)
+  source      String
+  /// URL-safe skill slug; also the on-disk dir name (prefixed `mkt-` on the machine)
+  slug        String
+  name        String
+  /// SHA-256 from the skills.sh detail endpoint — pinned for integrity + re-audit
+  hash        String
+  /// audit riskLevel in force at install time: NONE|LOW|MEDIUM|HIGH|CRITICAL|null
+  auditRisk   String?
+  installUrl  String?
+  /// audited [{path, contents}] payload (instructions-only; scripts/ stripped)
+  filesJson   Json
+  /// "installing" | "installed" | "failed" — installing = queued for boot replay
+  status      String   @default("installing")
+  lastError   String?
+  installedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, slug])
+  @@index([instanceId])
+  @@index([userId])
+  @@index([status])
 }
 
 /// Per-user OAuth-broker MCP connections (Composio, Arcade, etc.).

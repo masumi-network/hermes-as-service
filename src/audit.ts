@@ -29,7 +29,10 @@ export type ProvisionEventType =
   | 'hermes_task_picked'
   | 'hermes_task_completed'
   | 'hermes_task_failed'
-  | 'eod_report_sent';
+  | 'eod_report_sent'
+  | 'skill_installed'
+  | 'skill_install_queued'
+  | 'skill_removed';
 
 /**
  * Persist a lifecycle event to ProvisionEvent. Never throws — auditing must
