@@ -109,6 +109,18 @@ for src in /opt/hermes-user-config/skills/meta/*/; do
   fi
 done
 
+# Prune off-product bundled skills from the volume (Marketing PA). The image
+# already deletes these from the bundle source so Hermes won't re-sync them;
+# this cleans EXISTING /opt/data volumes (persisted across an image roll).
+# Denylist is one leaf slug per line; '#' comments + blanks ignored.
+denylist=/opt/hermes-user-config/skill-denylist.txt
+if [ -f "$denylist" ]; then
+  grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$denylist" | while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    find "$HERMES_HOME/skills" -depth -type d -name "$s" -exec rm -rf {} + 2>/dev/null || true
+  done
+fi
+
 # Standard Hermes home subdirs (Hermes creates these lazily but explicit is
 # safer for cron's filesystem layout).
 mkdir -p "$HERMES_HOME"/{sessions,logs,memories,workspace,home,cron,cron/output}

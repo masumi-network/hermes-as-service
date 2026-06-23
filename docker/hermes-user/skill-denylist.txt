@@ -1,0 +1,82 @@
+# Base-image bundled skills to REMOVE — off-product for a Marketing Personal
+# Assistant. One leaf slug per line; '#' comments and blanks ignored.
+#
+# Consumed in two places:
+#   - Dockerfile.hermes-user deletes these from the bundle SOURCE
+#     (/opt/hermes/skills) so Hermes can't re-sync them on boot.
+#   - hermes-user-launcher prunes them from /opt/data/skills on every boot
+#     so existing (persisted) volumes get cleaned too.
+# Kept skills (marketing/ads/SEO/content/growth + PA productivity) are NOT listed.
+
+# --- macOS / local-hardware only (the agent is a Linux Fly VM — these can't run) ---
+macos-computer-use
+apple-notes
+apple-reminders
+imessage
+findmy
+openhue
+
+# --- software engineering (a marketing PA is not a developer) ---
+claude-code
+codex
+opencode
+hermes-agent
+hermes-agent-skill-authoring
+github-auth
+github-code-review
+github-issues
+github-pr-workflow
+github-repo-management
+codebase-inspection
+python-debugpy
+node-inspect-debugger
+debugging-hermes-tui-commands
+systematic-debugging
+test-driven-development
+subagent-driven-development
+requesting-code-review
+jupyter-live-kernel
+native-mcp
+webhook-subscriptions
+
+# --- software-dev workflow scaffolding ---
+plan
+writing-plans
+spike
+dogfood
+kanban-orchestrator
+kanban-worker
+
+# --- ML / academic research ---
+huggingface-hub
+research-paper-writing
+arxiv
+llm-wiki
+
+# --- games / entertainment / media hobby ---
+pokemon-player
+minecraft-modpack-server
+spotify
+songsee
+heartmula
+songwriting-and-ai-music
+polymarket
+comfyui
+touchdesigner-mcp
+p5js
+pixel-art
+ascii-art
+ascii-video
+manim-video
+pretext
+
+# --- brand / safety risk ---
+godmode
+
+# --- redundant with google-workspace ---
+himalaya
+
+# --- Chinese-locale skills ---
+yuanbao
+baoyu-comic
+baoyu-infographic

@@ -7,8 +7,8 @@
 # Build + push to Fly registry:
 #   docker login registry.fly.io -u x --password "$FLY_API_TOKEN"
 #   docker build --platform linux/amd64 -f Dockerfile.hermes-user \
-#       -t registry.fly.io/hermes-user-image:v20 .
-#   docker push registry.fly.io/hermes-user-image:v20
+#       -t registry.fly.io/hermes-user-image:v21 .
+#   docker push registry.fly.io/hermes-user-image:v21
 #
 # Base is PINNED to v2026.5.16 — the newest tini-based (pre-s6) upstream tag.
 # Why pinned, not :latest:
@@ -24,6 +24,17 @@
 FROM nousresearch/hermes-agent:v2026.5.16
 
 USER root
+
+# ----- trim off-product bundled skills (Marketing PA) -----
+# The base image bundles ~85 skills under /opt/hermes/skills/<category>/<slug>
+# and Hermes re-syncs them into /opt/data/skills on every boot. Delete the
+# off-product ones (dev tooling, ML research, games/media, macOS-only, etc.)
+# from the bundle SOURCE here so they can never be re-synced. The launcher also
+# prunes them from existing /opt/data volumes on boot (same denylist file).
+COPY docker/hermes-user/skill-denylist.txt /opt/hermes-user-config/skill-denylist.txt
+RUN grep -vE '^\s*#|^\s*$' /opt/hermes-user-config/skill-denylist.txt | while IFS= read -r s; do \
+      find /opt/hermes/skills -depth -type d -name "$s" -exec rm -rf {} + ; \
+    done
 
 # ----- curated skill packs (image-fs, NOT in /opt/data) -----
 # We bake them under /opt/hermes-user-config/skills/ and the launcher rsyncs
