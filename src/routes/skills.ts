@@ -65,12 +65,39 @@ router.get('/v1/instances/:userId/skills', async (c) => {
   return c.json({ skills: await listInstalledSkills(userId) });
 });
 
+// Skills BAKED INTO the agent's image (curated packs), distinct from
+// marketplace installs. Same list for every user on a given image version.
+// Returns {skills:[]} (treated as "none") if it can't be read right now.
+router.get('/v1/instances/:userId/skills/preinstalled', async (c) => {
+  const userId = c.req.param('userId');
+  const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!instance || instance.destroyedAt) {
+    return c.json({ error: { message: 'instance not found' } }, 404);
+  }
+  const { listPreinstalledSkills } = await import('../skills/preinstalled.js');
+  const skills = await listPreinstalledSkills(instance);
+  return c.json({ skills: skills ?? [] });
+});
+
 router.delete('/v1/instances/:userId/skills/:slug', async (c) => {
   const userId = c.req.param('userId');
   const slug = c.req.param('slug');
   const result = await removeSkill(userId, slug);
-  if (!result.removed) return c.json({ error: { message: 'skill not installed' } }, 404);
-  return c.body(null, 204);
+  if (result.removed) return c.body(null, 204);
+
+  // Not a marketplace install — if it's a pre-installed (image-baked) skill,
+  // reject: users can't remove image defaults. Otherwise it's just unknown.
+  const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (instance && !instance.destroyedAt) {
+    const { isPreinstalledSlug } = await import('../skills/preinstalled.js');
+    if (await isPreinstalledSlug(instance, slug)) {
+      return c.json(
+        { error: { message: 'Pre-installed skills that ship with the agent image cannot be removed' } },
+        409,
+      );
+    }
+  }
+  return c.json({ error: { message: 'skill not installed' } }, 404);
 });
 
 export { router as skillsSokosumiRouter };
