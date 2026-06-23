@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { prisma } from '../db.js';
-import { SpritesClient } from '../sprites/client.js';
 import { esc, layout, relTime, statCard, statusPill } from './html.js';
 import { logger } from '../logger.js';
 import { loadConfig } from '../config.js';
@@ -67,12 +66,12 @@ router.get('/admin', async (c) => {
     <h1>Overview</h1>
     <div class="stats">
       ${statCard('Total instances', total)}
-      ${statCard('Running', running)}
+      ${statCard('Running', running, undefined, running > 0 ? 'ok' : undefined)}
       ${statCard('Suspended', suspended)}
-      ${statCard('Provisioning', provisioning)}
-      ${statCard('Errored', errored)}
+      ${statCard('Provisioning', provisioning, undefined, provisioning > 0 ? 'warn' : undefined)}
+      ${statCard('Errored', errored, undefined, errored > 0 ? 'danger' : undefined)}
       ${statCard('Chats (24h)', last24hMsgs)}
-      ${statCard('Errors (24h)', errorRate24h)}
+      ${statCard('Errors (24h)', errorRate24h, undefined, errorRate24h > 0 ? 'danger' : undefined)}
       ${statCard('MTD spend', '$' + totalCost.toFixed(2), `${totalTokens.toLocaleString()} tokens · cap $${cfg.MONTHLY_USD_CAP_PER_USER}/user`)}
     </div>
 
@@ -281,7 +280,7 @@ router.get('/admin/instances/:userId', async (c) => {
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/sync-config" class="inline"><button type="submit" title="Replace the machine onto the current FLY_MACHINE_IMAGE — launcher re-syncs SOUL.md, config.yaml + skills on boot">Sync config</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/destroy" class="inline" onsubmit="return confirm('Destroy sprite + DB row for this user? Cannot be undone.')"><button type="submit" class="danger">Destroy</button></form>
         </div>
-        <h3 style="margin-top:24px">Sprite process logs</h3>
+        <h3 style="margin-top:24px">Process logs</h3>
         <pre class="log" id="sprite-log">loading…</pre>
         <script>
           async function refreshLog() {
@@ -294,7 +293,6 @@ router.get('/admin/instances/:userId', async (c) => {
             }
           }
           refreshLog();
-          setInterval(refreshLog, 8000);
         </script>
       </div>
     </div>
@@ -359,16 +357,16 @@ router.get('/admin/instances/:userId/sprite-logs', async (c) => {
   const userId = c.req.param('userId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.text('not found', 404);
-  const sprites = new SpritesClient();
-  try {
-    const text = await sprites.tailServiceLogs(row.spriteName, 'hermes', 200);
-    return c.text(text, 200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  } catch (err) {
-    logger.warn({ err, userId }, 'sprite_log_fetch_failed');
-    return c.text(`(log fetch failed: ${err instanceof Error ? err.message : String(err)})`, 200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-    });
-  }
+  // The agent runs on a Fly machine; live process logs aren't streamed into the
+  // dashboard. Point operators at the Fly tooling rather than the dead
+  // Sprites-era tail (which always 404'd and surfaced a raw stack trace here).
+  const msg = `Live process logs aren't streamed into this dashboard — the agent runs on a Fly machine.
+
+View them with the Fly CLI:
+  fly logs -a ${row.spriteName}
+
+…or open the machine in the Fly dashboard.`;
+  return c.text(msg, 200, { 'Content-Type': 'text/plain; charset=utf-8' });
 });
 
 router.post('/admin/instances/:userId/resume', async (c) => {
