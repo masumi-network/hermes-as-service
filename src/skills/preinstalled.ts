@@ -1,6 +1,5 @@
 import { FlyClient } from '../fly/client.js';
 import { logger } from '../logger.js';
-import { SKILLS_ROOT, MARKETPLACE_PREFIX } from './install-on-machine.js';
 
 /**
  * Lists the skills BAKED INTO the Hermes image (the curated packs synced from
@@ -32,12 +31,16 @@ const INTERNAL_SLUGS = new Set(['outbox-send', 'schedule-task']);
 const cache = new Map<string, { skills: PreinstalledSkill[]; at: number }>();
 const TTL_MS = 60 * 60 * 1000; // 1h; also keyed by image so a roll busts it
 
-// Find every SKILL.md (depth ≤ 3), skip marketplace (`mkt-`) and hidden dirs,
-// and emit a delimited record per skill carrying its YAML frontmatter block.
+// Read the image's skill SOURCES — the bundled packs (/opt/hermes/skills) plus
+// our baked marketing packs (/opt/hermes-user-config/skills). This is exactly
+// "what the image ships with": it's stable (unlike the runtime /opt/data merge,
+// which is briefly inconsistent while the launcher syncs/prunes on boot) and it
+// naturally excludes `mkt-` marketplace installs (those only live in /opt/data).
+// Emit a delimited record per skill carrying its YAML frontmatter block.
+const SKILL_SOURCE_DIRS = '/opt/hermes/skills /opt/hermes-user-config/skills';
 const ENUM_SCRIPT =
-  `find ${SKILLS_ROOT} -maxdepth 3 -name SKILL.md 2>/dev/null | while IFS= read -r f; do ` +
+  `find ${SKILL_SOURCE_DIRS} -name SKILL.md 2>/dev/null | while IFS= read -r f; do ` +
   `d=$(dirname "$f"); b=$(basename "$d"); ` +
-  `case "$b" in ${MARKETPLACE_PREFIX}*) continue ;; esac; ` +
   `case "$b" in .*) continue ;; esac; ` +
   `case "$d" in *"/."*) continue ;; esac; ` +
   `printf '\\n===SKILL:%s===\\n' "$b"; ` +
