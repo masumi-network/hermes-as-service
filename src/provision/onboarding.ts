@@ -5,7 +5,7 @@ import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
-import { buildPersonaDirective } from './profile.js';
+import { buildPersonaDirective, type Personality } from './profile.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
 export interface OnboardingStep {
@@ -103,7 +103,12 @@ export async function runOnboarding(
         row.email,
         row.role,
         row.company,
-        buildPersonaDirective({ personaName: row.personaName, verbosity: row.verbosity, tone: row.tone }),
+        buildPersonaDirective({
+          personaName: row.personaName,
+          verbosity: row.verbosity,
+          tone: row.tone,
+          personality: row.personality as unknown as Personality | null,
+        }),
       ),
       5 * 60_000,
     );
@@ -339,7 +344,12 @@ export async function runReturningUserBoot(instanceId: string): Promise<void> {
         row.email,
         row.role,
         row.company,
-        buildPersonaDirective({ personaName: row.personaName, verbosity: row.verbosity, tone: row.tone }),
+        buildPersonaDirective({
+          personaName: row.personaName,
+          verbosity: row.verbosity,
+          tone: row.tone,
+          personality: row.personality as unknown as Personality | null,
+        }),
       ),
       3 * 60_000,
     );

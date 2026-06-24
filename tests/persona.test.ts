@@ -51,6 +51,51 @@ describe('buildPersonaDirective', () => {
   });
 });
 
+describe('buildPersonaDirective — personality axes', () => {
+  it('emits nothing when personality is absent (balanced = today\'s behavior)', () => {
+    expect(buildPersonaDirective({})).toBe('');
+    expect(buildPersonaDirective({ personality: null })).toBe('');
+  });
+
+  it('maps each axis to its bucketed clause (low / mid / high)', () => {
+    const lo = buildPersonaDirective({ personality: { tone: 0, detail: 10, style: 20 } });
+    expect(lo).toContain('Be direct; skip pleasantries.');
+    expect(lo).toContain('Keep it short; lead with the answer.');
+    expect(lo).toContain('Keep a formal, professional register.');
+
+    const mid = buildPersonaDirective({ personality: { tone: 50, detail: 50, style: 50 } });
+    expect(mid).toContain('Balance warmth and efficiency.');
+    expect(mid).toContain('Give a normal amount of detail.');
+    expect(mid).toContain('Use a relaxed-professional register.');
+
+    const hi = buildPersonaDirective({ personality: { tone: 100, detail: 80, style: 90 } });
+    expect(hi).toContain('Be warm, friendly, personable.');
+    expect(hi).toContain('Be thorough; explain your reasoning, add context.');
+    expect(hi).toContain('Be casual and playful; light humour is fine.');
+  });
+
+  it('respects bucket boundaries (33=low, 34=mid, 66=mid, 67=high)', () => {
+    const c = (tone) => buildPersonaDirective({ personality: { tone, detail: 50, style: 50 } });
+    expect(c(33)).toContain('Be direct; skip pleasantries.');
+    expect(c(34)).toContain('Balance warmth and efficiency.');
+    expect(c(66)).toContain('Balance warmth and efficiency.');
+    expect(c(67)).toContain('Be warm, friendly, personable.');
+  });
+
+  it('clamps out-of-range values and defaults missing axes to balanced', () => {
+    const out = buildPersonaDirective({ personality: { tone: 999, detail: -5 } });
+    expect(out).toContain('Be warm, friendly, personable.'); // 999 → clamp 100 → high
+    expect(out).toContain('Keep it short; lead with the answer.'); // -5 → clamp 0 → low
+    expect(out).toContain('Use a relaxed-professional register.'); // missing style → 50 → mid
+  });
+
+  it('keeps the voice-only guardrail when only personality is set', () => {
+    const out = buildPersonaDirective({ personality: { tone: 80, detail: 80, style: 80 } });
+    expect(out).toContain('VOICE only');
+    expect(out.toLowerCase()).toContain('cost-gating');
+  });
+});
+
 describe('isVerbosity / isTone guards', () => {
   it('accepts valid values', () => {
     expect(isVerbosity('brief')).toBe(true);

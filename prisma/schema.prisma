@@ -121,6 +121,10 @@ model HermesInstance {
   personaName    String?
   verbosity      String?
   tone           String?
+  /// 3-axis voice personality from the onboard payload: { tone, detail, style }
+  /// each int 0–100. null = balanced (50/50/50) = default behavior. Shapes the
+  /// assistant's voice only — never safety/autonomy/spend (those = autonomyLevel).
+  personality    Json?
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's

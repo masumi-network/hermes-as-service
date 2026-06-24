@@ -99,6 +99,16 @@ const onboardBody = z.object({
   personaName: z.string().min(1).max(60).optional(),
   verbosity: z.enum(['brief', 'balanced', 'detailed']).optional(),
   tone: z.enum(['professional', 'friendly', 'playful']).optional(),
+  /** 3-axis voice personality, each an integer 0–100. Optional — absent means
+   *  every axis is 50 (balanced), i.e. today's behavior. Shapes voice only;
+   *  safety/autonomy/spend stay governed by autonomyLevel. */
+  personality: z
+    .object({
+      tone: z.number().int().min(0).max(100),
+      detail: z.number().int().min(0).max(100),
+      style: z.number().int().min(0).max(100),
+    })
+    .optional(),
 });
 
 router.post('/v1/instances', async (c) => {
@@ -452,7 +462,8 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
       parsed.data.company ||
       parsed.data.personaName ||
       parsed.data.verbosity ||
-      parsed.data.tone
+      parsed.data.tone ||
+      parsed.data.personality
     ) {
       await prisma.hermesInstance.update({
         where: { id: row.id },
@@ -464,6 +475,7 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
           personaName: parsed.data.personaName?.slice(0, 60) ?? row.personaName,
           verbosity: parsed.data.verbosity ?? row.verbosity,
           tone: parsed.data.tone ?? row.tone,
+          personality: parsed.data.personality ?? row.personality ?? undefined,
         },
       });
     }

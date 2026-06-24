@@ -260,6 +260,12 @@ router.get('/admin/instances/:userId', async (c) => {
           <dt>Region</dt><dd class="mono">${esc(row.region || '—')}</dd>
           <dt>Created</dt><dd>${esc(relTime(row.createdAt))} (${esc(row.createdAt.toISOString())})</dd>
           <dt>Last activity</dt><dd>${esc(relTime(row.lastActivityAt))}</dd>
+          ${(() => {
+            const p = row.personality as { tone?: number; detail?: number; style?: number } | null;
+            return p && typeof p === 'object'
+              ? `<dt>Voice</dt><dd class="mono">tone ${esc(p.tone ?? 50)} · detail ${esc(p.detail ?? 50)} · style ${esc(p.style ?? 50)}</dd>`
+              : '';
+          })()}
           ${row.errorMessage ? `<dt>Last error</dt><dd style="color:var(--err)">${esc(row.errorMessage)}</dd>` : ''}
         </dl>
       </div>

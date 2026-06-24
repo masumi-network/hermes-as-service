@@ -7,10 +7,19 @@
 export type Verbosity = 'brief' | 'balanced' | 'detailed';
 export type Tone = 'professional' | 'friendly' | 'playful';
 
+/** 3-axis personality, each an integer 0–100, sent on the onboard payload.
+ *  Absent = treat every axis as 50 (balanced) = today's behavior. */
+export interface Personality {
+  tone: number; // 0 = direct / to-the-point … 100 = warm / personable
+  detail: number; // 0 = concise / short … 100 = thorough / detailed
+  style: number; // 0 = formal / professional … 100 = casual / playful
+}
+
 export interface PersonaSettings {
   personaName?: string | null;
   verbosity?: string | null;
   tone?: string | null;
+  personality?: Personality | null;
 }
 
 export function isVerbosity(v: unknown): v is Verbosity {
@@ -46,6 +55,47 @@ function toneClause(t: string | null | undefined): string | null {
   }
 }
 
+// Bucketed clauses for the 0–100 personality axes (≤33 / 34–66 / ≥67).
+const PERSONALITY_CLAUSES = {
+  tone: {
+    low: 'Be direct; skip pleasantries.',
+    mid: 'Balance warmth and efficiency.',
+    high: 'Be warm, friendly, personable.',
+  },
+  detail: {
+    low: 'Keep it short; lead with the answer.',
+    mid: 'Give a normal amount of detail.',
+    high: 'Be thorough; explain your reasoning, add context.',
+  },
+  style: {
+    low: 'Keep a formal, professional register.',
+    mid: 'Use a relaxed-professional register.',
+    high: 'Be casual and playful; light humour is fine.',
+  },
+} as const;
+
+function clampAxis(n: unknown): number {
+  const v = typeof n === 'number' && Number.isFinite(n) ? Math.round(n) : 50;
+  return Math.max(0, Math.min(100, v));
+}
+function axisBucket(n: number): 'low' | 'mid' | 'high' {
+  return n <= 33 ? 'low' : n <= 66 ? 'mid' : 'high';
+}
+
+/** Persona lines for the 3-axis personality. Empty when unset (= balanced =
+ *  today's behavior); when present, every axis maps to its bucketed clause. */
+function personalityLines(p: Personality | null | undefined): string[] {
+  if (!p || typeof p !== 'object') return [];
+  const tone = clampAxis((p as Partial<Personality>).tone);
+  const detail = clampAxis((p as Partial<Personality>).detail);
+  const style = clampAxis((p as Partial<Personality>).style);
+  return [
+    `- Warmth: ${PERSONALITY_CLAUSES.tone[axisBucket(tone)]}`,
+    `- Detail: ${PERSONALITY_CLAUSES.detail[axisBucket(detail)]}`,
+    `- Register: ${PERSONALITY_CLAUSES.style[axisBucket(style)]}`,
+  ];
+}
+
 /**
  * Build the persona directive the agent stores under memory key
  * `user.persona` and applies to its voice. Returns '' when nothing is
@@ -67,6 +117,7 @@ export function buildPersonaDirective(p: PersonaSettings): string {
   if (v) lines.push(`- Response length: ${v}`);
   const t = toneClause(p.tone);
   if (t) lines.push(`- Tone: ${t}`);
+  lines.push(...personalityLines(p.personality));
   if (lines.length === 0) return '';
   return `Persona settings the user chose for you — save them under memory key \
 user.persona and ALWAYS apply them going forward:
