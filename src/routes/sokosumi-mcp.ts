@@ -35,6 +35,38 @@ export interface InstanceContext {
   autonomyLevel: 'low' | 'medium' | 'high';
 }
 
+/**
+ * Pull the pending awaiting-input event out of a job's events[]. Sokosumi has
+ * no dedicated input-request endpoint — the question and the event id you must
+ * answer both live in the job's event log. Defensive: the exact event shape
+ * isn't guaranteed, so we match any event whose type/status mentions INPUT and
+ * return the newest. Exported for unit tests.
+ */
+export function extractAwaitingInputEvent(events: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(events)) return null;
+  // A job's event log keeps BOTH the open request and its later resolution
+  // (e.g. type INPUT_REQUEST followed by INPUT_PROVIDED / INPUT_RESPONSE). Match
+  // the OPEN request only — never an already-answered event, whose id is useless
+  // to provide_job_input and would re-submit against a resolved event.
+  const RESOLVED = /PROVIDED|RESPONSE|RECEIVED|RESOLVED|ANSWERED|SUBMITTED|COMPLETED|FULFILLED/;
+  const matches = events.filter((e): e is Record<string, unknown> => {
+    if (!e || typeof e !== 'object') return false;
+    const o = e as Record<string, unknown>;
+    const t = String(o['type'] ?? '').toUpperCase();
+    const s = String(o['status'] ?? '').toUpperCase();
+    if (!(t.includes('INPUT') || s.includes('INPUT'))) return false;
+    if (RESOLVED.test(t) || RESOLVED.test(s)) return false;
+    return true;
+  });
+  if (matches.length === 0) return null;
+  matches.sort((a, b) =>
+    String(b['createdAt'] ?? b['updatedAt'] ?? '').localeCompare(
+      String(a['createdAt'] ?? a['updatedAt'] ?? ''),
+    ),
+  );
+  return matches[0] ?? null;
+}
+
 interface AuthOk {
   ok: true;
   ctx: InstanceContext;
@@ -178,6 +210,19 @@ const TOOLS_ALL: ToolDef[] = [
         id: { type: 'string', description: 'Job id.' },
       },
       required: ['id'],
+    },
+  },
+  {
+    access: 'read',
+    name: 'sokosumi_get_job_input_request',
+    description:
+      "For a job paused in AWAITING_INPUT, read the exact pending input request: the event_id you must answer plus the question/fields the agent is asking for. Call this BEFORE sokosumi_provide_job_input, then pass the returned event_id straight through (as event_id) with input_data matching the requested fields. Returns awaitingInput=false if the job isn't actually waiting.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: "Job id (from sokosumi_list_jobs or a task's jobs)." },
+      },
+      required: ['job_id'],
     },
   },
   {
@@ -609,6 +654,32 @@ export async function executeTool(
       if (!id) throw new Error('missing required arg: id');
       const files = await client.getJobFiles(id);
       return JSON.stringify({ count: files.length, files }, null, 2);
+    }
+
+    case 'sokosumi_get_job_input_request': {
+      const jobId = String(args['job_id'] ?? args['id'] ?? '');
+      if (!jobId) throw new Error('missing required arg: job_id');
+      // No dedicated Sokosumi endpoint — the pending input request lives in the
+      // job's events[] (the same array provide_job_input's event_id comes from).
+      const job = (await client.getJob(jobId)) as {
+        status?: string;
+        events?: unknown;
+      };
+      const ev = extractAwaitingInputEvent(job?.events);
+      return JSON.stringify(
+        {
+          jobId,
+          jobStatus: job?.status ?? null,
+          awaitingInput: !!ev,
+          eventId: ev && typeof ev['id'] === 'string' ? ev['id'] : null,
+          request: ev,
+          hint: ev
+            ? 'Pass eventId as event_id to sokosumi_provide_job_input, with input_data matching the requested fields.'
+            : 'Job is not awaiting input (no awaiting-input event found).',
+        },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_list_conversations': {

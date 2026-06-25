@@ -7,6 +7,7 @@ import { runInboxRefreshSweep } from './inbox/refresh.js';
 import { runUrgentInterruptSweep } from './notifications/urgent.js';
 import { runTaskAugmentationSweep } from './notifications/augment.js';
 import { runHermesExecutorSweep } from './notifications/hermes-executor.js';
+import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 
 let scheduled: cron.ScheduledTask | null = null;
@@ -15,6 +16,7 @@ let inboxRefreshScheduled: cron.ScheduledTask | null = null;
 let urgentInterruptScheduled: cron.ScheduledTask | null = null;
 let taskAugmentationScheduled: cron.ScheduledTask | null = null;
 let hermesExecutorScheduled: cron.ScheduledTask | null = null;
+let inputResponderScheduled: cron.ScheduledTask | null = null;
 let eodReportScheduled: cron.ScheduledTask | null = null;
 
 /**
@@ -192,6 +194,35 @@ export function stopHermesExecutorCron(): void {
   if (hermesExecutorScheduled) {
     hermesExecutorScheduled.stop();
     hermesExecutorScheduled = null;
+  }
+}
+
+/**
+ * Every 5 minutes (staggered from the executor) — input-responder sweep.
+ * Detects Sokosumi jobs paused in AWAITING_INPUT and, at medium/high autonomy,
+ * drives Hermes to answer them (high = submit immediately, medium = raise a
+ * confirmation card). Low autonomy is skipped (urgent-interrupts notifies).
+ */
+export function startInputResponderCron(): void {
+  if (inputResponderScheduled) return;
+  inputResponderScheduled = cron.schedule(
+    '2-59/5 * * * *',
+    async () => {
+      try {
+        await runInputResponderSweep();
+      } catch (err) {
+        logger.error({ err }, 'input_responder_sweep_threw');
+      }
+    },
+    { scheduled: true },
+  );
+  logger.info('input_responder_cron_started');
+}
+
+export function stopInputResponderCron(): void {
+  if (inputResponderScheduled) {
+    inputResponderScheduled.stop();
+    inputResponderScheduled = null;
   }
 }
 

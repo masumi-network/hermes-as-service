@@ -13,6 +13,24 @@ interface CreateInput {
 export async function createPendingConfirmation(
   input: CreateInput,
 ): Promise<{ id: string; summary: string }> {
+  // Dedup: if an identical proposal (same tool + same args) is already pending
+  // for this user, return it instead of stacking a duplicate confirmation card.
+  // Guards against a retrying agent and the background input-responder
+  // re-prompting the same paused job before the user has approved.
+  const argsJson = JSON.stringify(input.toolArgs ?? {});
+  const pending = await prisma.pendingConfirmation.findMany({
+    where: { userId: input.userId, toolName: input.toolName, status: 'pending' },
+    select: { id: true, summary: true, toolArgs: true },
+    take: 50,
+  });
+  const dup = pending.find((p) => JSON.stringify(p.toolArgs ?? {}) === argsJson);
+  if (dup) {
+    logger.info(
+      { userId: input.userId, toolName: input.toolName, confirmationId: dup.id },
+      'pending_confirmation_deduped',
+    );
+    return { id: dup.id, summary: dup.summary };
+  }
   const row = await prisma.pendingConfirmation.create({
     data: {
       instanceId: input.instanceId,

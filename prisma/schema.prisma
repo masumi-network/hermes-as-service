@@ -91,6 +91,11 @@ model HermesInstance {
   /// hide a new AWAITING_INPUT event from getting noticed.
   lastAwaitingInputNoticeAt DateTime?
   lastFailedJobNoticeAt DateTime?
+  /// Watermark for the input-responder sweep (auto-answers AWAITING_INPUT jobs
+  /// at medium/high autonomy). Kept separate from lastAwaitingInputNoticeAt —
+  /// that one is owned by the urgent-interrupt NOTIFY sweep; sharing it would
+  /// let the two sweeps hide events from each other.
+  lastInputResponderAt DateTime?
   /// HIGH-autonomy users get a hourly task-augmentation pass: Hermes
   /// scans newly-created tasks since this watermark and adds enriching
   /// comments where it has useful context (mail, memory, prior jobs).

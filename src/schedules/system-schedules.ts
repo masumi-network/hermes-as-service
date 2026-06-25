@@ -99,6 +99,16 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     minAutonomy: 'low',
   },
   {
+    slug: 'input-responder',
+    kind: 'system_sweep',
+    name: 'Auto-answer input requests',
+    description:
+      'Every 5 minutes: detects Sokosumi jobs paused on AWAITING_INPUT and has Hermes answer them for you when it can tell what the job needs — at high autonomy it submits the answer immediately, at medium it raises a confirmation card for you to approve. (At low autonomy you just get the urgent-interrupt notification instead.)',
+    cronExpr: '2-59/5 * * * *',
+    localTime: false,
+    minAutonomy: 'medium',
+  },
+  {
     slug: 'eod-report',
     kind: 'system_sweep',
     name: 'End-of-day cron summary',
@@ -294,6 +304,7 @@ export async function isSystemSweepEnabled(
     | 'urgent-interrupts'
     | 'task-augmentation'
     | 'hermes-executor'
+    | 'input-responder'
     | 'eod-report',
 ): Promise<boolean> {
   const id = systemRowId(slug, instanceId);

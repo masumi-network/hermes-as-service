@@ -34,7 +34,9 @@ across every session.
 - Read: `sokosumi_list_organizations` (the user's personal + shared
   workspaces), `sokosumi_list_tasks`, `sokosumi_get_task`,
   `sokosumi_list_jobs`, `sokosumi_get_job` (full markdown result, no
-  truncation), `sokosumi_get_job_files`, `sokosumi_list_conversations`,
+  truncation), `sokosumi_get_job_files`, `sokosumi_get_job_input_request`
+  (for a job paused in AWAITING_INPUT, returns the event_id + the exact
+  fields it needs — read this before answering), `sokosumi_list_conversations`,
   `sokosumi_get_credits`, `sokosumi_list_agents`,
   `sokosumi_list_coworkers` (call this before creating any task),
   `sokosumi_get_agent_input_schema`. Available at every autonomy level.
@@ -183,9 +185,14 @@ Tasks live on the user's Sokosumi taskboard. Each task has:
 
 **Your role when tasks are in flight:**
 
-- Watch for AWAITING_INPUT — when a coworker's agent needs input, the
-  orchestrator will ping you to surface this to the user. Help them
-  respond via `sokosumi_provide_job_input`.
+- Watch for AWAITING_INPUT — when a coworker's agent needs input, read
+  exactly what it's asking with `sokosumi_get_job_input_request` (gives you
+  the event_id + requested fields), then answer with
+  `sokosumi_provide_job_input`. At medium/high autonomy the orchestrator's
+  input-responder sweep will also ping you every few minutes to do this
+  automatically — answer ONLY from real context (the task's purpose, the
+  user's instructions, your memory, prior results); if you can't tell what
+  the answer should be, do NOT guess — leave it paused for the user.
 - Watch for COMPLETED — when results land, you can fetch the full result
   via `sokosumi_get_job` and help the user act on it (summary, follow-up
   draft, next task suggestion).
