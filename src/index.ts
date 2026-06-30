@@ -94,6 +94,17 @@ void (async () => {
   }
 })();
 
+// On boot, fail any bench test runs orphaned by a previous pod (their executor
+// can't survive a restart, so a lingering "running" row is always stale).
+void (async () => {
+  try {
+    const { recoverStrandedTestRuns } = await import('./bench/runner.js');
+    await recoverStrandedTestRuns();
+  } catch (err) {
+    logger.error({ err }, 'test_run_recovery_threw');
+  }
+})();
+
 // One-off cleanup: instances previously provisioned with
 // sokosumiEnv="development" get bumped to "preprod" so they stop
 // failing with "env not configured" after we tightened the contract.

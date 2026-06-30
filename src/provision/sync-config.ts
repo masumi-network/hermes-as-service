@@ -35,6 +35,10 @@ export async function syncConfig(userId: string): Promise<void> {
   const fly = new FlyClient();
   await fly.updateMachineImage(row.spriteName, row.spriteId, cfg.FLY_MACHINE_IMAGE);
   await fly.waitForState(row.spriteName, row.spriteId, 'started', 90);
+  await prisma.hermesInstance.update({
+    where: { id: row.id },
+    data: { imageTag: cfg.FLY_MACHINE_IMAGE, imageRolledAt: new Date() },
+  });
   logger.info(
     { userId, spriteName: row.spriteName, image: cfg.FLY_MACHINE_IMAGE },
     'sync_config_done',

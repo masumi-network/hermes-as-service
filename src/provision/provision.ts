@@ -207,13 +207,18 @@ async function runFlyPipeline(
 
     await prisma.hermesInstance.update({
       where: { id: instanceId },
-      data: { spriteId: machine.id, endpointUrl },
+      data: {
+        spriteId: machine.id,
+        endpointUrl,
+        imageTag: cfg.FLY_MACHINE_IMAGE,
+        imageRolledAt: new Date(),
+      },
     });
     await recordEvent({
       userId: row.userId,
       instanceId,
       event: 'service_registered',
-      detail: { machineId: machine.id, endpointUrl },
+      detail: { machineId: machine.id, endpointUrl, image: cfg.FLY_MACHINE_IMAGE },
     });
 
     log.info({ machineId: machine.id }, 'waiting for machine to reach started state');

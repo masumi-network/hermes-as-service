@@ -35,6 +35,8 @@ export function layout(opts: { title: string; body: string; active?: string }): 
       ${nav('/admin/chats', 'Chats')}
       ${nav('/admin/confirmations', 'Confirmations')}
       ${nav('/admin/events', 'Events')}
+      ${nav('/admin/images', 'Images')}
+      ${nav('/admin/tests', 'Tests')}
     </nav>
   </header>
   <main>${opts.body}</main>
@@ -256,4 +258,14 @@ a:focus-visible, button:focus-visible, .btn:focus-visible, input:focus-visible, 
 .event-time { color: var(--faint); font-family: var(--mono); }
 .event-name { font-weight: 500; }
 .event-detail { color: var(--muted); font-family: var(--mono); font-size: 11px; word-break: break-all; }
+
+/* ---- tool chips (test runs) + diffs ---- */
+.tool-chip { display: inline-block; padding: 2px 7px; border-radius: var(--r-sm); font-family: var(--mono); font-size: 11px; background: rgba(124,176,247,0.12); color: var(--info); margin: 2px 4px 2px 0; }
+.tool-none { color: var(--faint); font-size: 12px; }
+.changed { color: var(--warn); }
+.unchanged { color: var(--muted); }
+.cmp { width: 100%; border-collapse: collapse; }
+.cmp th, .cmp td { vertical-align: top; border: 1px solid var(--border); padding: 10px 12px; font-size: 12px; width: 1%; }
+.cmp th { background: var(--surface-2); text-align: left; }
+.cmp td .chat-content { font-size: 12px; }
 `;

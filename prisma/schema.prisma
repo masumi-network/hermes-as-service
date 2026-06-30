@@ -130,6 +130,16 @@ model HermesInstance {
   /// each int 0–100. null = balanced (50/50/50) = default behavior. Shapes the
   /// assistant's voice only — never safety/autonomy/spend (those = autonomyLevel).
   personality    Json?
+  /// Hermes image this instance was last provisioned or rolled to (the full Fly
+  /// image ref, e.g. "registry.fly.io/hermes-user-image:v21"). Recorded so the
+  /// admin can show which image version each instance runs without hitting the
+  /// Fly API. Null on legacy rows until reconciled from live machine state.
+  imageTag       String?
+  imageRolledAt  DateTime?
+  /// When true, this instance is a test bench: it appears on the admin Tests
+  /// page as a target for running standard-chat suites — typically one bench
+  /// instance pinned per image version for side-by-side comparison.
+  isTestBench    Boolean  @default(false)
   /// Which Sokosumi backend this user lives in: "development", "preprod",
   /// or "mainnet". Sokosumi sends this at provision time so the
   /// orchestrator's sokosumi_sync routes API calls to the correct env's
@@ -149,6 +159,7 @@ model HermesInstance {
   integrations          Integration[]
   pendingConfirmations  PendingConfirmation[]
   installedSkills       InstalledSkill[]
+  testRuns              TestRun[]
 
   @@index([status])
   @@index([lastActivityAt])
@@ -382,4 +393,56 @@ model ProvisionEvent {
   @@index([userId, createdAt])
   @@index([event, createdAt])
   @@index([createdAt])
+}
+
+/// One execution of a standard-chat suite against one instance, run from the
+/// admin Tests page. Captures the image the instance was on so runs can be
+/// compared across image versions. Suites + cases are code-defined
+/// (src/bench/suites.ts); only the results are persisted here.
+model TestRun {
+  id         String    @id @default(uuid())
+  instanceId String
+  userId     String
+  suiteId    String
+  suiteName  String
+  /// Snapshot of the instance's image ref at run start (for grouping/compare).
+  imageTag   String?
+  /// "running" | "done" | "error"
+  status     String    @default("running")
+  note       String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  turns    TestTurn[]
+
+  @@index([suiteId, startedAt])
+  @@index([instanceId, startedAt])
+  @@index([startedAt])
+}
+
+/// One chat (one test case) inside a TestRun: the prompt sent and everything we
+/// captured back — full reply, tool calls the agent made, latency, token usage.
+model TestTurn {
+  id               String   @id @default(uuid())
+  runId            String
+  caseId           String
+  caseName         String
+  order            Int
+  prompt           String
+  responseText     String?
+  /// [{ name, label?, detail? }] — tools the agent called during the turn,
+  /// captured from the in-process progress bus + the final response message.
+  toolCalls        Json?
+  model            String?
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  latencyMs        Int?
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+
+  run TestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
 }
