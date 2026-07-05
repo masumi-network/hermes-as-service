@@ -6,6 +6,7 @@ import { loadConfig } from '../config.js';
 import { decryptSecret } from '../crypto.js';
 import { ensurePricingLoaded } from '../llm/pricing.js';
 import { checkUserCap, recordLlmUsage } from '../llm/spend.js';
+import { notifyMasumi, shortId } from '../notify/masumi.js';
 import { publishProgress, hasProgressSubscribers } from './progress-bus.js';
 import { labelForBuiltinTool, summarizeResult } from './tool-labels.js';
 
@@ -112,6 +113,12 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   await ensurePricingLoaded();
   const cap = await checkUserCap(auth.row.userId);
   if (!cap.allowed) {
+    // Alert the team channel once every 6h per user (the 402 fires on every
+    // request while capped, so a tight throttle keeps it to one heads-up).
+    notifyMasumi(
+      `💸 Monthly spend cap reached — ${shortId(auth.row.userId)} ($${cap.monthlySpendUsd.toFixed(2)} of $${cap.capUsd.toFixed(2)})`,
+      { key: `cap:${auth.row.userId}`, throttleMs: 6 * 60 * 60_000 },
+    );
     return jsonResponse(402, {
       error: {
         message: `monthly spend cap reached ($${cap.monthlySpendUsd.toFixed(4)} of $${cap.capUsd.toFixed(2)})`,

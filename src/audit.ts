@@ -1,5 +1,26 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
+import { notifyMasumi, shortId } from './notify/masumi.js';
+
+// Failure + lifecycle events forwarded to the Masumi Team Channel. Kept
+// deliberately tight so the channel stays high-signal (chat_proxied /
+// chat_failed / onboarding_step etc. are intentionally excluded — too chatty).
+const MASUMI_NOTIFY: Partial<
+  Record<ProvisionEventType, (userId: string, detail?: Record<string, unknown>) => string>
+> = {
+  provision_failed: (u, d) => `🔴 Provision FAILED — ${shortId(u)}${detailSuffix(d)}`,
+  integration_failed: (u, d) => `🔴 Integration failed — ${shortId(u)}${detailSuffix(d)}`,
+  hermes_task_failed: (u, d) => `🔴 Hermes task failed — ${shortId(u)}${detailSuffix(d)}`,
+  onboarding_done: (u) => `✅ New instance onboarded — ${shortId(u)}`,
+  destroyed: (u) => `🗑️ Instance destroyed — ${shortId(u)}`,
+};
+
+function detailSuffix(detail?: Record<string, unknown>): string {
+  if (!detail) return '';
+  const msg = detail['error'] ?? detail['errorMessage'] ?? detail['reason'];
+  if (typeof msg === 'string' && msg) return `: ${msg.slice(0, 200)}`;
+  return '';
+}
 
 export type ProvisionEventType =
   | 'created'
@@ -55,5 +76,12 @@ export async function recordEvent(args: {
     });
   } catch (err) {
     logger.error({ err, args }, 'record_event_failed');
+  }
+
+  // Forward high-signal failure/lifecycle events to the Masumi Team Channel.
+  // Best-effort; keyed per event+user so a flapping instance is throttled.
+  const fmt = MASUMI_NOTIFY[args.event];
+  if (fmt) {
+    notifyMasumi(fmt(args.userId, args.detail), { key: `${args.event}:${args.userId}` });
   }
 }

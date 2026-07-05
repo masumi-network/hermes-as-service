@@ -15,6 +15,8 @@ import { confirmationsRouter } from './routes/confirmations.js';
 import { skillsSokosumiRouter } from './routes/skills.js';
 import { adminAuth } from './admin/auth.js';
 import { adminRouter } from './admin/routes.js';
+import { restoreMasumiProfile } from './notify/masumi-restore.js';
+import { sendMasumiTest, masumiConfigured } from './notify/masumi.js';
 import {
   startIdleSuspendCron,
   startSokosumiDailySyncCron,
@@ -30,6 +32,11 @@ import {
 // import { startScheduler } from './schedules/scheduler.js';
 
 const cfg = loadConfig();
+
+// Rehydrate the masumi-agent-messenger bot identity (best-effort, fast) so the
+// notifier can post to the Masumi Team Channel. No-op unless configured.
+void restoreMasumiProfile();
+
 const app = new Hono();
 
 app.get('/health', (c) => c.json({ ok: true }));
@@ -55,6 +62,12 @@ app.route('/', skillsSokosumiRouter);
 // /admin/* is the human dashboard (Basic Auth).
 app.use('/admin/*', adminAuth);
 app.use('/admin', adminAuth);
+// Post a test message to the Masumi Team Channel (verifies the bot identity +
+// channel end to end). Behind admin Basic Auth like the rest of /admin.
+app.post('/admin/test-masumi', async (c) => {
+  const res = await sendMasumiTest('🔔 Test alert from the Hermes Orchestrator (admin test).');
+  return c.json({ configured: masumiConfigured(), ...res });
+});
 app.route('/', adminRouter);
 
 // Convenience: send root to /admin so visiting the bare hostname shows the UI.

@@ -1,5 +1,6 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { notifyMasumi, shortId } from '../notify/masumi.js';
 import type { InstanceContext } from '../routes/sokosumi-mcp.js';
 
 interface CreateInput {
@@ -50,6 +51,9 @@ export async function createPendingConfirmation(
     },
     'pending_confirmation_created',
   );
+  notifyMasumi(`🟡 Confirmation raised (${input.toolName}) — ${shortId(input.userId)}`, {
+    key: `conf-new:${row.id}`,
+  });
   return { id: row.id, summary: row.summary };
 }
 
@@ -305,6 +309,13 @@ export async function approveConfirmation(
       errorMessage: errorMessage ?? null,
     },
   });
+
+  notifyMasumi(
+    errored
+      ? `🔴 Confirmation errored (${row.toolName}) — ${shortId(row.userId)}: ${(errorMessage ?? '').slice(0, 160)}`
+      : `🟢 Confirmation approved (${row.toolName}) — ${shortId(row.userId)}`,
+    { key: `conf-done:${row.id}` },
+  );
 
   // Push to the outbox. This lands in the user's chat — often a minute+
   // after approval, once they've scrolled on — so it MUST stand on its own:

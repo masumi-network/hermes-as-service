@@ -30,6 +30,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# masumi-agent-messenger CLI — used by src/notify/masumi.ts to post orchestrator
+# alerts into the private "Masumi Team Channel". Pinned for reproducible builds.
+RUN npm install -g @masumi_network/masumi-agent-messenger@0.0.32 \
+ && masumi-agent-messenger --version
+
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
