@@ -67,6 +67,14 @@ const schema = z.object({
   // reliability without rebuilding the sprite image. Empty = passthrough.
   // Vision requests still use VISION_MODEL.
   TEXT_MODEL_OVERRIDE: z.string().optional().default(''),
+  // Upstream LLM endpoint the proxy forwards to. Default = OpenRouter. Point
+  // at any OpenAI-compatible base (e.g. https://maas.phoeniqs.com/v1) to route
+  // the whole fleet through a different provider — pair with TEXT_MODEL_OVERRIDE
+  // to name that provider's model. OpenRouter-only extras (provider routing,
+  // HTTP-Referer/X-Title) are auto-suppressed for non-OpenRouter upstreams.
+  LLM_UPSTREAM_BASE_URL: z.string().url().default('https://openrouter.ai/api/v1'),
+  // API key for LLM_UPSTREAM_BASE_URL. Empty = fall back to OPENROUTER_API_KEY.
+  LLM_UPSTREAM_API_KEY: z.string().optional().default(''),
 });
 
 export type Config = z.infer<typeof schema>;

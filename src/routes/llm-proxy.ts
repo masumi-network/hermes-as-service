@@ -12,8 +12,6 @@ import { labelForBuiltinTool, summarizeResult } from './tool-labels.js';
 
 const router = new Hono();
 
-const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
-
 // ---------- in-memory per-instance rate limit ----------
 const rateBuckets = new Map<string, number[]>();
 
@@ -144,9 +142,11 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
     so['include_usage'] = true;
     parsed['stream_options'] = so;
   }
+  const isOpenRouter = cfg.LLM_UPSTREAM_BASE_URL.includes('openrouter.ai');
   // Latency: let OpenRouter pick the fastest provider for this model unless
   // the caller already pinned routing. Additive — doesn't change the model.
-  if (parsed['provider'] === undefined) {
+  // OpenRouter-only field; other OpenAI-compatible upstreams reject it.
+  if (isOpenRouter && parsed['provider'] === undefined) {
     parsed['provider'] = { sort: 'throughput' };
   }
   // If the request contains image_url parts, swap the model to a
@@ -171,17 +171,19 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
   if (parsedOk) publishToolResults(auth.row.id, parsed);
 
   const upstreamHeaders: Record<string, string> = {
-    Authorization: `Bearer ${cfg.OPENROUTER_API_KEY}`,
+    Authorization: `Bearer ${cfg.LLM_UPSTREAM_API_KEY || cfg.OPENROUTER_API_KEY}`,
     'Content-Type': 'application/json',
-    'HTTP-Referer': cfg.ORCHESTRATOR_PUBLIC_URL,
-    'X-Title': 'Hermes Orchestrator',
   };
+  if (isOpenRouter) {
+    upstreamHeaders['HTTP-Referer'] = cfg.ORCHESTRATOR_PUBLIC_URL;
+    upstreamHeaders['X-Title'] = 'Hermes Orchestrator';
+  }
   const accept = c.req.header('accept');
   if (accept) upstreamHeaders['Accept'] = accept;
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+    upstream = await fetch(`${cfg.LLM_UPSTREAM_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: upstreamHeaders,
       body: forwardedBody,
@@ -320,12 +322,14 @@ async function forwardGenericGet(c: Context, pathSuffix: string): Promise<Respon
   if (!auth.ok) return jsonResponse(auth.status, { error: { message: auth.message } });
 
   const cfg = loadConfig();
+  const isOpenRouter = cfg.LLM_UPSTREAM_BASE_URL.includes('openrouter.ai');
   try {
-    const upstream = await fetch(`${OPENROUTER_BASE}${pathSuffix}`, {
+    const upstream = await fetch(`${cfg.LLM_UPSTREAM_BASE_URL}${pathSuffix}`, {
       headers: {
-        Authorization: `Bearer ${cfg.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': cfg.ORCHESTRATOR_PUBLIC_URL,
-        'X-Title': 'Hermes Orchestrator',
+        Authorization: `Bearer ${cfg.LLM_UPSTREAM_API_KEY || cfg.OPENROUTER_API_KEY}`,
+        ...(isOpenRouter
+          ? { 'HTTP-Referer': cfg.ORCHESTRATOR_PUBLIC_URL, 'X-Title': 'Hermes Orchestrator' }
+          : {}),
       },
     });
     const outHeaders: Record<string, string> = {};
