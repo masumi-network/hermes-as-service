@@ -142,7 +142,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_tasks',
     description:
-      "List the user's Sokosumi tasks across all orgs they belong to. Returns id, name, status, createdAt for each. Use this to discover what work the user has in flight. Filter by status (e.g. RUNNING, COMPLETED) or search by name substring.",
+      "List the user's Sokosumi tasks across all orgs they belong to. Returns id, name, status, createdAt for each. Use this to discover what work the user has in flight. Filter by status (e.g. RUNNING, COMPLETED) or search by name substring. With the user's granted workspace access this returns EVERY coworker's tasks in the workspace (not just yours), so it's your board-wide view for coordinating across coworkers — if it comes back access-limited, you're only seeing your own until the user approves your workspace access.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -282,7 +282,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_add_task_comment',
     description:
-      "Post a comment on a Sokosumi task to add context, observations, or supporting info. Free (no credits). Use this when you have useful background (relevant emails, prior research, important context) the task creator might want to know. Don't comment unless you actually have substance to add.",
+      "Post a comment on ANY Sokosumi task you can access — including tasks owned by OTHER coworkers (with the user's granted workspace access). Free (no credits). Two main uses: (1) add useful context/background the task creator should know, and (2) ANSWER a coworker's question — when a coworker asks something in a task's events/comments, reply here to unblock them. Don't comment without substance. If it returns PARKED (task_parked) the task is frozen pending the user's approval; if it returns grant-required, the user must approve your workspace access first.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -486,7 +486,7 @@ async function handle(c: Context): Promise<Response> {
       );
       const message = err instanceof Error ? err.message : String(err);
       return rpcResult(id, {
-        content: [{ type: 'text', text: `tool error: ${message}` }],
+        content: [{ type: 'text', text: `tool error: ${message}${grantErrorHint(message)}` }],
         isError: true,
       });
     }
@@ -548,6 +548,40 @@ export async function callTool(
  * confirmation-approval flow (orchestrator-internal, no Hermes turn) so
  * we don't have to duplicate per-tool logic.
  */
+/**
+ * Turn a Sokosumi vendor-workspace-grant 403 into guidance Hermes can act on.
+ * Sokosumi (PR #3300) gates cross-coworker read/create/comment behind a
+ * per-workspace "vendor grant" that a human must approve; the raw 403 body
+ * carries an error `kind` we translate here. Appended to the tool-error text.
+ */
+function grantErrorHint(message: string): string {
+  if (message.includes('grant_required')) {
+    return ' — ACCESS PENDING: this reached beyond Hermes\' own tasks, so Sokosumi created a request for the user to approve Hermes\' workspace access. Tell the user to approve Hermes under Sokosumi settings → vendor/coworker access, then retry. Do NOT keep retrying blindly.';
+  }
+  if (message.includes('grant_denied')) {
+    return ' — DENIED: the user declined Hermes\' workspace access here. Hermes cannot read/create/comment across other coworkers in this workspace until the user re-grants it. Do not retry; tell the user.';
+  }
+  if (message.includes('grant_revoked')) {
+    return ' — REVOKED: the user revoked Hermes\' workspace access here. Hermes is locked out of cross-coworker actions until re-granted. Do not retry; tell the user.';
+  }
+  if (message.includes('task_parked')) {
+    return ' — PARKED: this task is GRANT_PENDING, frozen until the user approves Hermes\' workspace access. It cannot be commented on, run, or modified yet. Tell the user to approve the pending grant.';
+  }
+  return '';
+}
+
+/**
+ * If a just-created task came back parked (GRANT_PENDING), describe it so
+ * Hermes tells the user to approve rather than assuming the coworker started.
+ */
+function createResultNote(result: unknown): string | undefined {
+  const r = result as { status?: string } | null;
+  if (r && typeof r === 'object' && r.status === 'GRANT_PENDING') {
+    return 'PARKED (GRANT_PENDING): the task was created but is waiting on the user to approve Hermes\' workspace access before the coworker can pick it up. Tell the user to approve the pending grant in Sokosumi — it auto-starts once approved.';
+  }
+  return undefined;
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -790,7 +824,10 @@ export async function executeTool(
       const isPersonalScope = rawOrgArg === null;
       const organizationIdArg = typeof rawOrgArg === 'string' ? rawOrgArg : undefined;
       const description = typeof args['description'] === 'string' ? (args['description'] as string) : undefined;
-      const status = typeof args['status'] === 'string' ? (args['status'] as 'DRAFT' | 'READY') : undefined;
+      // Default to READY so the task is visible + startable. DRAFT tasks are
+      // invisible to coworkers (Hermes included) after creation, so only use
+      // DRAFT when the user explicitly wants a not-yet-started draft.
+      const status: 'DRAFT' | 'READY' = args['status'] === 'DRAFT' ? 'DRAFT' : 'READY';
 
       if (!name) throw new Error('missing required arg: name');
       if (!coworkerId) {
@@ -822,12 +859,14 @@ export async function executeTool(
           );
         }
         const result = await client.createTask({ name, description, status, coworkerId });
+        const note = createResultNote(result);
         return JSON.stringify(
           {
             orgId: null,
             scope: 'personal',
             assignedTo: { id: coworkerId, slug: match.slug, name: match.name },
             task: result,
+            ...(note ? { note } : {}),
           },
           null,
           2,
@@ -918,8 +957,14 @@ export async function executeTool(
         status,
         coworkerId,
       });
+      const note = createResultNote(result);
       return JSON.stringify(
-        { orgId: targetOrgId, assignedTo: { id: coworkerId, slug: coworkerSlug, name: coworkerName }, task: result },
+        {
+          orgId: targetOrgId,
+          assignedTo: { id: coworkerId, slug: coworkerSlug, name: coworkerName },
+          task: result,
+          ...(note ? { note } : {}),
+        },
         null,
         2,
       );

@@ -263,11 +263,15 @@ export class SokosumiClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${sokoCfg.apiKey}`,
       'X-Delegation-User-Id': this.userId,
+      // Canonical header as of Sokosumi PR #3300 (vendor grants). Legacy
+      // X-Delegation-* still accepted; sending both is safe on any env.
+      'X-Context-User-Id': this.userId,
       Accept: 'application/json',
       'Content-Type': 'application/json',
     };
     if (this.organizationId) {
       headers['X-Delegation-Organization-Id'] = this.organizationId;
+      headers['X-Context-Organization-Id'] = this.organizationId;
     }
     const t0 = Date.now();
     const res = await fetch(url, {
@@ -370,10 +374,14 @@ export class SokosumiClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${sokoCfg.apiKey}`,
       'X-Delegation-User-Id': this.userId,
+      // Canonical header as of Sokosumi PR #3300 (vendor grants). Legacy
+      // X-Delegation-* still accepted; sending both is safe on any env.
+      'X-Context-User-Id': this.userId,
       Accept: 'application/json',
     };
     if (this.organizationId) {
       headers['X-Delegation-Organization-Id'] = this.organizationId;
+      headers['X-Context-Organization-Id'] = this.organizationId;
     }
     const t0 = Date.now();
     const res = await fetch(url, {
