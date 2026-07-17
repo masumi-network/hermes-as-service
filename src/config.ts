@@ -47,6 +47,14 @@ const schema = z.object({
   SOKOSUMI_API_BASE_PREPROD: z.string().url().default('https://api.preprod.sokosumi.com/v1'),
   SOKOSUMI_COWORKER_API_KEY_MAINNET: z.string().optional().default(''),
   SOKOSUMI_API_BASE_MAINNET: z.string().url().default('https://api.sokosumi.com/v1'),
+  // First-party ORCHESTRATOR (orch_) API keys — Hermes is now a Sokosumi
+  // "orchestrator" actor (not a coworker), with user-like workspace access and
+  // NO vendor grants. When set, these take precedence over the coworker key for
+  // that env; unsetting reverts to the coworker key. Minted via the admin API
+  // POST /v1/orchestrators/{id}/api-keys.
+  SOKOSUMI_ORCHESTRATOR_API_KEY_DEV: z.string().optional().default(''),
+  SOKOSUMI_ORCHESTRATOR_API_KEY_PREPROD: z.string().optional().default(''),
+  SOKOSUMI_ORCHESTRATOR_API_KEY_MAINNET: z.string().optional().default(''),
   MASTER_ENCRYPTION_KEY: z.string().min(40),
   ADMIN_PASSWORD: z.string().min(8),
   // Public base URL of the orchestrator itself. Used to construct the
@@ -111,25 +119,34 @@ export function isValidSokosumiEnv(v: unknown): v is SokosumiEnv {
  */
 export function getSokosumiConfig(
   env: SokosumiEnv | null | undefined,
-): { baseUrl: string; apiKey: string } | null {
+): { baseUrl: string; apiKey: string; actor: 'orchestrator' | 'coworker' } | null {
   const cfg = loadConfig();
   const effective: SokosumiEnv = env ?? 'mainnet';
   let baseUrl: string | undefined;
-  let apiKey: string;
+  let coworkerKey = '';
+  let orchestratorKey = '';
   switch (effective) {
     case 'development':
       baseUrl = cfg.SOKOSUMI_API_BASE_DEV;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_DEV;
+      coworkerKey = cfg.SOKOSUMI_COWORKER_API_KEY_DEV;
+      orchestratorKey = cfg.SOKOSUMI_ORCHESTRATOR_API_KEY_DEV;
       break;
     case 'preprod':
       baseUrl = cfg.SOKOSUMI_API_BASE_PREPROD;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_PREPROD;
+      coworkerKey = cfg.SOKOSUMI_COWORKER_API_KEY_PREPROD;
+      orchestratorKey = cfg.SOKOSUMI_ORCHESTRATOR_API_KEY_PREPROD;
       break;
     case 'mainnet':
       baseUrl = cfg.SOKOSUMI_API_BASE_MAINNET;
-      apiKey = cfg.SOKOSUMI_COWORKER_API_KEY_MAINNET;
+      coworkerKey = cfg.SOKOSUMI_COWORKER_API_KEY_MAINNET;
+      orchestratorKey = cfg.SOKOSUMI_ORCHESTRATOR_API_KEY_MAINNET;
       break;
   }
+  // Prefer the first-party orchestrator (orch_) key when configured. It gives
+  // user-like workspace access with no vendor grants; unsetting it reverts to
+  // the legacy coworker key cleanly.
+  const apiKey = orchestratorKey || coworkerKey;
+  const actor: 'orchestrator' | 'coworker' = orchestratorKey ? 'orchestrator' : 'coworker';
   if (!baseUrl || !apiKey) return null;
-  return { baseUrl, apiKey };
+  return { baseUrl, apiKey, actor };
 }

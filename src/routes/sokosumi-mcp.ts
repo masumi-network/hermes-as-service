@@ -567,6 +567,14 @@ function grantErrorHint(message: string): string {
   if (message.includes('task_parked')) {
     return ' — PARKED: this task is GRANT_PENDING, frozen until the user approves Hermes\' workspace access. It cannot be commented on, run, or modified yet. Tell the user to approve the pending grant.';
   }
+  // Orchestrator-actor limits (Hermes is a first-party orchestrator, not a
+  // coworker): it coordinates but doesn't run jobs or use marketplace chat.
+  if (message.includes('marketplace conversations')) {
+    return ' — Orchestrator can\'t read marketplace conversations. Skip it and coordinate via tasks + task comments instead.';
+  }
+  if (/\/jobs\b/.test(message) && message.includes('403')) {
+    return ' — As the orchestrator you COORDINATE, you don\'t run jobs directly — jobs run under the assigned coworker. Instead of starting a job, create/assign a task to the right coworker (sokosumi_create_task, at READY) and let them run the jobs underneath.';
+  }
   return '';
 }
 
