@@ -61,7 +61,23 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
 
   // Live row — return as-is (idempotent). Destroyed rows no longer exist
   // (destroy hard-deletes), so any row we find here is live.
-  if (existing) return toView(existing);
+  if (existing) {
+    // A prior attempt that ERRORED (e.g. a Fly boot timeout) must be
+    // retryable — otherwise re-POST just returns the stuck error row forever
+    // and the user can never recover. Tear down the (possibly orphaned) old
+    // app + row, then fall through to a fresh provision below.
+    if (existing.status === 'error') {
+      logger.info({ userId: input.userId, instanceId: existing.id }, 'reprovisioning_errored_instance');
+      try {
+        await new FlyClient().deleteApp(existing.spriteName);
+      } catch (err) {
+        logger.warn({ err, appName: existing.spriteName }, 'reprovision_cleanup_deleteapp_failed');
+      }
+      await prisma.hermesInstance.delete({ where: { id: existing.id } }).catch(() => {});
+    } else {
+      return toView(existing);
+    }
+  }
 
   const appName = generateAppName(input.userId);
   const region = input.region ?? cfg.FLY_REGION;
@@ -222,7 +238,11 @@ async function runFlyPipeline(
     });
 
     log.info({ machineId: machine.id }, 'waiting for machine to reach started state');
-    await fly.waitForState(row.spriteName, machine.id, 'started', 180);
+    // 300s (not 180): a freshly-created Fly app must cold-pull the ~large
+    // hermes-user image before the machine can reach 'started', which can
+    // exceed 3 min. Too-tight a timeout marks a machine that IS coming up as
+    // a failed provision.
+    await fly.waitForState(row.spriteName, machine.id, 'started', 300);
 
     // Pending integrations baked into the machine's MCP_SERVERS_JSON above
     // are now live — flip them connected so Sokosumi sees green checkmarks.
