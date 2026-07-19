@@ -7,6 +7,7 @@ import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { runReturningUserBoot } from './onboarding.js';
 import { buildMcpServersJsonForUser, markPendingIntegrationsConnected } from '../integrations/manager.js';
+import { purgeSokosumiMirror } from '../sokosumi/client.js';
 
 export interface ProvisionInput {
   userId: string;
@@ -362,7 +363,10 @@ export async function suspendInstance(userId: string): Promise<InstanceView> {
  * Idempotent: destroying a userId that doesn't exist (already-destroyed
  * or never-provisioned) is a no-op.
  */
-export async function destroyInstance(userId: string): Promise<void> {
+export async function destroyInstance(
+  userId: string,
+  opts: { purgeSokosumiMirror?: boolean } = {},
+): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return; // idempotent — already gone
   // Audit the destroy BEFORE deleting the row so the ProvisionEvent
@@ -385,6 +389,14 @@ export async function destroyInstance(userId: string): Promise<void> {
     }
   }
   await prisma.hermesInstance.delete({ where: { id: row.id } });
+
+  // Tell Sokosumi to purge its local mirror (chat history, assistant name, orb,
+  // poll cursors). Skipped only when Sokosumi itself initiated the delete (it
+  // cleans up on its own side). Best-effort + backgrounded so the destroy
+  // response isn't blocked on the callback + its retries.
+  if (opts.purgeSokosumiMirror !== false) {
+    void purgeSokosumiMirror(row.userId, row.sokosumiEnv).catch(() => {});
+  }
 }
 
 export async function setSecret(userId: string, key: string, value: string): Promise<void> {

@@ -564,7 +564,9 @@ router.get('/v1/instances/:userId/key', async (c) => {
 router.delete('/v1/instances/:userId', async (c) => {
   const userId = c.req.param('userId');
   try {
-    await destroyInstance(userId);
+    // Sokosumi-initiated delete: it already purges its own local mirror, so we
+    // must NOT call the purge callback (would be redundant, though harmless).
+    await destroyInstance(userId, { purgeSokosumiMirror: false });
     return c.body(null, 204);
   } catch (err) {
     return mapError(c, err, userId);

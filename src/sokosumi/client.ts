@@ -57,6 +57,70 @@ export function resolveSokosumiTarget(
 }
 
 /**
+ * Purge Sokosumi's local mirror of a Hermes instance (chat history, assistant
+ * name, orb avatar, poll cursors) after an orchestrator-side destroy.
+ *
+ * Sokosumi no longer infers deletion from a 404 (one wrong 404 would wipe a
+ * user's history), so we must tell it explicitly whenever WE delete an instance
+ * through a path that isn't a request from Sokosumi itself (admin/manual, test
+ * cleanup, future GC/expiry). Sokosumi-initiated deletes clean up on their side.
+ *
+ * Contract: POST {base}/v1/hermes/instances/{userId}/purge — orchestrator
+ * (orch_) key auth, NO body, NO X-Context headers, env-routed, idempotent
+ * (200 even if nothing stored), 5xx is retry-safe.
+ *
+ * Best-effort: never throws into the destroy caller. Requires the orch_ key for
+ * the instance's env (the endpoint 403s coworker keys) — logs + skips otherwise.
+ */
+export async function purgeSokosumiMirror(
+  rawUserId: string,
+  rawEnv: string | null | undefined,
+): Promise<void> {
+  const { userId, env } = resolveSokosumiTarget(rawUserId, rawEnv as SokosumiEnv | null | undefined);
+  const cfg = getSokosumiConfig(env);
+  if (!cfg) {
+    logger.warn({ userId, env: env ?? 'mainnet' }, 'sokosumi_purge_skipped_unconfigured');
+    return;
+  }
+  if (cfg.actor !== 'orchestrator') {
+    // The purge endpoint 403s coworker keys — it needs the first-party orch_ key.
+    logger.warn({ userId, env: env ?? 'mainnet' }, 'sokosumi_purge_skipped_no_orch_key');
+    return;
+  }
+  const url = `${cfg.baseUrl.replace(/\/$/, '')}/hermes/instances/${encodeURIComponent(userId)}/purge`;
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${cfg.apiKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (res.ok) {
+        logger.info({ userId, env: env ?? 'mainnet', attempt }, 'sokosumi_mirror_purged');
+        return;
+      }
+      const body = await res.text().catch(() => '');
+      if (res.status < 500) {
+        // 4xx (e.g. 403 wrong-key, 400) is not retryable — log and stop.
+        logger.warn(
+          { userId, status: res.status, body: body.slice(0, 200) },
+          'sokosumi_purge_rejected',
+        );
+        return;
+      }
+      logger.warn({ userId, status: res.status, attempt }, 'sokosumi_purge_5xx_retrying');
+    } catch (err) {
+      logger.warn({ err, userId, attempt }, 'sokosumi_purge_error_retrying');
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, attempt * 1000)); // 1s, 2s backoff
+    }
+  }
+  logger.error({ userId, env: env ?? 'mainnet' }, 'sokosumi_purge_failed_after_retries');
+}
+
+/**
  * Thin client for Sokosumi's v1 API.
  *
  * Auth model: one org-wide coworker API key (held in Railway env), plus
