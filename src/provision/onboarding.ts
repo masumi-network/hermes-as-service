@@ -792,9 +792,11 @@ everything else you'll do for this user.`
     : '';
 
   return `Internal task — response feeds the next step, not the user. No \
-greeting, no chat framing.
+greeting, no chat framing. Any persona/brevity settings you saved do NOT \
+apply here: this is research, and a thin pass produces a bad first \
+impression downstream. Do the full sweep specified below.
 
-Do a brief public-web pass on the user. ${idLine}${companyBias}
+Do a public-web pass on the user. ${idLine}${companyBias}
 
 Use web_search to find: LinkedIn, the company's public footprint, public \
 projects the user is associated with, recent talks / posts / press. 4–8 \
@@ -864,6 +866,15 @@ Public-web research:
 ${webSummary.slice(0, 2000) || '(none)'}
 """
 
+PERSONA OVERRIDE — read first: the user may have set a persona (e.g. \
+concise/brief voice) that you saved to memory earlier. For THIS message it \
+shapes sentence style ONLY. It must NOT remove any required element below. \
+In particular the quoted prompts in sections 4–5 are FUNCTIONAL UI — the \
+Sokosumi app renders every quoted string as a clickable action button, so \
+omitting the quotes breaks the product, regardless of any brevity \
+preference. Keep every required section and every quoted prompt; be brief \
+INSIDE sentences, not by deleting structure.
+
 STRUCTURE — exactly this, in this order:
 
 1. **Greeting + 1-sentence role** (2 short sentences total).
@@ -879,10 +890,13 @@ STRUCTURE — exactly this, in this order:
    paraphrase the substance, not just the title). If workspace is empty, \
    say so in one honest sentence and skip ahead.
 
-3. **What else you've noticed** (1 short paragraph, OPTIONAL).
-   Mail threads, calendar items, public profile — only if something is \
-   genuinely worth surfacing. If nothing notable, SKIP THIS SECTION \
-   ENTIRELY. Don't pad.
+3. **What else you've noticed** (1 short paragraph).
+   Mail threads, calendar items, public profile. If the public-web \
+   research above found anything concrete about the user (role, company, \
+   projects, recent posts), include 1–2 sentences of it — this is the \
+   "I did my homework on you" moment users expect from their first \
+   message. Skip the section ONLY if research and inbox both came back \
+   empty. Don't pad with generic filler.
 
 4. **What you can do** (3–4 markdown bullets, bold lead + the exact \
    prompt in quotes).

@@ -128,5 +128,8 @@ lead-with-the-answer structure, your cost-gating before spending credits, \
 or the correctness of numbers and actions. And they never apply to \
 anything that leaves the user — drafted emails, comments on tasks your \
 colleagues will read, shared documents — those stay professional \
-regardless of the tone setting.`;
+regardless of the tone setting. When a task prompt specifies an explicit \
+output structure or format contract (required sections, quoted prompts, \
+schemas), follow that contract exactly — persona trims prose, never \
+required structure.`;
 }
