@@ -165,6 +165,41 @@ model HermesInstance {
   @@index([lastActivityAt])
 }
 
+/// A pre-provisioned Fly app+machine+volume kept warm so signup can claim
+/// one instantly instead of cold-pulling the ~2.7GB image (which takes ~3.5
+/// min on a fresh host). Machines are booted once (so the image is resident
+/// on their Fly host), then STOPPED — a stopped machine keeps its rootfs on
+/// the host, so start-on-claim is seconds, and stopped machines bill volume
+/// storage only, not CPU. On claim we patch the per-user env and start it.
+/// Replenished in the background by the pool cron; disabled when
+/// WARM_POOL_TARGET=0 (signup falls back to the cold path).
+model HermesPoolMachine {
+  id              String    @id @default(uuid())
+  /// Fly app name (hermes-pool-<rand>). Becomes the claimed instance's
+  /// spriteName — opaque to users, so a generic name is fine.
+  appName         String    @unique
+  machineId       String
+  volumeId        String
+  region          String
+  /// Image the machine was warmed with. Claim only matches the current
+  /// FLY_MACHINE_IMAGE; the cron reaps machines on a stale image.
+  imageTag        String
+  /// warming → ready → claiming (→ deleted on successful claim). failed =
+  /// warm errored or its Fly teardown hasn't succeeded yet — the record is
+  /// KEPT until deleteApp succeeds so the reaper can retry (never orphan an
+  /// app untracked). Stale warming (>15m) / claiming (>10m) rows are reaped;
+  /// the reaper never deletes an app already adopted by a HermesInstance.
+  status          String    @default("warming")
+  /// Set for a short audit window between CAS-claim and row-adoption.
+  claimedByUserId String?
+  createdAt       DateTime  @default(now())
+  readyAt         DateTime?
+  claimedAt       DateTime?
+
+  @@index([status])
+  @@index([status, imageTag, region])
+}
+
 /// Marketplace skills (skills.sh) a user has 1-click-installed. Source of
 /// truth that survives instance destroy/re-create: on a fresh provision and
 /// on every boot the launcher replays these into the machine's skills dir.

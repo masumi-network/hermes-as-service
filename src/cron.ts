@@ -9,6 +9,7 @@ import { runTaskAugmentationSweep } from './notifications/augment.js';
 import { runHermesExecutorSweep } from './notifications/hermes-executor.js';
 import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
+import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
 
 let scheduled: cron.ScheduledTask | null = null;
 let sokosumiScheduled: cron.ScheduledTask | null = null;
@@ -18,6 +19,7 @@ let taskAugmentationScheduled: cron.ScheduledTask | null = null;
 let hermesExecutorScheduled: cron.ScheduledTask | null = null;
 let inputResponderScheduled: cron.ScheduledTask | null = null;
 let eodReportScheduled: cron.ScheduledTask | null = null;
+let poolReplenishScheduled: cron.ScheduledTask | null = null;
 
 /**
  * Marks idle instances as suspended in the DB. Sprites itself releases compute
@@ -253,5 +255,36 @@ export function stopEodReportCron(): void {
   if (eodReportScheduled) {
     eodReportScheduled.stop();
     eodReportScheduled = null;
+  }
+}
+
+/**
+ * Every 2 minutes — top the warm pool back up to WARM_POOL_TARGET ready
+ * machines (reaping stale-image / stuck-claim records first). No-op when
+ * WARM_POOL_TARGET=0. Also kicks one sweep immediately on boot so the pool
+ * fills after a deploy without waiting for the first tick.
+ */
+export function startPoolReplenishCron(): void {
+  if (poolReplenishScheduled) return;
+  poolReplenishScheduled = cron.schedule(
+    '*/2 * * * *',
+    async () => {
+      try {
+        await runPoolReplenishSweep();
+      } catch (err) {
+        logger.error({ err }, 'pool_replenish_cron_threw');
+      }
+    },
+    { scheduled: true },
+  );
+  // Fill immediately on boot (background).
+  schedulePoolReplenishSoon();
+  logger.info('pool_replenish_cron_started');
+}
+
+export function stopPoolReplenishCron(): void {
+  if (poolReplenishScheduled) {
+    poolReplenishScheduled.stop();
+    poolReplenishScheduled = null;
   }
 }

@@ -8,6 +8,8 @@ import { recordEvent } from '../audit.js';
 import { runReturningUserBoot } from './onboarding.js';
 import { buildMcpServersJsonForUser, markPendingIntegrationsConnected } from '../integrations/manager.js';
 import { purgeSokosumiMirror } from '../sokosumi/client.js';
+import { buildMachineConfig, perInstanceEnv } from './machine-spec.js';
+import { claimPoolMachine, releaseClaimedPoolRecord, schedulePoolReplenishSoon } from './pool.js';
 
 export interface ProvisionInput {
   userId: string;
@@ -80,7 +82,6 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
     }
   }
 
-  const appName = generateAppName(input.userId);
   const region = input.region ?? cfg.FLY_REGION;
   const plaintextApiKey = await generateApiServerKey();
   const plaintextLlmToken = await generateApiServerKey();
@@ -88,24 +89,66 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
   const encryptedLlmToken = await encryptSecret(plaintextLlmToken);
   const encryptedOpenRouter = await encryptSecret(cfg.OPENROUTER_API_KEY);
 
+  // Shared row fields (everything except the Fly-resource identifiers, which
+  // differ between the cold path and a pool claim).
+  const profile = {
+    userId: input.userId,
+    region,
+    apiServerKey: encryptedApiKey,
+    llmProxyToken: encryptedLlmToken,
+    openRouterKey: encryptedOpenRouter,
+    name: input.name?.slice(0, 200) ?? null,
+    email: input.email?.slice(0, 254) ?? null,
+    sokosumiEnv: input.sokosumiEnv ?? null,
+    autonomyLevel: input.autonomyLevel ?? 'medium',
+    timezone: input.timezone ?? null,
+    personaName: input.personaName?.slice(0, 60) ?? null,
+    verbosity: input.verbosity ?? null,
+    tone: input.tone ?? null,
+    status: 'provisioning',
+  };
+
+  // Fast path: claim a pre-warmed pool machine for this region + current
+  // image. Falls back to the cold provision path when the pool is empty or
+  // disabled (WARM_POOL_TARGET=0). A claim error must never fail signup.
+  const pooled = await claimPoolMachine(input.userId, region, cfg.FLY_MACHINE_IMAGE).catch((err) => {
+    logger.warn({ err, userId: input.userId }, 'pool_claim_errored_falling_back_cold');
+    return null;
+  });
+
+  if (pooled) {
+    const row = await prisma.hermesInstance.create({
+      data: {
+        ...profile,
+        spriteName: pooled.appName,
+        spriteId: pooled.machineId,
+        flyVolumeId: pooled.volumeId,
+        endpointUrl: `https://${pooled.appName}.fly.dev`,
+        imageTag: pooled.imageTag,
+        imageRolledAt: new Date(),
+      },
+    });
+    // The instance row now owns the Fly app/machine/volume — drop the pool
+    // record so its lifecycle (incl. error-retry teardown) governs them.
+    await releaseClaimedPoolRecord(pooled.id);
+    await recordEvent({
+      userId: row.userId,
+      instanceId: row.id,
+      event: 'created',
+      detail: { appName: pooled.appName, region, host: 'fly', pooled: true },
+    });
+    void claimPoolPipeline(row.id, pooled, plaintextApiKey, plaintextLlmToken).catch((err) => {
+      logger.error({ err, userId: input.userId, instanceId: row.id }, 'provision_pipeline_failed');
+    });
+    // Backfill the slot we just consumed (background).
+    schedulePoolReplenishSoon();
+    return toView(row);
+  }
+
+  // Cold path — no pool machine available.
+  const appName = generateAppName(input.userId);
   const row = await prisma.hermesInstance.create({
-    data: {
-      userId: input.userId,
-      spriteName: appName,
-      region,
-      apiServerKey: encryptedApiKey,
-      llmProxyToken: encryptedLlmToken,
-      openRouterKey: encryptedOpenRouter,
-      name: input.name?.slice(0, 200) ?? null,
-      email: input.email?.slice(0, 254) ?? null,
-      sokosumiEnv: input.sokosumiEnv ?? null,
-      autonomyLevel: input.autonomyLevel ?? 'medium',
-      timezone: input.timezone ?? null,
-      personaName: input.personaName?.slice(0, 60) ?? null,
-      verbosity: input.verbosity ?? null,
-      tone: input.tone ?? null,
-      status: 'provisioning',
-    },
+    data: { ...profile, spriteName: appName },
   });
   await recordEvent({
     userId: row.userId,
@@ -113,8 +156,6 @@ export async function provision(input: ProvisionInput): Promise<InstanceView> {
     event: 'created',
     detail: { appName, region, host: 'fly' },
   });
-
-  // Kick off async pipeline.
   void runFlyPipeline(row.id, plaintextApiKey, plaintextLlmToken).catch((err) => {
     logger.error({ err, userId: input.userId, instanceId: row.id }, 'provision_pipeline_failed');
   });
@@ -165,62 +206,18 @@ async function runFlyPipeline(
     // MCP URLs survive instance destroy because they're persisted by userId).
     const mcpServersJson = await buildMcpServersJsonForUser(row.userId);
 
-    const machine = await fly.createMachine(row.spriteName, {
-      region: row.region,
-      config: {
+    const machine = await fly.createMachine(
+      row.spriteName,
+      buildMachineConfig(cfg, {
+        region: row.region,
         image: cfg.FLY_MACHINE_IMAGE,
-        guest: {
-          cpu_kind: cfg.FLY_CPU_KIND,
-          cpus: cfg.FLY_CPUS,
-          memory_mb: cfg.FLY_MEMORY_MB,
-        },
-        mounts: [{ volume: volume.id, path: '/opt/data' }],
-        env: {
-          // Hermes' API server
-          API_SERVER_ENABLED: 'true',
-          API_SERVER_HOST: '0.0.0.0',
-          API_SERVER_PORT: '8642',
-          API_SERVER_KEY: apiServerKey,
-          API_SERVER_MODEL_NAME: 'hermes-agent',
-          // LLM proxy (orchestrator-side; real OpenRouter key never lands here)
-          OPENROUTER_API_KEY: llmProxyToken,
-          OPENROUTER_BASE_URL: `${cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, '')}/v1/llm/${instanceId}`,
-          // Hermes runtime
-          HERMES_HOME: '/opt/data',
-          TERMINAL_ENV: 'local',
-          HERMES_QUIET: '1',
-          GATEWAY_ALLOW_ALL_USERS: 'true',
-          // Tools
-          EXA_API_KEY: cfg.EXA_API_KEY,
-          // MCP servers (Composio etc.) — empty array if user hasn't connected anything.
-          // Hot-reloadable via patchMachineEnv + restart from integrations/manager.ts.
-          MCP_SERVERS_JSON: mcpServersJson,
-          // Bridge: cron output → orchestrator outbox (used by the
-          // post_llm_call shell hook baked into the image)
-          ORCHESTRATOR_BASE: cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, ''),
-          INSTANCE_ID: instanceId,
-          ORCHESTRATOR_OUTBOX_TOKEN: llmProxyToken,
-        },
-        services: [
-          {
-            ports: [
-              { port: 443, handlers: ['tls', 'http'] },
-              { port: 80, handlers: ['http'] },
-            ],
-            protocol: 'tcp',
-            internal_port: 8642,
-            // Always-on. Fly's default for new services is auto-stop after
-            // a few minutes of idle traffic, which (a) breaks Hermes' built-in
-            // cron and (b) makes /machines/:id/restart return 412 because
-            // the machine ends up in `suspended` state. Pin everything to on.
-            auto_stop_machines: 'off',
-            auto_start_machines: false,
-            min_machines_running: 1,
-          },
-        ],
-        restart: { policy: 'always' },
-      },
-    });
+        volumeId: volume.id,
+        instanceId,
+        apiServerKey,
+        llmProxyToken,
+        mcpServersJson,
+      }),
+    );
 
     await prisma.hermesInstance.update({
       where: { id: instanceId },
@@ -242,77 +239,153 @@ async function runFlyPipeline(
     // 300s (not 180): a freshly-created Fly app must cold-pull the ~large
     // hermes-user image before the machine can reach 'started', which can
     // exceed 3 min. Too-tight a timeout marks a machine that IS coming up as
-    // a failed provision.
+    // a failed provision. (The warm pool avoids this pull entirely — see
+    // claimPoolPipeline.)
     await fly.waitForState(row.spriteName, machine.id, 'started', 300);
 
-    // Pending integrations baked into the machine's MCP_SERVERS_JSON above
-    // are now live — flip them connected so Sokosumi sees green checkmarks.
-    await markPendingIntegrationsConnected(row.userId);
-
-    // Re-apply the user's installed marketplace skills onto this (possibly
-    // fresh) machine. Idempotent + best-effort: makes skills survive a
-    // destroy/re-create (the DB row is the source of truth) and retries any
-    // install queued while the machine was down (setup-time picks included).
-    try {
-      const { replayInstalledSkills } = await import('../skills/manager.js');
-      await replayInstalledSkills(instanceId);
-    } catch (err) {
-      log.warn({ err }, 'skills_replay_failed');
-    }
-
-    // Returning vs new user — decided by whether onboardedAt is set on this
-    // HermesInstance row (which survives Fly destroy/re-create since the row
-    // is keyed on userId, not Fly app id).
-    const isReturning = row.onboardedAt !== null;
-    if (isReturning) {
-      log.info({ endpointUrl }, 'returning user: skipping onboarding screen');
-      await prisma.hermesInstance.update({
-        where: { id: instanceId },
-        data: { status: 'ready', lastActivityAt: new Date(), errorMessage: null },
-      });
-      await recordEvent({
-        userId: row.userId,
-        instanceId,
-        event: 'returning_user_resumed',
-        detail: { endpointUrl },
-      });
-      // Push a short welcome-back message. Cheap path — no fresh research.
-      setTimeout(() => {
-        void runReturningUserBoot(instanceId).catch((err) =>
-          log.error({ err }, 'returning_user_boot_failed'),
-        );
-      }, 8_000);
-    } else {
-      log.info({ endpointUrl }, 'new user: infrastructure ready, waiting for /onboard call');
-      await prisma.hermesInstance.update({
-        where: { id: instanceId },
-        data: {
-          status: 'infrastructure_ready',
-          lastActivityAt: new Date(),
-          errorMessage: null,
-        },
-      });
-      await recordEvent({
-        userId: row.userId,
-        instanceId,
-        event: 'infrastructure_ready',
-        detail: { endpointUrl },
-      });
-    }
+    await finalizeProvisionedMachine(row, endpointUrl, log);
   } catch (err) {
-    log.error({ err }, 'provision failed');
-    const message = err instanceof Error ? err.message : String(err);
-    await prisma.hermesInstance.update({
-      where: { id: instanceId },
-      data: { status: 'error', errorMessage: message },
-    });
+    await failProvision(instanceId, row.userId, err, log);
+  }
+}
+
+/**
+ * Fast path: adopt a pre-warmed pool machine instead of cold-provisioning.
+ * The app/machine/volume already exist and the image is resident on the Fly
+ * host — we just patch in the per-user env and start it (seconds, not the
+ * ~3.5-min cold pull). Shares the exact same tail as runFlyPipeline.
+ */
+async function claimPoolPipeline(
+  instanceId: string,
+  pool: { appName: string; machineId: string; imageTag: string },
+  apiServerKey: string,
+  llmProxyToken: string,
+): Promise<void> {
+  const cfg = loadConfig();
+  const fly = new FlyClient();
+  const row = await prisma.hermesInstance.findUniqueOrThrow({ where: { id: instanceId } });
+  const log = logger.child({ instanceId, userId: row.userId, appName: pool.appName, pooled: true });
+
+  try {
+    const endpointUrl = `https://${pool.appName}.fly.dev`;
+    const mcpServersJson = await buildMcpServersJsonForUser(row.userId);
+
+    log.info('claiming pool machine: patching per-user env');
+    await recordEvent({ userId: row.userId, instanceId, event: 'creating_sprite', detail: { pooled: true } });
+    await fly.patchMachineEnv(
+      pool.appName,
+      pool.machineId,
+      perInstanceEnv(cfg, { instanceId, apiServerKey, llmProxyToken, mcpServersJson }),
+    );
+
+    // patchMachineEnv on a stopped machine leaves it stopped (config applies
+    // on next start); ensure it ends up started either way. Image is resident
+    // on the host, so this boots in seconds.
+    log.info({ machineId: pool.machineId }, 'starting claimed pool machine');
+    await ensureMachineStarted(fly, pool.appName, pool.machineId);
+
     await recordEvent({
       userId: row.userId,
       instanceId,
-      event: 'provision_failed',
-      detail: { message },
+      event: 'service_registered',
+      detail: { machineId: pool.machineId, endpointUrl, image: pool.imageTag, pooled: true },
+    });
+
+    await finalizeProvisionedMachine(row, endpointUrl, log);
+  } catch (err) {
+    await failProvision(instanceId, row.userId, err, log);
+  }
+}
+
+/** Ensure a (possibly stopped) machine reaches `started`, then wait it out. */
+async function ensureMachineStarted(
+  fly: FlyClient,
+  appName: string,
+  machineId: string,
+): Promise<void> {
+  const m = await fly.getMachine(appName, machineId);
+  if (!m) throw upstream(undefined, `claimed pool machine ${machineId} vanished`);
+  if (m.state !== 'started' && m.state !== 'starting') {
+    await fly.startMachine(appName, machineId);
+  }
+  await fly.waitForState(appName, machineId, 'started', 120);
+}
+
+/**
+ * Shared provision tail — runs identically for cold provisions and pool
+ * claims once the machine is `started`. Flips pending integrations connected,
+ * replays installed skills, then sets the instance to ready (returning user)
+ * or infrastructure_ready (new user, awaiting /onboard).
+ */
+async function finalizeProvisionedMachine(
+  row: { id: string; userId: string; onboardedAt: Date | null },
+  endpointUrl: string,
+  log: typeof logger,
+): Promise<void> {
+  // Pending integrations baked into the machine's MCP_SERVERS_JSON are now
+  // live — flip them connected so Sokosumi sees green checkmarks.
+  await markPendingIntegrationsConnected(row.userId);
+
+  // Re-apply the user's installed marketplace skills onto this (possibly
+  // fresh) machine. Idempotent + best-effort.
+  try {
+    const { replayInstalledSkills } = await import('../skills/manager.js');
+    await replayInstalledSkills(row.id);
+  } catch (err) {
+    log.warn({ err }, 'skills_replay_failed');
+  }
+
+  // Returning vs new user — decided by whether onboardedAt is set on this
+  // HermesInstance row (which survives Fly destroy/re-create since the row
+  // is keyed on userId, not Fly app id).
+  const isReturning = row.onboardedAt !== null;
+  if (isReturning) {
+    log.info({ endpointUrl }, 'returning user: skipping onboarding screen');
+    await prisma.hermesInstance.update({
+      where: { id: row.id },
+      data: { status: 'ready', lastActivityAt: new Date(), errorMessage: null },
+    });
+    await recordEvent({
+      userId: row.userId,
+      instanceId: row.id,
+      event: 'returning_user_resumed',
+      detail: { endpointUrl },
+    });
+    // Push a short welcome-back message. Cheap path — no fresh research.
+    setTimeout(() => {
+      void runReturningUserBoot(row.id).catch((err) =>
+        log.error({ err }, 'returning_user_boot_failed'),
+      );
+    }, 8_000);
+  } else {
+    log.info({ endpointUrl }, 'new user: infrastructure ready, waiting for /onboard call');
+    await prisma.hermesInstance.update({
+      where: { id: row.id },
+      data: { status: 'infrastructure_ready', lastActivityAt: new Date(), errorMessage: null },
+    });
+    await recordEvent({
+      userId: row.userId,
+      instanceId: row.id,
+      event: 'infrastructure_ready',
+      detail: { endpointUrl },
     });
   }
+}
+
+/** Mark an instance errored (retryable via re-POST). Shared failure tail. */
+async function failProvision(
+  instanceId: string,
+  userId: string,
+  err: unknown,
+  log: typeof logger,
+): Promise<void> {
+  log.error({ err }, 'provision failed');
+  const message = err instanceof Error ? err.message : String(err);
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { status: 'error', errorMessage: message },
+  });
+  await recordEvent({ userId, instanceId, event: 'provision_failed', detail: { message } });
 }
 
 export async function getInstance(userId: string): Promise<InstanceView> {

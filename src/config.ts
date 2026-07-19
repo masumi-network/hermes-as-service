@@ -18,6 +18,15 @@ const schema = z.object({
   FLY_MEMORY_MB: z.coerce.number().int().positive().default(2048),
   FLY_VOLUME_GB: z.coerce.number().int().positive().default(5),
 
+  // Warm pool: how many pre-booted, stopped, image-resident Fly machines to
+  // keep ready so signup can claim one instantly (~20-40s) instead of cold-
+  // pulling the image (~3.5 min). 0 disables the pool entirely — signup uses
+  // the cold path and nothing extra is provisioned. This is the kill switch.
+  WARM_POOL_TARGET: z.coerce.number().int().min(0).default(0),
+  // Max pool machines to warm concurrently per replenish tick (each warm =
+  // one full cold image pull, so keep this modest to avoid Fly rate limits).
+  WARM_POOL_WARM_CONCURRENCY: z.coerce.number().int().positive().default(2),
+
   // Legacy Sprites support kept for migration window. Will be removed.
   SPRITES_API_TOKEN: z.string().optional().default(''),
   SPRITES_API_BASE: z.string().url().default('https://api.sprites.dev'),
