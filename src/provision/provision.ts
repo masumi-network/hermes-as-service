@@ -303,10 +303,27 @@ async function ensureMachineStarted(
   appName: string,
   machineId: string,
 ): Promise<void> {
-  const m = await fly.getMachine(appName, machineId);
-  if (!m) throw upstream(undefined, `claimed pool machine ${machineId} vanished`);
-  if (m.state !== 'started' && m.state !== 'starting') {
-    await fly.startMachine(appName, machineId);
+  // The env patch just before this is a full config POST, which sends Fly
+  // through a short async update cycle (replacing/updating). POST /start in
+  // that window returns 412 — so poll for a startable state and retry the
+  // start until the machine settles (the cycle is seconds, deadline 90s).
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const m = await fly.getMachine(appName, machineId);
+    if (!m) throw upstream(undefined, `claimed pool machine ${machineId} vanished`);
+    if (m.state === 'started' || m.state === 'starting') break;
+    if (m.state === 'stopped' || m.state === 'suspended' || m.state === 'created') {
+      try {
+        await fly.startMachine(appName, machineId);
+        break;
+      } catch (err) {
+        if (Date.now() > deadline) throw err;
+        logger.info({ appName, machineId }, 'pool_start_retrying_after_412');
+      }
+    } else if (Date.now() > deadline) {
+      throw upstream(undefined, `pool machine ${machineId} stuck in state '${m.state}'`);
+    }
+    await new Promise((r) => setTimeout(r, 2000));
   }
   await fly.waitForState(appName, machineId, 'started', 120);
 }
