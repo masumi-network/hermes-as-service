@@ -1,5 +1,8 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import type { Prisma } from '@prisma/client';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { prisma } from '../db.js';
 import { esc, layout, relTime, statCard, statusPill } from './html.js';
 import { logger } from '../logger.js';
@@ -44,16 +47,49 @@ router.get('/admin/version', (c) => {
 
 router.get('/admin', async (c) => {
   const cfg = loadConfig();
-  const [total, running, suspended, provisioning, errored, last24hMsgs, last24hInstances, recentEvents, mtdSpend, mtdTokens, atOrNearCap] =
+  const liveImage = tagFromRef(cfg.FLY_MACHINE_IMAGE) ?? cfg.FLY_MACHINE_IMAGE;
+  const [
+    total,
+    running,
+    ready,
+    suspended,
+    provisioning,
+    onboarding,
+    infraReady,
+    errored,
+    last24hMsgs,
+    last24hInstances,
+    recentEvents,
+    recentFailures,
+    mtdSpend,
+    mtdTokens,
+    atOrNearCap,
+    pendingConfirmations,
+    pendingOutbox,
+    integrationIssues,
+    failedSchedules,
+    staleSokosumiSync,
+    staleInboxRefresh,
+    recentChats,
+    attentionRows,
+  ] =
     await Promise.all([
       prisma.hermesInstance.count(),
       prisma.hermesInstance.count({ where: { status: 'running' } }),
+      prisma.hermesInstance.count({ where: { status: 'ready' } }),
       prisma.hermesInstance.count({ where: { status: 'suspended' } }),
       prisma.hermesInstance.count({ where: { status: 'provisioning' } }),
+      prisma.hermesInstance.count({ where: { status: 'onboarding' } }),
+      prisma.hermesInstance.count({ where: { status: 'infrastructure_ready' } }),
       prisma.hermesInstance.count({ where: { status: 'error' } }),
       prisma.chatMessage.count({ where: { createdAt: { gt: dayAgo() } } }),
       prisma.hermesInstance.count({ where: { createdAt: { gt: dayAgo() } } }),
       prisma.provisionEvent.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
+      prisma.provisionEvent.findMany({
+        where: { event: { in: ['provision_failed', 'chat_failed'] }, createdAt: { gt: dayAgo() } },
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+      }),
       prisma.llmUsage.aggregate({
         where: { createdAt: { gte: startOfMonthUtc() } },
         _sum: { costUsd: true },
@@ -63,26 +99,214 @@ router.get('/admin', async (c) => {
         _sum: { promptTokens: true, completionTokens: true },
       }),
       perUserMonthlyAtCap(cfg.MONTHLY_USD_CAP_PER_USER),
+      prisma.pendingConfirmation.count({ where: { status: 'pending' } }),
+      prisma.outboxMessage.count(),
+      prisma.integration.count({ where: { status: { in: ['failed', 'error', 'disconnected'] } } }),
+      prisma.scheduledTask.count({ where: { lastError: { not: null } } }),
+      prisma.hermesInstance.count({
+        where: {
+          destroyedAt: null,
+          onboardedAt: { not: null },
+          OR: [{ lastSokosumiSyncAt: null }, { lastSokosumiSyncAt: { lt: hoursAgo(24) } }],
+        },
+      }),
+      prisma.hermesInstance.count({
+        where: {
+          destroyedAt: null,
+          integrations: {
+            some: {
+              status: 'connected',
+              provider: { in: ['gmail', 'outlook', 'google_calendar', 'outlook_calendar'] },
+            },
+          },
+          OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(6) } }],
+        },
+      }),
+      prisma.chatMessage.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: {
+          requestId: true,
+          userId: true,
+          role: true,
+          content: true,
+          errorMessage: true,
+          latencyMs: true,
+          totalTokens: true,
+          createdAt: true,
+        },
+      }),
+      prisma.hermesInstance.findMany({
+        where: {
+          OR: [
+            { status: { in: ['error', 'provisioning', 'onboarding', 'infrastructure_ready'] } },
+            { integrations: { some: { status: { in: ['failed', 'error', 'disconnected'] } } } },
+            { schedules: { some: { lastError: { not: null } } } },
+            { outbox: { some: {} } },
+            { pendingConfirmations: { some: { status: 'pending' } } },
+          ],
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 10,
+        select: {
+          userId: true,
+          name: true,
+          email: true,
+          status: true,
+          sokosumiEnv: true,
+          autonomyLevel: true,
+          lastActivityAt: true,
+          updatedAt: true,
+          integrations: { select: { provider: true, status: true }, take: 6 },
+          schedules: { where: { lastError: { not: null } }, select: { name: true, lastError: true }, take: 2 },
+          _count: { select: { outbox: true, pendingConfirmations: { where: { status: 'pending' } } } },
+        },
+      }),
     ]);
 
-  const errorRate24h = await prisma.provisionEvent.count({
-    where: { event: { in: ['provision_failed', 'chat_failed'] }, createdAt: { gt: dayAgo() } },
-  });
+  const [errorRate24h, poolCounts] = await Promise.all([
+    prisma.provisionEvent.count({
+      where: { event: { in: ['provision_failed', 'chat_failed'] }, createdAt: { gt: dayAgo() } },
+    }),
+    prisma.hermesPoolMachine.groupBy({ by: ['status'], _count: { status: true } }),
+  ]);
+  const poolByStatus = new Map(poolCounts.map((p) => [p.status, p._count.status]));
+  const poolReady = poolByStatus.get('ready') ?? 0;
+  const poolWarming = poolByStatus.get('warming') ?? 0;
+  const poolFailed = poolByStatus.get('failed') ?? 0;
+  const poolTarget = cfg.WARM_POOL_TARGET;
 
   const totalCost = Number(mtdSpend._sum.costUsd ?? 0);
   const totalTokens = (mtdTokens._sum.promptTokens ?? 0) + (mtdTokens._sum.completionTokens ?? 0);
+  const actionableTotal =
+    errored +
+    pendingConfirmations +
+    pendingOutbox +
+    integrationIssues +
+    failedSchedules +
+    infraReady +
+    staleSokosumiSync +
+    staleInboxRefresh;
+
+  const statusLine = [
+    ['ready', ready, '/admin/instances?status=ready'],
+    ['running', running, '/admin/instances?status=running'],
+    ['suspended', suspended, '/admin/instances?status=suspended'],
+    ['provisioning', provisioning, '/admin/instances?status=provisioning'],
+    ['onboarding', onboarding, '/admin/instances?status=onboarding'],
+    ['waiting onboard', infraReady, '/admin/instances?status=infrastructure_ready'],
+    ['error', errored, '/admin/instances?status=error'],
+  ]
+    .map(([label, count, href]) => `<a class="status-link" href="${href}">${esc(label)} <strong>${esc(count)}</strong></a>`)
+    .join('');
+
+  const opsLinks = [
+    {
+      label: 'Pending approvals',
+      value: pendingConfirmations,
+      href: '/admin/confirmations?status=pending',
+      tone: pendingConfirmations > 0 ? 'warn' : '',
+    },
+    {
+      label: 'Outbox backlog',
+      value: pendingOutbox,
+      href: '/admin/instances?problem=outbox',
+      tone: pendingOutbox > 0 ? 'warn' : '',
+    },
+    {
+      label: 'Integration issues',
+      value: integrationIssues,
+      href: '/admin/instances?problem=integrations',
+      tone: integrationIssues > 0 ? 'danger' : '',
+    },
+    {
+      label: 'Schedule errors',
+      value: failedSchedules,
+      href: '/admin/instances?problem=schedules',
+      tone: failedSchedules > 0 ? 'danger' : '',
+    },
+    {
+      label: 'Stale Sokosumi sync',
+      value: staleSokosumiSync,
+      href: '/admin/instances?problem=sokosumi-sync',
+      tone: staleSokosumiSync > 0 ? 'warn' : '',
+    },
+    {
+      label: 'Stale inbox refresh',
+      value: staleInboxRefresh,
+      href: '/admin/instances?problem=inbox-refresh',
+      tone: staleInboxRefresh > 0 ? 'warn' : '',
+    },
+  ];
 
   const body = `
-    <h1>Overview</h1>
+    <div class="page-head">
+      <div>
+        <h1>Overview</h1>
+        <div class="subtle-line">Production · ${esc(process.env.RAILWAY_SERVICE_NAME ?? 'orchestrator')} · image <span class="mono">${esc(liveImage)}</span>${process.env.RAILWAY_GIT_COMMIT_SHA ? ` · sha <span class="mono">${esc(process.env.RAILWAY_GIT_COMMIT_SHA.slice(0, 7))}</span>` : ''}</div>
+      </div>
+      <div class="actions no-margin">
+        <a class="btn" href="/admin/instances">Instances</a>
+        <a class="btn" href="/admin/usage">Usage</a>
+        <a class="btn" href="/admin/chats">Chats</a>
+        <a class="btn" href="/admin/events">Events</a>
+        <a class="btn" href="/admin/version" target="_blank">Version JSON</a>
+      </div>
+    </div>
+
     <div class="stats">
-      ${statCard('Total instances', total)}
-      ${statCard('Running', running, undefined, running > 0 ? 'ok' : undefined)}
-      ${statCard('Suspended', suspended)}
-      ${statCard('Provisioning', provisioning, undefined, provisioning > 0 ? 'warn' : undefined)}
+      ${statCard('Needs attention', actionableTotal, 'errors, approvals, backlog, failed jobs', actionableTotal > 0 ? 'warn' : 'ok')}
+      ${statCard('Total instances', total, `${last24hInstances} new in 24h`)}
+      ${statCard('Ready/running', ready + running, `${ready} ready · ${running} running`, ready + running > 0 ? 'ok' : undefined)}
+      ${statCard('In progress', provisioning + onboarding + infraReady, `${provisioning} provisioning · ${onboarding} onboarding · ${infraReady} waiting`, provisioning + onboarding + infraReady > 0 ? 'warn' : undefined)}
       ${statCard('Errored', errored, undefined, errored > 0 ? 'danger' : undefined)}
-      ${statCard('Chats (24h)', last24hMsgs)}
-      ${statCard('Errors (24h)', errorRate24h, undefined, errorRate24h > 0 ? 'danger' : undefined)}
+      ${statCard('Warm pool', `${poolReady}/${poolTarget}`, poolTarget === 0 ? 'disabled (WARM_POOL_TARGET=0)' : `${poolWarming} warming${poolFailed > 0 ? ` · ${poolFailed} failed` : ''}`, poolTarget > 0 && poolReady === 0 ? 'warn' : poolFailed > 0 ? 'warn' : undefined)}
+      ${statCard('Chats (24h)', last24hMsgs, recentFailures.length > 0 ? `${recentFailures.length} failed` : undefined, recentFailures.length > 0 ? 'danger' : undefined)}
       ${statCard('MTD spend', '$' + totalCost.toFixed(2), `${totalTokens.toLocaleString()} tokens · cap $${cfg.MONTHLY_USD_CAP_PER_USER}/user`)}
+    </div>
+    ${errorRate24h > 0 ? `<p class="dim" style="margin:-12px 0 20px;font-size:12px"><a href="/admin/events?filter=failures">${esc(errorRate24h)} provision/chat failure event(s) in the last 24h →</a></p>` : ''}
+
+    <div class="status-strip">${statusLine}</div>
+
+    <h2>Operator queue</h2>
+    <div class="ops-grid">
+      ${opsLinks.map((x) => `
+        <a class="op-card ${esc(x.tone)}" href="${esc(x.href)}">
+          <span>${esc(x.label)}</span>
+          <strong>${esc(x.value)}</strong>
+        </a>
+      `).join('')}
+    </div>
+
+    <h2>Users to check first</h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      ${attentionRows.length === 0 ? '<div class="empty">No active instance-level issues.</div>' : `
+        <table>
+          <thead><tr><th>User</th><th>Status</th><th>Env · Autonomy</th><th>Signals</th><th>Last activity</th></tr></thead>
+          <tbody>
+            ${attentionRows.map((r) => {
+              const who = userLabel(r);
+              const integrationBadges = r.integrations
+                .filter((i) => i.status !== 'connected')
+                .map((i) => `<span class="badge danger">${esc(i.provider)} ${esc(i.status)}</span>`)
+                .join(' ');
+              const scheduleBadges = r.schedules
+                .map((s) => `<span class="badge danger" title="${esc(s.lastError ?? '')}">${esc(s.name)}</span>`)
+                .join(' ');
+              const backlog = r._count.outbox > 0 ? `<span class="badge warn">${esc(r._count.outbox)} outbox</span>` : '';
+              const confirmations = r._count.pendingConfirmations > 0 ? `<span class="badge warn">${esc(r._count.pendingConfirmations)} confirmations</span>` : '';
+              const signals = [integrationBadges, scheduleBadges, backlog, confirmations].filter(Boolean).join(' ') || '<span class="dim">status needs attention</span>';
+              return `<tr>
+                <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a></td>
+                <td>${statusPill(r.status)}</td>
+                <td><span class="badge${r.sokosumiEnv === 'mainnet' ? ' danger' : ''}">${esc(r.sokosumiEnv ?? 'mainnet')}</span> <span class="badge${r.autonomyLevel === 'high' ? ' warn' : ''}">${esc(r.autonomyLevel)}</span></td>
+                <td>${signals}</td>
+                <td class="mono" title="${esc(r.updatedAt.toISOString())}">${esc(relTime(r.lastActivityAt))}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      `}
     </div>
 
     ${atOrNearCap.length === 0 ? '' : `
@@ -103,6 +327,26 @@ router.get('/admin', async (c) => {
       </div>
     `}
 
+    <h2>Latest chats</h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      ${recentChats.length === 0 ? '<div class="empty">No chats yet.</div>' : `
+        <table>
+          <thead><tr><th>When</th><th>User</th><th>Role</th><th>Message</th><th>Cost signal</th></tr></thead>
+          <tbody>
+            ${recentChats.map((m) => `
+              <tr>
+                <td class="mono" title="${esc(m.createdAt.toISOString())}">${esc(relTime(m.createdAt))}</td>
+                <td><a class="mono" href="/admin/instances/${encodeURIComponent(m.userId)}">${esc(m.userId.slice(0, 14))}</a></td>
+                <td><span class="badge ${m.errorMessage ? 'danger' : ''}">${esc(m.errorMessage ? 'error' : m.role)}</span></td>
+                <td><a href="/admin/chats/${encodeURIComponent(m.requestId)}">${esc(compactText(m.content, 180))}</a>${m.errorMessage ? `<div class="dim" style="color:var(--err);font-size:11px">${esc(m.errorMessage)}</div>` : ''}</td>
+                <td class="mono">${m.totalTokens ? `${esc(m.totalTokens)} tok` : '—'}${m.latencyMs !== null ? ` · ${esc(m.latencyMs)}ms` : ''}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `}
+    </div>
+
     <h2>Recent events</h2>
     <div class="card">
       ${recentEvents.length === 0 ? '<div class="empty">No events yet.</div>' : recentEvents.map(renderEventRow).join('')}
@@ -116,56 +360,188 @@ router.get('/admin', async (c) => {
 router.get('/admin/instances', async (c) => {
   const q = c.req.query('q') ?? '';
   const status = c.req.query('status') ?? '';
+  const env = c.req.query('env') ?? '';
+  const autonomy = c.req.query('autonomy') ?? '';
+  const onboarded = c.req.query('onboarded') ?? '';
+  const problem = c.req.query('problem') ?? '';
+  const image = c.req.query('image') ?? '';
 
-  const where: Record<string, unknown> = {};
-  if (q) where['OR'] = [
-    { userId: { contains: q, mode: 'insensitive' } },
-    { spriteName: { contains: q, mode: 'insensitive' } },
-    { name: { contains: q, mode: 'insensitive' } },
-    { email: { contains: q, mode: 'insensitive' } },
-    { role: { contains: q, mode: 'insensitive' } },
-    { company: { contains: q, mode: 'insensitive' } },
-    { id: { equals: q } },
-  ];
-  if (status) where['status'] = status;
+  const and: Prisma.HermesInstanceWhereInput[] = [];
+  if (q) {
+    and.push({
+      OR: [
+        { userId: { contains: q, mode: 'insensitive' } },
+        { spriteName: { contains: q, mode: 'insensitive' } },
+        { name: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { role: { contains: q, mode: 'insensitive' } },
+        { company: { contains: q, mode: 'insensitive' } },
+        { id: { equals: q } },
+      ],
+    });
+  }
+  if (status) and.push({ status });
+  if (env) {
+    and.push(
+      env === 'mainnet'
+        ? { OR: [{ sokosumiEnv: 'mainnet' }, { sokosumiEnv: null }] }
+        : { sokosumiEnv: env },
+    );
+  }
+  if (autonomy) and.push({ autonomyLevel: autonomy });
+  if (onboarded === 'yes') and.push({ onboardedAt: { not: null } });
+  if (onboarded === 'no') and.push({ onboardedAt: null });
+  if (image === 'unknown') and.push({ imageTag: null });
+  // imageTag stores either the full ref ("registry…/img:v21") or a bare tag
+  // ("v21", from reconcile) — match both forms.
+  else if (image) and.push({ OR: [{ imageTag: { endsWith: `:${image}` } }, { imageTag: image }] });
+  if (problem === 'outbox') and.push({ outbox: { some: {} } });
+  if (problem === 'integrations') and.push({ integrations: { some: { status: { in: ['failed', 'error', 'disconnected'] } } } });
+  if (problem === 'schedules') and.push({ schedules: { some: { lastError: { not: null } } } });
+  if (problem === 'pending-confirmations') and.push({ pendingConfirmations: { some: { status: 'pending' } } });
+  if (problem === 'sokosumi-sync') {
+    and.push({
+      destroyedAt: null,
+      onboardedAt: { not: null },
+      OR: [{ lastSokosumiSyncAt: null }, { lastSokosumiSyncAt: { lt: hoursAgo(24) } }],
+    });
+  }
+  if (problem === 'inbox-refresh') {
+    and.push({
+      destroyedAt: null,
+      integrations: {
+        some: {
+          status: 'connected',
+          provider: { in: ['gmail', 'outlook', 'google_calendar', 'outlook_calendar'] },
+        },
+      },
+      OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(6) } }],
+    });
+  }
 
-  const rows = await prisma.hermesInstance.findMany({
-    where,
-    orderBy: { lastActivityAt: 'desc' },
-    take: 200,
-  });
+  const where: Prisma.HermesInstanceWhereInput = and.length > 0 ? { AND: and } : {};
+  const [rows, totalMatching, statusCounts] = await Promise.all([
+    prisma.hermesInstance.findMany({
+      where,
+      orderBy: [{ status: 'asc' }, { lastActivityAt: 'desc' }],
+      take: 200,
+      include: {
+        integrations: {
+          select: { provider: true, status: true, mode: true },
+          orderBy: [{ status: 'asc' }, { provider: 'asc' }],
+        },
+        _count: {
+          select: {
+            outbox: true,
+            schedules: true,
+            pendingConfirmations: { where: { status: 'pending' } },
+            installedSkills: true,
+          },
+        },
+      },
+    }),
+    prisma.hermesInstance.count({ where }),
+    prisma.hermesInstance.groupBy({
+      by: ['status'],
+      where,
+      _count: { status: true },
+      orderBy: { status: 'asc' },
+    }),
+  ]);
+
+  const currentParams = new URLSearchParams();
+  if (q) currentParams.set('q', q);
+  if (env) currentParams.set('env', env);
+  if (autonomy) currentParams.set('autonomy', autonomy);
+  if (onboarded) currentParams.set('onboarded', onboarded);
+  if (problem) currentParams.set('problem', problem);
+  if (image) currentParams.set('image', image);
+  const statusFilterLinks = statusCounts
+    .map((s) => {
+      const params = new URLSearchParams(currentParams);
+      params.set('status', s.status);
+      const active = s.status === status ? ' active' : '';
+      return `<a class="filter-chip${active}" href="/admin/instances?${esc(params.toString())}">${esc(s.status)} <strong>${esc(s._count.status)}</strong></a>`;
+    })
+    .join('');
 
   const body = `
-    <h1>Instances</h1>
-    <form method="get" action="/admin/instances" class="actions">
-      <input type="search" name="q" placeholder="Search name, email, company, role, userId, sprite…" value="${esc(q)}" style="background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:6px 10px;color:var(--text);min-width:340px;font-size:13px;font-family:inherit" />
-      <select name="status" style="background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px;font-family:inherit">
+    <div class="page-head">
+      <div>
+        <h1>Instances</h1>
+        <div class="subtle-line">Showing ${esc(rows.length)} of ${esc(totalMatching)} matching users. Use filters to narrow before taking action.</div>
+      </div>
+      <div class="actions no-margin">
+        <a class="btn" href="/admin/instances?problem=integrations">Integration issues</a>
+        <a class="btn" href="/admin/instances?problem=outbox">Outbox</a>
+        <a class="btn" href="/admin/instances?status=error">Errors</a>
+      </div>
+    </div>
+    <form method="get" action="/admin/instances" class="actions filter-bar">
+      <input type="search" name="q" placeholder="Search name, email, company, role, userId, app…" value="${esc(q)}" />
+      <select name="status">
         <option value="">all statuses</option>
         ${['running', 'ready', 'onboarding', 'suspended', 'provisioning', 'infrastructure_ready', 'error']
           .map((s) => `<option value="${s}" ${s === status ? 'selected' : ''}>${s}</option>`)
           .join('')}
       </select>
+      <select name="env">
+        <option value="">all envs</option>
+        ${['development', 'preprod', 'mainnet']
+          .map((s) => `<option value="${s}" ${s === env ? 'selected' : ''}>${s}</option>`)
+          .join('')}
+      </select>
+      <select name="autonomy">
+        <option value="">all autonomy</option>
+        ${['low', 'medium', 'high']
+          .map((s) => `<option value="${s}" ${s === autonomy ? 'selected' : ''}>${s}</option>`)
+          .join('')}
+      </select>
+      <select name="onboarded">
+        <option value="">any onboarding</option>
+        <option value="yes" ${onboarded === 'yes' ? 'selected' : ''}>onboarded</option>
+        <option value="no" ${onboarded === 'no' ? 'selected' : ''}>not onboarded</option>
+      </select>
+      <select name="problem">
+        <option value="">any problem</option>
+        ${[
+          ['outbox', 'outbox backlog'],
+          ['integrations', 'integration issue'],
+          ['schedules', 'schedule error'],
+          ['pending-confirmations', 'pending confirmation'],
+          ['sokosumi-sync', 'stale Sokosumi sync'],
+          ['inbox-refresh', 'stale inbox refresh'],
+        ].map(([value, label]) => `<option value="${value}" ${value === problem ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+      <select name="image">
+        <option value="">any image</option>
+        ${IMAGE_VERSIONS.map((v) => `<option value="${esc(v.tag)}" ${v.tag === image ? 'selected' : ''}>${esc(v.tag)}</option>`).join('')}
+        <option value="unknown" ${image === 'unknown' ? 'selected' : ''}>unknown</option>
+      </select>
       <button type="submit">Filter</button>
+      <a href="/admin/instances">Reset</a>
     </form>
+    ${statusFilterLinks ? `<div class="filter-chips">${statusFilterLinks}</div>` : ''}
     <div class="card" style="padding:0;overflow:hidden">
       <table>
         <thead>
           <tr>
             <th>Who</th>
-            <th>Role · Company</th>
             <th>Status</th>
-            <th>Autonomy</th>
             <th>Env</th>
-            <th>Last activity</th>
-            <th>Age</th>
+            <th>Autonomy</th>
+            <th>Integrations</th>
+            <th>Backlog</th>
+            <th>Image</th>
+            <th>Activity</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.length === 0 ? `<tr><td colspan="7" class="empty">No instances match.</td></tr>` : rows.map(rowToInstanceRow).join('')}
+          ${rows.length === 0 ? `<tr><td colspan="8" class="empty">No instances match.</td></tr>` : rows.map(rowToInstanceRow).join('')}
         </tbody>
       </table>
     </div>
-    <p style="color:var(--muted);font-size:12px;margin-top:12px">Showing ${rows.length} of up to 200. Refine with search/filter.</p>
+    ${totalMatching > rows.length ? `<p class="dim" style="font-size:12px;margin-top:12px">Limited to 200 rows. Refine with search/filter to narrow the set.</p>` : ''}
   `;
   return c.html(layout({ title: 'Instances', body, active: '/admin/instances' }));
 });
@@ -185,23 +561,47 @@ function rowToInstanceRow(r: {
   company: string | null;
   autonomyLevel: string;
   sokosumiEnv: string | null;
+  onboardedAt: Date | null;
+  imageTag: string | null;
+  integrations: Array<{ provider: string; status: string; mode: string }>;
+  _count: {
+    outbox: number;
+    schedules: number;
+    pendingConfirmations: number;
+    installedSkills: number;
+  };
 }): string {
-  const who = r.name
-    ? `<strong>${esc(r.name)}</strong>${r.email ? `<div class="dim mono" style="font-size:11px">${esc(r.email)}</div>` : ''}`
-    : r.email
-      ? `<span class="mono">${esc(r.email)}</span>`
-      : `<span class="mono dim" title="${esc(r.userId)}">${esc(r.userId.slice(0, 14))}…</span>`;
+  const who = userLabel(r);
   const roleCompany = r.role || r.company
-    ? `${esc(r.role ?? '—')}${r.company ? ` · <strong>${esc(r.company)}</strong>` : ''}`
-    : '<span class="dim">—</span>';
+    ? `<div class="dim" style="font-size:11px">${esc(r.role ?? '')}${r.role && r.company ? ' · ' : ''}${r.company ? `<strong>${esc(r.company)}</strong>` : ''}</div>`
+    : '';
+  const integrations = r.integrations.length === 0
+    ? '<span class="dim">none</span>'
+    : r.integrations
+        .map((i) => {
+          const cls = i.status === 'connected' ? 'ok' : i.status === 'pending' || i.status === 'connecting' ? 'warn' : 'danger';
+          return `<span class="badge ${cls}" title="${esc(i.mode)}">${esc(shortProvider(i.provider))}</span>`;
+        })
+        .join(' ');
+  const backlog = [
+    r._count.outbox > 0 ? `<a class="badge warn" href="/admin/instances?problem=outbox&q=${encodeURIComponent(r.userId)}">${esc(r._count.outbox)} outbox</a>` : '',
+    r._count.pendingConfirmations > 0 ? `<a class="badge warn" href="/admin/confirmations?status=pending&user=${encodeURIComponent(r.userId)}">${esc(r._count.pendingConfirmations)} approvals</a>` : '',
+    r._count.schedules > 0 ? `<span class="badge">${esc(r._count.schedules)} schedules</span>` : '',
+    r._count.installedSkills > 0 ? `<span class="badge">${esc(r._count.installedSkills)} skills</span>` : '',
+  ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
+  const image = tagFromRef(r.imageTag) ?? (r.imageTag ? r.imageTag : 'unknown');
+  const imageCell = image === 'unknown'
+    ? '<span class="dim">unknown</span>'
+    : `<a class="mono" href="/admin/images/${encodeURIComponent(image)}">${esc(image)}</a>`;
   return `<tr>
-    <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a></td>
-    <td>${roleCompany}</td>
+    <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a>${roleCompany}</td>
     <td>${statusPill(r.status)}</td>
-    <td><span class="badge${r.autonomyLevel === 'high' ? ' warn' : ''}">${esc(r.autonomyLevel)}</span></td>
     <td><span class="badge${r.sokosumiEnv === 'mainnet' ? ' danger' : ''}">${esc(r.sokosumiEnv ?? 'mainnet')}</span></td>
-    <td>${esc(relTime(r.lastActivityAt))}</td>
-    <td>${esc(relTime(r.createdAt))}</td>
+    <td><span class="badge${r.autonomyLevel === 'high' ? ' warn' : ''}">${esc(r.autonomyLevel)}</span>${r.onboardedAt ? '' : ' <span class="badge warn">not onboarded</span>'}</td>
+    <td>${integrations}</td>
+    <td>${backlog}</td>
+    <td>${imageCell}</td>
+    <td class="mono" title="created ${esc(r.createdAt.toISOString())}">${esc(relTime(r.lastActivityAt))}<div class="dim" style="font-size:11px">age ${esc(relTime(r.createdAt))}</div></td>
   </tr>`;
 }
 
@@ -222,11 +622,11 @@ router.get('/admin/instances/:userId', async (c) => {
   }
 
   const cfg = loadConfig();
-  const [messages, events, mtdSpend, usageByModel, schedules] = await Promise.all([
+  const [messages, events, mtdSpend, usageByModel, schedules, integrations, confirmations, skills, dailyUsage, usageTotals] = await Promise.all([
     prisma.chatMessage.findMany({
       where: { instanceId: row.id },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      take: 100,
     }),
     prisma.provisionEvent.findMany({
       where: { OR: [{ instanceId: row.id }, { userId: row.userId }] },
@@ -238,11 +638,31 @@ router.get('/admin/instances/:userId', async (c) => {
       by: ['model'],
       where: { userId: row.userId, createdAt: { gte: startOfMonthUtc() } },
       _sum: { costUsd: true, promptTokens: true, completionTokens: true },
+      _count: { _all: true },
       orderBy: { _sum: { costUsd: 'desc' } },
     }),
     prisma.scheduledTask.findMany({
       where: { instanceId: row.id },
       orderBy: { createdAt: 'desc' },
+    }),
+    prisma.integration.findMany({
+      where: { userId: row.userId },
+      orderBy: { provider: 'asc' },
+    }),
+    prisma.pendingConfirmation.findMany({
+      where: { userId: row.userId },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    }),
+    prisma.installedSkill.findMany({
+      where: { userId: row.userId },
+      orderBy: { createdAt: 'desc' },
+    }),
+    usageByDay(14, row.userId),
+    prisma.llmUsage.aggregate({
+      where: { userId: row.userId },
+      _sum: { costUsd: true, promptTokens: true, completionTokens: true },
+      _count: { _all: true },
     }),
   ]);
   const outboxPending = await prisma.outboxMessage.findMany({
@@ -258,62 +678,144 @@ router.get('/admin/instances/:userId', async (c) => {
         ? `<span class="pill warn">${capPct.toFixed(0)}%</span>`
         : `<span class="pill ok">${capPct.toFixed(0)}%</span>`;
 
+  const imageTag = tagFromRef(row.imageTag);
+  const steps = (row.onboardingSteps as Array<{ id: string; label?: string; status: string }> | null) ?? [];
+  const stepBadge = (s: { id: string; status: string }): string => {
+    const cls = s.status === 'done' ? 'ok' : s.status === 'failed' ? 'danger' : s.status === 'running' ? 'warn' : '';
+    return `<span class="badge ${cls}" title="${esc(s.status)}">${esc(s.id)}</span>`;
+  };
+  const persona = [
+    row.personaName ? `name "${row.personaName}"` : '',
+    row.verbosity ? `verbosity ${row.verbosity}` : '',
+    row.tone ? `tone ${row.tone}` : '',
+  ].filter(Boolean).join(' · ');
+  const p3 = row.personality as { tone?: number; detail?: number; style?: number } | null;
+  const canRetryOnboarding = ['error', 'onboarding', 'infrastructure_ready'].includes(row.status);
+  const allTokens = (usageTotals._sum.promptTokens ?? 0) + (usageTotals._sum.completionTokens ?? 0);
+  const maxDailyCost = Math.max(...dailyUsage.map((d) => d.cost), 0.000001);
+
   const body = `
-    <h1 class="mono" style="font-size:18px">${esc(row.userId)}</h1>
+    <div class="page-head">
+      <div>
+        <h1 style="font-size:18px">${esc(row.name ?? row.userId)}</h1>
+        <div class="subtle-line mono">${esc(row.userId)}${row.email ? ` · ${esc(row.email)}` : ''}</div>
+      </div>
+      <div class="actions no-margin">
+        <a class="btn" href="/admin/chats?user=${encodeURIComponent(row.userId)}">Chats</a>
+        <a class="btn" href="/admin/confirmations?user=${encodeURIComponent(row.userId)}">Confirmations</a>
+        ${row.spriteName ? `<a class="btn" href="https://fly.io/apps/${encodeURIComponent(row.spriteName)}" target="_blank">Fly dashboard ↗</a>` : ''}
+      </div>
+    </div>
     <div class="row" style="margin-bottom:16px">
       <div class="card flex-1">
         <h3>Instance</h3>
         <dl class="kv">
-          <dt>Status</dt><dd>${statusPill(row.status)}</dd>
+          <dt>Status</dt><dd>${statusPill(row.status)}${row.onboardedAt ? '' : ' <span class="badge warn">not onboarded</span>'}</dd>
           <dt>Endpoint</dt><dd>${row.endpointUrl ? `<a class="mono" href="${esc(row.endpointUrl)}" target="_blank">${esc(row.endpointUrl)}</a>` : '—'}</dd>
-          <dt>Sprite</dt><dd class="mono">${esc(row.spriteName)}</dd>
-          <dt>Region</dt><dd class="mono">${esc(row.region || '—')}</dd>
-          <dt>Image</dt><dd class="mono">${row.imageTag ? esc(tagFromRef(row.imageTag) ?? row.imageTag) : '<span class="dim">unknown</span>'}${row.isTestBench ? ' <span class="badge ok">bench</span>' : ''}</dd>
-          <dt>Created</dt><dd>${esc(relTime(row.createdAt))} (${esc(row.createdAt.toISOString())})</dd>
+          <dt>Fly app</dt><dd class="mono">${esc(row.spriteName)} <span class="dim">(${esc(row.region || '—')})</span></dd>
+          <dt>Image</dt><dd>${imageTag ? `<a class="mono" href="/admin/images/${encodeURIComponent(imageTag)}">${esc(imageTag)}</a>` : '<span class="dim">unknown</span>'}${row.imageRolledAt ? ` <span class="dim">rolled ${esc(relTime(row.imageRolledAt))}</span>` : ''}${row.isTestBench ? ' <span class="badge ok">bench</span>' : ''}</dd>
+          <dt>Env</dt><dd><span class="badge${row.sokosumiEnv === 'mainnet' ? ' danger' : ''}">${esc(row.sokosumiEnv ?? 'mainnet')}</span> <span class="badge${row.autonomyLevel === 'high' ? ' warn' : ''}">autonomy ${esc(row.autonomyLevel)}</span></dd>
+          <dt>Created</dt><dd>${esc(relTime(row.createdAt))} <span class="dim mono">${esc(row.createdAt.toISOString().slice(0, 16))}Z</span></dd>
           <dt>Last activity</dt><dd>${esc(relTime(row.lastActivityAt))}</dd>
-          ${(() => {
-            const p = row.personality as { tone?: number; detail?: number; style?: number } | null;
-            return p && typeof p === 'object'
-              ? `<dt>Voice</dt><dd class="mono">tone ${esc(p.tone ?? 50)} · detail ${esc(p.detail ?? 50)} · style ${esc(p.style ?? 50)}</dd>`
-              : '';
-          })()}
+          <dt>Sokosumi sync</dt><dd>${esc(relTime(row.lastSokosumiSyncAt))}</dd>
+          <dt>Inbox refresh</dt><dd>${esc(relTime(row.lastInboxRefreshAt))}</dd>
           ${row.errorMessage ? `<dt>Last error</dt><dd style="color:var(--err)">${esc(row.errorMessage)}</dd>` : ''}
+        </dl>
+        <h3 style="margin-top:20px">Profile</h3>
+        <dl class="kv">
+          ${row.role || row.company ? `<dt>Role</dt><dd>${esc(row.role ?? '—')}${row.company ? ` at <strong>${esc(row.company)}</strong>` : ''}</dd>` : ''}
+          <dt>Timezone</dt><dd class="mono">${esc(row.timezone ?? 'UTC')}</dd>
+          ${persona ? `<dt>Persona</dt><dd>${esc(persona)}</dd>` : ''}
+          ${p3 && typeof p3 === 'object' ? `<dt>Voice</dt><dd class="mono">tone ${esc(p3.tone ?? 50)} · detail ${esc(p3.detail ?? 50)} · style ${esc(p3.style ?? 50)}</dd>` : ''}
+          ${row.welcomeKind ? `<dt>Welcome</dt><dd>${esc(row.welcomeKind)}${row.onboardedAt ? ` · onboarded ${esc(relTime(row.onboardedAt))}` : ''}</dd>` : ''}
+          ${steps.length > 0 ? `<dt>Onboarding</dt><dd>${steps.map(stepBadge).join(' ')}</dd>` : ''}
         </dl>
       </div>
       <div class="card flex-1">
-        <h3>Monthly spend</h3>
+        <h3>Usage</h3>
         <dl class="kv">
           <dt>MTD</dt><dd>$${mtdSpend.toFixed(4)} / $${cfg.MONTHLY_USD_CAP_PER_USER.toFixed(2)} ${capPill}</dd>
-          ${usageByModel.length === 0 ? '<dt>By model</dt><dd>—</dd>' : usageByModel.map(u => {
+          <dt>All-time</dt><dd>$${Number(usageTotals._sum.costUsd ?? 0).toFixed(4)} · ${allTokens.toLocaleString()} tok · ${esc(usageTotals._count._all)} LLM calls</dd>
+          ${usageByModel.length === 0 ? '' : usageByModel.map(u => {
             const tokens = (u._sum.promptTokens ?? 0) + (u._sum.completionTokens ?? 0);
             const cost = Number(u._sum.costUsd ?? 0);
-            return `<dt class="mono">${esc(u.model)}</dt><dd>$${cost.toFixed(4)} (${tokens.toLocaleString()} tok)</dd>`;
+            return `<dt class="mono" style="font-size:11px">${esc(u.model)}</dt><dd>$${cost.toFixed(4)} · ${tokens.toLocaleString()} tok · ${esc(u._count._all)} calls</dd>`;
           }).join('')}
         </dl>
-        <h3 style="margin-top:24px">Actions</h3>
+        ${dailyUsage.length === 0 ? '' : `
+        <h3 style="margin-top:20px">Spend by day (14d)</h3>
+        <div>
+          ${dailyUsage.map((d) => `
+            <div class="bar-row">
+              <span class="bar-label">${esc(d.day)}</span>
+              <div class="bar-track"><div class="bar-fill" style="width:${Math.max(1, Math.round((d.cost / maxDailyCost) * 100))}%"></div></div>
+              <span class="bar-value">$${d.cost.toFixed(4)} · ${esc(d.calls)} calls</span>
+            </div>`).join('')}
+        </div>`}
+        <h3 style="margin-top:20px">Actions</h3>
         <div class="actions" style="margin-top:8px">
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/resume" class="inline"><button type="submit">Resume</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/suspend" class="inline"><button type="submit">Suspend</button></form>
+          ${canRetryOnboarding ? `<form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/retry-onboarding" class="inline"><button type="submit" class="primary" title="Reset the stuck step and re-kick the onboarding pipeline">Retry onboarding</button></form>` : ''}
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/sync-config" class="inline"><button type="submit" title="Replace the machine onto the current FLY_MACHINE_IMAGE — launcher re-syncs SOUL.md, config.yaml + skills on boot">Sync config</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/toggle-bench" class="inline"><button type="submit" title="Mark this instance as a test bench so it shows up on the Tests page">${row.isTestBench ? 'Unmark bench' : 'Mark as bench'}</button></form>
           <form method="post" action="/admin/instances/${encodeURIComponent(row.userId)}/destroy" class="inline" onsubmit="return confirm('Destroy sprite + DB row for this user? Cannot be undone.')"><button type="submit" class="danger">Destroy</button></form>
         </div>
-        <h3 style="margin-top:24px">Process logs</h3>
-        <pre class="log" id="sprite-log">loading…</pre>
-        <script>
-          async function refreshLog() {
-            try {
-              const r = await fetch('/admin/instances/${encodeURIComponent(row.userId)}/sprite-logs', { headers: { Accept: 'text/plain' } });
-              const t = await r.text();
-              document.getElementById('sprite-log').textContent = t || '(no output)';
-            } catch (e) {
-              document.getElementById('sprite-log').textContent = 'error: ' + e.message;
-            }
-          }
-          refreshLog();
-        </script>
+        <p class="dim" style="font-size:11px;margin:12px 0 0">Machine logs: <span class="mono">fly logs -a ${esc(row.spriteName)}</span> or the Fly dashboard link above.</p>
       </div>
     </div>
+
+    <div class="row" style="margin-bottom:16px">
+      <div class="card flex-1">
+        <h3>Integrations</h3>
+        ${integrations.length === 0 ? '<div class="empty" style="padding:12px">None connected.</div>' : `
+          <table>
+            <thead><tr><th>Provider</th><th>Status</th><th>Mode</th><th>Connected</th></tr></thead>
+            <tbody>
+              ${integrations.map((i) => {
+                const cls = i.status === 'connected' ? 'ok' : i.status === 'pending' || i.status === 'connecting' ? 'warn' : 'danger';
+                return `<tr>
+                  <td class="mono">${esc(i.provider)}</td>
+                  <td><span class="badge ${cls}">${esc(i.status)}</span>${i.lastError ? `<div class="dim" style="color:var(--err);font-size:11px">${esc(i.lastError.slice(0, 120))}</div>` : ''}</td>
+                  <td class="mono">${esc(i.mode)}</td>
+                  <td class="mono">${i.connectedAt ? esc(relTime(i.connectedAt)) : '—'}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`}
+      </div>
+      <div class="card flex-1">
+        <h3>Installed skills <span class="dim" style="text-transform:none;letter-spacing:0">(marketplace)</span></h3>
+        ${skills.length === 0 ? '<div class="empty" style="padding:12px">No marketplace skills installed.</div>' : `
+          <table>
+            <thead><tr><th>Skill</th><th>Source</th><th>Risk</th><th>Status</th></tr></thead>
+            <tbody>
+              ${skills.map((s) => `<tr>
+                <td class="mono">${esc(s.slug)}</td>
+                <td class="dim" style="font-size:12px">${esc(s.source)}</td>
+                <td>${s.auditRisk ? `<span class="badge ${s.auditRisk === 'NONE' || s.auditRisk === 'LOW' ? '' : 'warn'}">${esc(s.auditRisk)}</span>` : '—'}</td>
+                <td><span class="badge ${s.status === 'installed' ? 'ok' : s.status === 'failed' ? 'danger' : 'warn'}">${esc(s.status)}</span>${s.lastError ? `<div class="dim" style="color:var(--err);font-size:11px">${esc(s.lastError.slice(0, 100))}</div>` : ''}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+      </div>
+    </div>
+
+    ${confirmations.length === 0 ? '' : `
+    <h2>Recent confirmations <a href="/admin/confirmations?user=${encodeURIComponent(row.userId)}" style="font-weight:400;font-size:12px">all →</a></h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Tool</th><th>Status</th><th>Summary</th><th>When</th></tr></thead>
+        <tbody>
+          ${confirmations.map((cf) => `<tr>
+            <td class="mono" style="font-size:12px"><a href="/admin/confirmations/${encodeURIComponent(cf.id)}">${esc(cf.toolName)}</a></td>
+            <td><span class="badge ${cf.status === 'pending' ? 'warn' : cf.status === 'approved' ? 'ok' : 'danger'}">${esc(cf.status)}</span></td>
+            <td>${esc(cf.summary.slice(0, 180))}</td>
+            <td class="mono">${esc(relTime(cf.createdAt))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`}
 
     <h2>Outbox <span style="color:var(--muted);font-weight:400;font-size:13px">(unacked messages waiting for Sokosumi to pull)</span></h2>
     <div class="card" style="padding:0;overflow:hidden">
@@ -358,7 +860,7 @@ router.get('/admin/instances/:userId', async (c) => {
       `}
     </div>
 
-    <h2>Chat history (latest 200)</h2>
+    <h2>Chat history (latest 100) <a href="/admin/chats?user=${encodeURIComponent(row.userId)}" style="font-weight:400;font-size:12px">browse all →</a></h2>
     <div class="chat-list">
       ${messages.length === 0 ? '<div class="empty">No messages yet for this user.</div>' : messages.map(renderChatMsg).join('')}
     </div>
@@ -427,8 +929,8 @@ router.post('/admin/instances/:userId/destroy', async (c) => {
  * is treated as a fresh first-time provision — no inherited onboardedAt,
  * no preserved integrations.
  *
- * For testing / dev only. Accepts POST + GET for convenience from a
- * browser address bar.
+ * For testing / dev only. POST-only — a GET with side effects is a
+ * cross-site-request foot-gun behind cookie-persisted Basic Auth.
  */
 const hardReset = async (c: Context) => {
   const userId = c.req.param('userId');
@@ -447,7 +949,6 @@ const hardReset = async (c: Context) => {
   return c.json({ ok: true, userId, appDeleted: row.spriteName });
 };
 router.post('/admin/instances/:userId/hard-reset', hardReset);
-router.get('/admin/instances/:userId/hard-reset', hardReset);
 
 /**
  * Recover an instance whose onboarding pipeline died mid-flight (typical
@@ -470,10 +971,14 @@ const retryOnboarding = async (c: Context) => {
   void runOnboarding(row.id, {}).catch((err) =>
     logger.error({ err, userId, instanceId: row.id }, 'admin_retry_onboarding_failed'),
   );
+  // Form posts (the detail-page button) want to land back on the page;
+  // API callers (curl) get JSON.
+  if ((c.req.header('accept') ?? '').includes('text/html')) {
+    return c.redirect(`/admin/instances/${encodeURIComponent(userId ?? '')}`);
+  }
   return c.json({ ok: true, userId, retried: true });
 };
 router.post('/admin/instances/:userId/retry-onboarding', retryOnboarding);
-router.get('/admin/instances/:userId/retry-onboarding', retryOnboarding);
 
 router.post('/admin/instances/:userId/sync-config', async (c) => {
   const userId = c.req.param('userId');
@@ -801,27 +1306,6 @@ router.post('/admin/instances/:userId/test/run-eod-report', async (c) => {
   }
 });
 
-// One-off (but idempotent) maintenance: capitalize the first letter of
-// every quoted prompt in existing welcomeMessage rows. Sokosumi UI uses
-// those quoted strings as clickable action buttons and lowercase looked
-// wrong on the rendered buttons. Safe to call repeatedly.
-router.post('/admin/maintenance/fix-welcome-casing', async (c) => {
-  const rows = await prisma.hermesInstance.findMany({
-    where: { destroyedAt: null, welcomeMessage: { not: null } },
-    select: { id: true, welcomeMessage: true },
-  });
-  let updated = 0;
-  for (const r of rows) {
-    const before = r.welcomeMessage ?? '';
-    const after = before.replace(/(["“])([a-z])/g, (_, q, ch) => `${q}${ch.toUpperCase()}`);
-    if (after !== before) {
-      await prisma.hermesInstance.update({ where: { id: r.id }, data: { welcomeMessage: after } });
-      updated++;
-    }
-  }
-  return c.json({ scanned: rows.length, updated });
-});
-
 router.post('/admin/instances/:userId/outbox/:messageId/delete', async (c) => {
   const userId = c.req.param('userId');
   const messageId = c.req.param('messageId');
@@ -965,10 +1449,10 @@ router.get('/admin/chats/:requestId', async (c) => {
       <pre style="white-space:pre-wrap;word-wrap:break-word;margin:0;font-size:13px">${esc(m.content || '(empty)')}</pre>
     </div>
     <div style="height:12px"></div>`;
-  // Pending/resolved confirmations created in the same +/-30s window as
-  // this chat exchange. Helps map "user asked X" → "Hermes proposed
-  // tool call Y" → outcome. Best-effort timestamp correlation since we
-  // don't have a hard requestId link from tool calls to chat messages.
+  // Pending/resolved confirmations created within ±60s of this chat
+  // exchange. Helps map "user asked X" → "Hermes proposed tool call Y"
+  // → outcome. Best-effort timestamp correlation since we don't have a
+  // hard requestId link from tool calls to chat messages.
   const windowMs = 60_000;
   const winStart = new Date(first.createdAt.getTime() - windowMs);
   const winEnd = new Date((msgs[msgs.length - 1]?.createdAt ?? first.createdAt).getTime() + windowMs);
@@ -1133,15 +1617,158 @@ router.get('/admin/confirmations/:id', async (c) => {
 // ---------- Events firehose ----------
 
 router.get('/admin/events', async (c) => {
-  const events = await prisma.provisionEvent.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 200,
-  });
+  const filter = c.req.query('filter') ?? '';
+  const eventName = c.req.query('event') ?? '';
+  const user = c.req.query('user') ?? '';
+
+  const where: Prisma.ProvisionEventWhereInput = {};
+  if (filter === 'failures') where.event = { in: ['provision_failed', 'chat_failed', 'hermes_task_failed', 'integration_failed'] };
+  else if (eventName) where.event = eventName;
+  if (user) where.userId = user;
+
+  const [events, eventNames] = await Promise.all([
+    prisma.provisionEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200 }),
+    prisma.provisionEvent.groupBy({
+      by: ['event'],
+      where: { createdAt: { gt: hoursAgo(24 * 7) } },
+      _count: { event: true },
+      orderBy: { _count: { event: 'desc' } },
+    }),
+  ]);
+
+  const filterForm = `
+    <form method="get" action="/admin/events" class="actions">
+      <input name="user" placeholder="filter by userId" value="${esc(user)}" style="min-width:280px" />
+      <select name="event">
+        <option value="">all events</option>
+        ${eventNames.map((e) => `<option value="${esc(e.event)}" ${e.event === eventName ? 'selected' : ''}>${esc(e.event)} (${e._count.event})</option>`).join('')}
+      </select>
+      <button type="submit">Apply</button>
+      <a class="filter-chip${filter === 'failures' ? ' active' : ''}" href="/admin/events?filter=failures">failures only</a>
+      <a href="/admin/events" style="margin-left:4px">Reset</a>
+    </form>`;
+
   const body = `
     <h1>Events</h1>
-    <div class="card">${events.length === 0 ? '<div class="empty">No events.</div>' : events.map(renderEventRow).join('')}</div>
+    <p class="dim">Append-only audit trail. Showing the latest ${esc(events.length)}${filter === 'failures' ? ' failure' : eventName ? ` <span class="mono">${esc(eventName)}</span>` : ''} event(s)${user ? ` for <span class="mono">${esc(user)}</span>` : ''}. Event counts in the dropdown are 7-day totals.</p>
+    ${filterForm}
+    <div class="card">${events.length === 0 ? '<div class="empty">No events match.</div>' : events.map(renderEventRow).join('')}</div>
   `;
   return c.html(layout({ title: 'Events', body, active: '/admin/events' }));
+});
+
+// ---------- Usage: LLM spend/token analytics ----------
+
+router.get('/admin/usage', async (c) => {
+  const cfg = loadConfig();
+  const [mtd, today, daily, byModel, topUsers, zeroCost] = await Promise.all([
+    prisma.llmUsage.aggregate({
+      where: { createdAt: { gte: startOfMonthUtc() } },
+      _sum: { costUsd: true, promptTokens: true, completionTokens: true },
+      _count: { _all: true },
+    }),
+    prisma.llmUsage.aggregate({
+      where: { createdAt: { gte: startOfDayUtc() } },
+      _sum: { costUsd: true },
+      _count: { _all: true },
+    }),
+    usageByDay(30),
+    prisma.llmUsage.groupBy({
+      by: ['model'],
+      where: { createdAt: { gte: startOfMonthUtc() } },
+      _sum: { costUsd: true, promptTokens: true, completionTokens: true },
+      _count: { _all: true },
+      orderBy: { _sum: { costUsd: 'desc' } },
+    }),
+    prisma.llmUsage.groupBy({
+      by: ['userId'],
+      where: { createdAt: { gte: startOfMonthUtc() } },
+      _sum: { costUsd: true, promptTokens: true, completionTokens: true },
+      _count: { _all: true },
+      orderBy: { _sum: { costUsd: 'desc' } },
+      take: 25,
+    }),
+    // Data-quality signal: rows with real tokens but $0 recorded cost mean the
+    // model was missing from the OpenRouter price map at write time — MTD
+    // spend is undercounted while this is non-zero.
+    prisma.llmUsage.count({
+      where: {
+        createdAt: { gte: startOfMonthUtc() },
+        costUsd: 0,
+        OR: [{ promptTokens: { gt: 0 } }, { completionTokens: { gt: 0 } }],
+      },
+    }),
+  ]);
+
+  const users = await prisma.hermesInstance.findMany({
+    where: { userId: { in: topUsers.map((u) => u.userId) } },
+    select: { userId: true, name: true, email: true },
+  });
+  const nameByUser = new Map(users.map((u) => [u.userId, u.name ?? u.email ?? null]));
+
+  const mtdCost = Number(mtd._sum.costUsd ?? 0);
+  const mtdTok = (mtd._sum.promptTokens ?? 0) + (mtd._sum.completionTokens ?? 0);
+  const maxDaily = Math.max(...daily.map((d) => d.cost), 0.000001);
+
+  const body = `
+    <h1>Usage</h1>
+    <p class="dim">LLM spend across all instances, recorded per upstream completion at the proxy (one agent turn = several calls). Costs use live OpenRouter pricing at write time.</p>
+
+    <div class="stats">
+      ${statCard('MTD spend', '$' + mtdCost.toFixed(2), `${mtdTok.toLocaleString()} tokens`)}
+      ${statCard('MTD LLM calls', mtd._count._all.toLocaleString())}
+      ${statCard('Today', '$' + Number(today._sum.costUsd ?? 0).toFixed(2), `${today._count._all.toLocaleString()} calls`)}
+      ${statCard('Cap per user', '$' + cfg.MONTHLY_USD_CAP_PER_USER.toFixed(2), 'MONTHLY_USD_CAP_PER_USER')}
+      ${zeroCost > 0 ? statCard('Unpriced calls (MTD)', zeroCost, 'tokens>0 but $0 recorded — model missing from price map; spend is undercounted', 'warn') : ''}
+    </div>
+
+    <h2>Spend by day (30d, UTC)</h2>
+    <div class="card">
+      ${daily.length === 0 ? '<div class="empty">No usage recorded yet.</div>' : daily.map((d) => `
+        <div class="bar-row">
+          <span class="bar-label">${esc(d.day)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${Math.max(1, Math.round((d.cost / maxDaily) * 100))}%"></div></div>
+          <span class="bar-value">$${d.cost.toFixed(3)} · ${d.tokens.toLocaleString()} tok · ${esc(d.calls)} calls</span>
+        </div>`).join('')}
+    </div>
+
+    <div class="row" style="margin-top:24px">
+      <div class="card flex-1" style="padding:0;overflow:hidden">
+        <table>
+          <thead><tr><th>Model (MTD)</th><th>Cost</th><th>Tokens</th><th>Calls</th></tr></thead>
+          <tbody>
+            ${byModel.length === 0 ? '<tr><td colspan="4" class="empty">No usage.</td></tr>' : byModel.map((m) => `
+              <tr>
+                <td class="mono" style="font-size:12px">${esc(m.model)}</td>
+                <td class="mono">$${Number(m._sum.costUsd ?? 0).toFixed(4)}</td>
+                <td class="mono">${((m._sum.promptTokens ?? 0) + (m._sum.completionTokens ?? 0)).toLocaleString()}</td>
+                <td class="mono">${esc(m._count._all)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="card flex-1" style="padding:0;overflow:hidden">
+        <table>
+          <thead><tr><th>Top users (MTD)</th><th>Cost</th><th>% cap</th><th>Tokens</th><th>Calls</th></tr></thead>
+          <tbody>
+            ${topUsers.length === 0 ? '<tr><td colspan="5" class="empty">No usage.</td></tr>' : topUsers.map((u) => {
+              const cost = Number(u._sum.costUsd ?? 0);
+              const pct = (cost / cfg.MONTHLY_USD_CAP_PER_USER) * 100;
+              const label = nameByUser.get(u.userId);
+              return `<tr>
+                <td><a href="/admin/instances/${encodeURIComponent(u.userId)}">${label ? esc(label) : `<span class="mono">${esc(u.userId.slice(0, 14))}…</span>`}</a></td>
+                <td class="mono">$${cost.toFixed(4)}</td>
+                <td class="mono">${pct.toFixed(0)}%${pct >= 100 ? ' <span class="pill err">capped</span>' : ''}</td>
+                <td class="mono">${((u._sum.promptTokens ?? 0) + (u._sum.completionTokens ?? 0)).toLocaleString()}</td>
+                <td class="mono">${esc(u._count._all)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  return c.html(layout({ title: 'Usage', body, active: '/admin/usage' }));
 });
 
 // ---------- Images: versions + diff (view-only) ----------
@@ -1168,13 +1795,13 @@ router.get('/admin/images', async (c) => {
     const isCurrent = v.tag === liveTag;
     const n = counts.get(v.tag) ?? 0;
     return `<tr>
-      <td class="mono">${esc(v.tag)} ${isCurrent ? '<span class="badge ok">live</span>' : ''}</td>
+      <td><a class="mono" href="/admin/images/${encodeURIComponent(v.tag)}">${esc(v.tag)}</a> ${isCurrent ? '<span class="badge ok">live</span>' : ''}</td>
       <td>${esc(v.releasedAt)}</td>
       <td class="mono" style="font-size:11px">${esc(v.baseImage)}</td>
       <td class="mono" style="font-size:11px">${esc(v.defaultModel)}</td>
       <td>${v.toolUseEnforcement ? '<span class="pill ok">on</span>' : '<span class="pill err">off</span>'}</td>
       <td class="num">${esc(String(v.deniedSkills.length))} cut</td>
-      <td class="num">${esc(String(n))}</td>
+      <td class="num">${n > 0 ? `<a href="/admin/instances?image=${encodeURIComponent(v.tag)}">${esc(String(n))}</a>` : '0'}</td>
       <td class="dim">${esc(v.summary)}</td>
     </tr>`;
   }).join('');
@@ -1197,7 +1824,7 @@ router.get('/admin/images', async (c) => {
     </div>
     ${
       unknown > 0
-        ? `<p class="dim" style="margin-top:12px;display:flex;gap:8px;align-items:center"><span>${esc(String(unknown))} active instance(s) have no recorded image.</span><form method="post" action="/admin/images/reconcile" class="inline"><button type="submit">Reconcile from Fly</button></form></p>`
+        ? `<p class="dim" style="margin-top:12px;display:flex;gap:8px;align-items:center"><span><a href="/admin/instances?image=unknown">${esc(String(unknown))} active instance(s)</a> have no recorded image.</span><form method="post" action="/admin/images/reconcile" class="inline"><button type="submit">Reconcile from Fly</button></form></p>`
         : ''
     }
 
@@ -1273,6 +1900,139 @@ router.post('/admin/images/reconcile', async (c) => {
     logger.error({ err }, 'admin_image_reconcile_failed');
   }
   return c.redirect('/admin/images');
+});
+
+/**
+ * Per-image detail: manifest metadata + the instances running it, and — for
+ * the LIVE tag only — the actual image-defining artifacts (SOUL.md system
+ * prompt, config.yaml, skill denylist, orchestrator skills) read from the
+ * copy bundled into this orchestrator deploy. Historical tags can't show
+ * artifacts (they only exist as the working tree at build time); the
+ * manifest commit SHA is the pointer for those.
+ */
+router.get('/admin/images/:tag', async (c) => {
+  const tag = c.req.param('tag');
+  const version = findImageVersion(tag);
+  const cfg = loadConfig();
+  const liveTag = currentImageTag(cfg.FLY_MACHINE_IMAGE);
+  const isLive = tag === liveTag;
+
+  const instances = await prisma.hermesInstance.findMany({
+    where: {
+      destroyedAt: null,
+      OR: [{ imageTag: { endsWith: `:${tag}` } }, { imageTag: tag }],
+    },
+    orderBy: { lastActivityAt: 'desc' },
+    take: 50,
+    select: {
+      userId: true, name: true, email: true, status: true, sokosumiEnv: true,
+      isTestBench: true, imageRolledAt: true, lastActivityAt: true,
+    },
+  });
+
+  if (!version && instances.length === 0) {
+    return c.html(
+      layout({
+        title: 'Image',
+        body: `<h1>Image ${esc(tag)}</h1><div class="empty">Unknown tag — not in the manifest and no instance runs it.</div><p><a href="/admin/images">← Images</a></p>`,
+        active: '/admin/images',
+      }),
+      404,
+    );
+  }
+
+  // Live-image artifacts, best-effort — the deploy may predate the bundling.
+  const artifactBase = join(process.cwd(), 'docker', 'hermes-user');
+  const artifact = async (rel: string): Promise<string | null> => {
+    try {
+      return await readFile(join(artifactBase, rel), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  let soul: string | null = null;
+  let configYaml: string | null = null;
+  let denylist: string | null = null;
+  let orchestratorSkills: string[] = [];
+  if (isLive) {
+    [soul, configYaml, denylist] = await Promise.all([
+      artifact('SOUL.md'),
+      artifact('config.yaml'),
+      artifact('skill-denylist.txt'),
+    ]);
+    try {
+      const cats = await readdir(join(artifactBase, 'skills'), { withFileTypes: true });
+      for (const cat of cats) {
+        if (!cat.isDirectory()) continue;
+        const skills = await readdir(join(artifactBase, 'skills', cat.name), { withFileTypes: true });
+        orchestratorSkills.push(...skills.filter((s) => s.isDirectory()).map((s) => `${cat.name}/${s.name}`));
+      }
+    } catch {
+      orchestratorSkills = [];
+    }
+  }
+
+  const artifactBlock = (title: string, content: string | null, note?: string): string =>
+    content === null
+      ? ''
+      : `<h2>${esc(title)}${note ? ` <span class="dim" style="font-weight:400;font-size:12px">${esc(note)}</span>` : ''}</h2>
+         <pre class="log" style="max-height:420px">${esc(content)}</pre>
+         <div style="height:8px"></div>`;
+
+  const metaCard = version
+    ? `<div class="card flex-1">
+        <h3>Manifest</h3>
+        <dl class="kv">
+          <dt>Released</dt><dd>${esc(version.releasedAt)}</dd>
+          <dt>Base image</dt><dd class="mono">${esc(version.baseImage)}</dd>
+          <dt>Default model</dt><dd class="mono">${esc(version.defaultModel)}</dd>
+          <dt>Tool enforcement</dt><dd>${version.toolUseEnforcement ? '<span class="pill ok">on</span>' : '<span class="pill err">off</span>'}</dd>
+          <dt>Skills cut</dt><dd>${esc(version.deniedSkills.length)} (denylist)</dd>
+          ${version.skillPacks ? `<dt>Skill packs</dt><dd>${version.skillPacks.map((p) => `<div class="mono" style="font-size:12px">${esc(p)}</div>`).join('')}</dd>` : '<dt>Skill packs</dt><dd class="dim">not recorded for this version</dd>'}
+          ${version.commit ? `<dt>Cut at commit</dt><dd class="mono">${esc(version.commit)}</dd>` : ''}
+        </dl>
+        <h3 style="margin-top:20px">Changes</h3>
+        <ul class="dim" style="margin:0;padding-left:18px;font-size:13px">${version.changes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
+      </div>`
+    : `<div class="card flex-1"><h3>Manifest</h3><div class="empty" style="padding:12px">No manifest entry for this tag — add one to <span class="mono">src/images/manifest.ts</span>.</div></div>`;
+
+  const instancesCard = `<div class="card flex-1" style="padding:0;overflow:hidden">
+    <table>
+      <thead><tr><th>Instance (${esc(instances.length)})</th><th>Status</th><th>Env</th><th>Rolled</th><th>Activity</th></tr></thead>
+      <tbody>
+        ${instances.length === 0 ? '<tr><td colspan="5" class="empty">No active instances on this image.</td></tr>' : instances.map((r) => `
+          <tr>
+            <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${userLabel(r)}</a>${r.isTestBench ? ' <span class="badge ok">bench</span>' : ''}</td>
+            <td>${statusPill(r.status)}</td>
+            <td><span class="badge">${esc(r.sokosumiEnv ?? 'mainnet')}</span></td>
+            <td class="mono">${r.imageRolledAt ? esc(relTime(r.imageRolledAt)) : '—'}</td>
+            <td class="mono">${esc(relTime(r.lastActivityAt))}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>`;
+
+  const artifactsSection = isLive
+    ? (soul === null && configYaml === null && denylist === null
+        ? '<h2>Image contents</h2><p class="dim">Artifacts not bundled into this orchestrator deploy yet (needs a deploy with the docker/ COPY in the Dockerfile).</p>'
+        : `
+          ${orchestratorSkills.length > 0 ? `<h2>Orchestrator-owned skills</h2><div>${orchestratorSkills.map((s) => `<span class="badge">${esc(s)}</span>`).join(' ')}</div>` : ''}
+          ${artifactBlock('System prompt — SOUL.md', soul, 'as currently deployed; the launcher re-syncs this onto every machine at boot')}
+          ${artifactBlock('config.yaml', configYaml)}
+          ${artifactBlock('Skill denylist', denylist, 'pruned from the bundle at build AND from volumes on every boot')}
+        `)
+    : `<h2>Image contents</h2><p class="dim">Artifacts are only shown for the <span class="badge ok">live</span> image — historical image contents aren't tracked in the repo${version?.commit ? `; the closest pointer is commit <span class="mono">${esc(version.commit)}</span>` : ''}. The third-party skill packs are cloned unpinned at build time, so even a rebuild from that commit wouldn't reproduce them exactly.</p>`;
+
+  const body = `
+    <h1 class="mono">${esc(tag)} ${isLive ? '<span class="badge ok">live</span>' : ''}</h1>
+    <p class="dim"><a href="/admin/images">← All images</a>${version ? ` · ${esc(version.summary)}` : ''}</p>
+    <div class="row" style="margin-bottom:16px">
+      ${metaCard}
+      ${instancesCard}
+    </div>
+    ${artifactsSection}
+  `;
+  return c.html(layout({ title: `Image ${tag}`, body, active: '/admin/images' }));
 });
 
 router.post('/admin/instances/:userId/toggle-bench', async (c) => {
@@ -1403,6 +2163,18 @@ router.post('/admin/tests/run', async (c) => {
   }
 });
 
+// Kill a run stuck in status=running (e.g. orchestrator restarted mid-suite —
+// the runner's in-process loop is gone but the row still says running, which
+// blocks new runs on that instance and makes the run page reload forever).
+router.post('/admin/tests/runs/:runId/cancel', async (c) => {
+  const runId = c.req.param('runId');
+  await prisma.testRun.updateMany({
+    where: { id: runId, status: 'running' },
+    data: { status: 'error', note: 'canceled by admin', finishedAt: new Date() },
+  });
+  return c.redirect(`/admin/tests/runs/${encodeURIComponent(runId)}`);
+});
+
 router.get('/admin/tests/runs/:runId', async (c) => {
   const runId = c.req.param('runId');
   const run = await prisma.testRun.findUnique({
@@ -1425,7 +2197,7 @@ router.get('/admin/tests/runs/:runId', async (c) => {
   const body = `
     <h1>${esc(run.suiteName)} <span class="dim" style="font-size:14px">on ${esc(tag)}</span></h1>
     <p class="dim"><a href="/admin/instances/${encodeURIComponent(run.instance.userId)}">${esc(run.instance.userId)}</a> · ${statusPillHtml} · started ${esc(relTime(run.startedAt))}${run.finishedAt ? ` · finished ${esc(relTime(run.finishedAt))}` : ''} · ${esc(String(run.turns.length))} turn(s)</p>
-    ${running ? '<p class="dim">Auto-refreshing while the suite runs…</p>' : ''}
+    ${running ? `<p class="dim" style="display:flex;gap:12px;align-items:center"><span>Auto-refreshing while the suite runs…</span><form method="post" action="/admin/tests/runs/${encodeURIComponent(run.id)}/cancel" class="inline" onsubmit="return confirm('Mark this run as canceled? Only do this if it is stuck (e.g. after an orchestrator restart).')"><button type="submit" class="danger">Cancel stuck run</button></form></p>` : ''}
     ${
       run.turns.length === 0
         ? '<div class="empty">No turns recorded yet.</div>'
@@ -1573,12 +2345,77 @@ function renderEventRow(e: {
   </div>`;
 }
 
+function userLabel(u: { userId: string; name: string | null; email: string | null }): string {
+  if (u.name) {
+    return `<strong>${esc(u.name)}</strong>${u.email ? `<div class="dim mono" style="font-size:11px">${esc(u.email)}</div>` : ''}`;
+  }
+  if (u.email) return `<span class="mono">${esc(u.email)}</span>`;
+  return `<span class="mono dim" title="${esc(u.userId)}">${esc(u.userId.slice(0, 14))}…</span>`;
+}
+
+function compactText(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+function shortProvider(provider: string): string {
+  const names: Record<string, string> = {
+    gmail: 'gmail',
+    google_calendar: 'gcal',
+    outlook: 'outlook',
+    outlook_calendar: 'ocal',
+  };
+  return names[provider] ?? provider;
+}
+
 function dayAgo(): Date {
   return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 
+function hoursAgo(h: number): Date {
+  return new Date(Date.now() - h * 60 * 60 * 1000);
+}
+
 function startOfMonthUtc(d = new Date()): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function startOfDayUtc(d = new Date()): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+}
+
+/**
+ * Daily LLM spend buckets, newest first. Raw SQL because Prisma's groupBy
+ * can't truncate timestamps. `userId` narrows to one user; omit for global.
+ */
+async function usageByDay(
+  days: number,
+  userId?: string,
+): Promise<Array<{ day: string; cost: number; tokens: number; calls: number }>> {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const rows = userId
+    ? await prisma.$queryRaw<Array<{ day: Date; cost: number; tokens: bigint; calls: bigint }>>`
+        SELECT date_trunc('day', "createdAt") AS day,
+               COALESCE(SUM("costUsd"), 0)::float8 AS cost,
+               COALESCE(SUM("promptTokens" + "completionTokens"), 0)::bigint AS tokens,
+               COUNT(*)::bigint AS calls
+        FROM "LlmUsage"
+        WHERE "createdAt" >= ${since} AND "userId" = ${userId}
+        GROUP BY 1 ORDER BY 1 DESC`
+    : await prisma.$queryRaw<Array<{ day: Date; cost: number; tokens: bigint; calls: bigint }>>`
+        SELECT date_trunc('day', "createdAt") AS day,
+               COALESCE(SUM("costUsd"), 0)::float8 AS cost,
+               COALESCE(SUM("promptTokens" + "completionTokens"), 0)::bigint AS tokens,
+               COUNT(*)::bigint AS calls
+        FROM "LlmUsage"
+        WHERE "createdAt" >= ${since}
+        GROUP BY 1 ORDER BY 1 DESC`;
+  return rows.map((r) => ({
+    day: r.day.toISOString().slice(0, 10),
+    cost: Number(r.cost),
+    tokens: Number(r.tokens),
+    calls: Number(r.calls),
+  }));
 }
 
 async function perUserMonthlyAtCap(

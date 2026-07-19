@@ -32,6 +32,7 @@ export function layout(opts: { title: string; body: string; active?: string }): 
     <nav>
       ${nav('/admin', 'Overview')}
       ${nav('/admin/instances', 'Instances')}
+      ${nav('/admin/usage', 'Usage')}
       ${nav('/admin/chats', 'Chats')}
       ${nav('/admin/confirmations', 'Confirmations')}
       ${nav('/admin/events', 'Events')}
@@ -63,13 +64,15 @@ export function relTime(date: Date | string | null | undefined): string {
   if (!date) return '—';
   const d = typeof date === 'string' ? new Date(date) : date;
   const diffMs = Date.now() - d.getTime();
-  const s = Math.round(diffMs / 1000);
-  if (s < 60) return `${s}s ago`;
+  const future = diffMs < 0;
+  const s = Math.round(Math.abs(diffMs) / 1000);
+  const fmt = (v: number, unit: string): string => (future ? `in ${v}${unit}` : `${v}${unit} ago`);
+  if (s < 60) return fmt(s, 's');
   const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return fmt(m, 'm');
   const h = Math.round(m / 60);
-  if (h < 48) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  if (h < 48) return fmt(h, 'h');
+  return fmt(Math.round(h / 24), 'd');
 }
 
 /** Status → pill class. Healthy = ok, in-flight = warn, idle = muted, bad = err. */
@@ -151,6 +154,8 @@ nav { display: flex; gap: 2px; align-self: stretch; align-items: stretch; }
 .nav-link.active { color: var(--text); border-bottom-color: var(--accent); }
 
 main { padding: 28px 24px 64px; max-width: 1280px; margin: 0 auto; }
+.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+.subtle-line { color: var(--muted); font-size: 12px; margin-top: -10px; }
 
 /* ---- typography ---- */
 h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 18px; }
@@ -171,6 +176,27 @@ p { margin: 0 0 16px; }
 .stat-ok .stat-value { color: var(--accent); }
 .stat-warn .stat-value { color: var(--warn); }
 .stat-danger .stat-value { color: var(--err); }
+.status-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: -8px 0 24px; }
+.status-link, .filter-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border: 1px solid var(--border);
+  background: var(--surface); border-radius: var(--r-sm);
+  color: var(--text-2); font-size: 12px; text-decoration: none;
+}
+.status-link strong, .filter-chip strong { color: var(--text); font-weight: 600; }
+.status-link:hover, .filter-chip:hover { background: var(--surface-2); text-decoration: none; }
+.filter-chip.active { border-color: rgba(124,176,247,0.5); color: var(--info); }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: -4px 0 12px; }
+.ops-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 24px; }
+.op-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border-radius: var(--r); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); text-decoration: none;
+}
+.op-card strong { color: var(--text); font-size: 18px; line-height: 1; }
+.op-card.warn strong { color: var(--warn); }
+.op-card.danger strong { color: var(--err); }
+.op-card:hover { background: var(--surface-2); text-decoration: none; }
 
 /* ---- tables ---- */
 table { width: 100%; border-collapse: collapse; }
@@ -225,6 +251,8 @@ pre.log {
 
 /* ---- controls ---- */
 .actions { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+.actions.no-margin { margin-bottom: 0; }
+.filter-bar input[type="search"] { min-width: 320px; }
 button, .btn {
   background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
   border-radius: var(--r-sm); padding: 6px 12px; font-size: 12px; font-weight: 500;
@@ -262,8 +290,14 @@ a:focus-visible, button:focus-visible, .btn:focus-visible, input:focus-visible, 
 /* ---- tool chips (test runs) + diffs ---- */
 .tool-chip { display: inline-block; padding: 2px 7px; border-radius: var(--r-sm); font-family: var(--mono); font-size: 11px; background: rgba(124,176,247,0.12); color: var(--info); margin: 2px 4px 2px 0; }
 .tool-none { color: var(--faint); font-size: 12px; }
-.changed { color: var(--warn); }
 .unchanged { color: var(--muted); }
+
+/* ---- usage bars (spend-by-day) ---- */
+.bar-row { display: grid; grid-template-columns: 84px 1fr max-content; gap: 12px; align-items: center; padding: 4px 0; font-size: 12px; }
+.bar-track { background: var(--surface-2); border-radius: 3px; height: 14px; overflow: hidden; }
+.bar-fill { background: var(--accent-soft); border-right: 2px solid var(--accent); height: 100%; min-width: 2px; }
+.bar-label { color: var(--muted); font-family: var(--mono); }
+.bar-value { font-family: var(--mono); color: var(--text-2); white-space: nowrap; }
 .cmp { width: 100%; border-collapse: collapse; }
 .cmp th, .cmp td { vertical-align: top; border: 1px solid var(--border); padding: 10px 12px; font-size: 12px; width: 1%; }
 .cmp th { background: var(--surface-2); text-align: left; }

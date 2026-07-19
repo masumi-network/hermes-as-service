@@ -40,6 +40,9 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/package.json ./package.json
+# Hermes user-image artifacts (SOUL.md, config.yaml, denylist, skills) so the
+# admin Images page can display the live image's actual contents at runtime.
+COPY docker ./docker
 
 EXPOSE 8080
 # `prisma db push` syncs schema → DB on every boot. Safe for v1 (single-model,

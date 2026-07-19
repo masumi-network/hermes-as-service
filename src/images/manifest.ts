@@ -34,6 +34,12 @@ export interface ImageVersion {
   changes: string[];
   /** Short git SHA for the commit that cut this image (for linking out). */
   commit?: string;
+  /**
+   * Third-party skill packs cloned into the image at build time (unpinned
+   * `--depth 1` of HEAD, so the exact contents depend on build date).
+   * Undefined = not recorded for this version.
+   */
+  skillPacks?: string[];
 }
 
 // The current denylist (docker/hermes-user/skill-denylist.txt). Kept here as a
@@ -71,6 +77,13 @@ export const IMAGE_VERSIONS: ImageVersion[] = [
       'Same base, model, and tool-use enforcement as v20.',
     ],
     commit: 'e636f6a',
+    skillPacks: [
+      'coreyhaines31/marketingskills',
+      'conorbronsdon/avoid-ai-writing',
+      'Romanescu11/hermes-skill-factory',
+      'AgriciDaniel/claude-ads',
+      'nowork-studio/toprank (seo, google-ads, meta-ads, gemini)',
+    ],
   },
   {
     tag: 'v20',
