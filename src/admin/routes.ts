@@ -110,16 +110,21 @@ router.get('/admin', async (c) => {
           OR: [{ lastSokosumiSyncAt: null }, { lastSokosumiSyncAt: { lt: hoursAgo(24) } }],
         },
       }),
+      // Flag at >7h against the sweep's 6h cadence (1h slack for the hourly
+      // cron tick, mirroring the 23h-sweep/24h-flag pattern on Sokosumi sync),
+      // and only for instances the sweep actually touches (onboarded + alive).
       prisma.hermesInstance.count({
         where: {
           destroyedAt: null,
+          onboardedAt: { not: null },
+          status: { in: ['ready', 'running', 'suspended'] },
           integrations: {
             some: {
               status: 'connected',
               provider: { in: ['gmail', 'outlook', 'google_calendar', 'outlook_calendar'] },
             },
           },
-          OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(6) } }],
+          OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(7) } }],
         },
       }),
       prisma.chatMessage.findMany({
@@ -261,7 +266,7 @@ router.get('/admin', async (c) => {
       ${statCard('In progress', provisioning + onboarding + infraReady, `${provisioning} provisioning · ${onboarding} onboarding · ${infraReady} waiting`, provisioning + onboarding + infraReady > 0 ? 'warn' : undefined)}
       ${statCard('Errored', errored, undefined, errored > 0 ? 'danger' : undefined)}
       ${statCard('Warm pool', `${poolReady}/${poolTarget}`, poolTarget === 0 ? 'disabled (WARM_POOL_TARGET=0)' : `${poolWarming} warming${poolFailed > 0 ? ` · ${poolFailed} failed` : ''}`, poolTarget > 0 && poolReady === 0 ? 'warn' : poolFailed > 0 ? 'warn' : undefined)}
-      ${statCard('Chats (24h)', last24hMsgs, recentFailures.length > 0 ? `${recentFailures.length} failed` : undefined, recentFailures.length > 0 ? 'danger' : undefined)}
+      ${statCard('Chats (24h)', last24hMsgs, errorRate24h > 0 ? `${errorRate24h} failure event(s)` : undefined, errorRate24h > 0 ? 'danger' : undefined)}
       ${statCard('MTD spend', '$' + totalCost.toFixed(2), `${totalTokens.toLocaleString()} tokens · cap $${cfg.MONTHLY_USD_CAP_PER_USER}/user`)}
     </div>
     ${errorRate24h > 0 ? `<p class="dim" style="margin:-12px 0 20px;font-size:12px"><a href="/admin/events?filter=failures">${esc(errorRate24h)} provision/chat failure event(s) in the last 24h →</a></p>` : ''}
@@ -380,7 +385,6 @@ router.get('/admin/instances', async (c) => {
       ],
     });
   }
-  if (status) and.push({ status });
   if (env) {
     and.push(
       env === 'mainnet'
@@ -392,9 +396,7 @@ router.get('/admin/instances', async (c) => {
   if (onboarded === 'yes') and.push({ onboardedAt: { not: null } });
   if (onboarded === 'no') and.push({ onboardedAt: null });
   if (image === 'unknown') and.push({ imageTag: null });
-  // imageTag stores either the full ref ("registry…/img:v21") or a bare tag
-  // ("v21", from reconcile) — match both forms.
-  else if (image) and.push({ OR: [{ imageTag: { endsWith: `:${image}` } }, { imageTag: image }] });
+  else if (image) and.push(imageTagWhere(image));
   if (problem === 'outbox') and.push({ outbox: { some: {} } });
   if (problem === 'integrations') and.push({ integrations: { some: { status: { in: ['failed', 'error', 'disconnected'] } } } });
   if (problem === 'schedules') and.push({ schedules: { some: { lastError: { not: null } } } });
@@ -409,16 +411,23 @@ router.get('/admin/instances', async (c) => {
   if (problem === 'inbox-refresh') {
     and.push({
       destroyedAt: null,
+      onboardedAt: { not: null },
+      status: { in: ['ready', 'running', 'suspended'] },
       integrations: {
         some: {
           status: 'connected',
           provider: { in: ['gmail', 'outlook', 'google_calendar', 'outlook_calendar'] },
         },
       },
-      OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(6) } }],
+      OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: hoursAgo(7) } }],
     });
   }
 
+  // The status filter is applied to the rows/count but NOT to the status
+  // chips — otherwise selecting a status collapses the chip switcher to a
+  // single chip and you can't jump to another status.
+  const chipWhere: Prisma.HermesInstanceWhereInput = and.length > 0 ? { AND: [...and] } : {};
+  if (status) and.push({ status });
   const where: Prisma.HermesInstanceWhereInput = and.length > 0 ? { AND: and } : {};
   const [rows, totalMatching, statusCounts] = await Promise.all([
     prisma.hermesInstance.findMany({
@@ -443,7 +452,7 @@ router.get('/admin/instances', async (c) => {
     prisma.hermesInstance.count({ where }),
     prisma.hermesInstance.groupBy({
       by: ['status'],
-      where,
+      where: chipWhere,
       _count: { status: true },
       orderBy: { status: 'asc' },
     }),
@@ -589,10 +598,12 @@ function rowToInstanceRow(r: {
     r._count.schedules > 0 ? `<span class="badge">${esc(r._count.schedules)} schedules</span>` : '',
     r._count.installedSkills > 0 ? `<span class="badge">${esc(r._count.installedSkills)} skills</span>` : '',
   ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
-  const image = tagFromRef(r.imageTag) ?? (r.imageTag ? r.imageTag : 'unknown');
-  const imageCell = image === 'unknown'
-    ? '<span class="dim">unknown</span>'
-    : `<a class="mono" href="/admin/images/${encodeURIComponent(image)}">${esc(image)}</a>`;
+  const tag = tagFromRef(r.imageTag);
+  const imageCell = tag
+    ? `<a class="mono" href="/admin/images/${encodeURIComponent(tag)}">${esc(tag)}</a>`
+    : r.imageTag
+      ? `<span class="mono" title="${esc(r.imageTag)}">${esc(r.imageTag.length > 24 ? r.imageTag.slice(0, 24) + '…' : r.imageTag)}</span>`
+      : '<span class="dim">unknown</span>';
   return `<tr>
     <td><a href="/admin/instances/${encodeURIComponent(r.userId)}">${who}</a>${roleCompany}</td>
     <td>${statusPill(r.status)}</td>
@@ -713,7 +724,7 @@ router.get('/admin/instances/:userId', async (c) => {
           <dt>Status</dt><dd>${statusPill(row.status)}${row.onboardedAt ? '' : ' <span class="badge warn">not onboarded</span>'}</dd>
           <dt>Endpoint</dt><dd>${row.endpointUrl ? `<a class="mono" href="${esc(row.endpointUrl)}" target="_blank">${esc(row.endpointUrl)}</a>` : '—'}</dd>
           <dt>Fly app</dt><dd class="mono">${esc(row.spriteName)} <span class="dim">(${esc(row.region || '—')})</span></dd>
-          <dt>Image</dt><dd>${imageTag ? `<a class="mono" href="/admin/images/${encodeURIComponent(imageTag)}">${esc(imageTag)}</a>` : '<span class="dim">unknown</span>'}${row.imageRolledAt ? ` <span class="dim">rolled ${esc(relTime(row.imageRolledAt))}</span>` : ''}${row.isTestBench ? ' <span class="badge ok">bench</span>' : ''}</dd>
+          <dt>Image</dt><dd>${imageTag ? `<a class="mono" href="/admin/images/${encodeURIComponent(imageTag)}">${esc(imageTag)}</a>` : row.imageTag ? `<span class="mono">${esc(row.imageTag)}</span>` : '<span class="dim">unknown</span>'}${row.imageRolledAt ? ` <span class="dim">rolled ${esc(relTime(row.imageRolledAt))}</span>` : ''}${row.isTestBench ? ' <span class="badge ok">bench</span>' : ''}</dd>
           <dt>Env</dt><dd><span class="badge${row.sokosumiEnv === 'mainnet' ? ' danger' : ''}">${esc(row.sokosumiEnv ?? 'mainnet')}</span> <span class="badge${row.autonomyLevel === 'high' ? ' warn' : ''}">autonomy ${esc(row.autonomyLevel)}</span></dd>
           <dt>Created</dt><dd>${esc(relTime(row.createdAt))} <span class="dim mono">${esc(row.createdAt.toISOString().slice(0, 16))}Z</span></dd>
           <dt>Last activity</dt><dd>${esc(relTime(row.lastActivityAt))}</dd>
@@ -1912,16 +1923,14 @@ router.post('/admin/images/reconcile', async (c) => {
  */
 router.get('/admin/images/:tag', async (c) => {
   const tag = c.req.param('tag');
+  if (!IMAGE_TAG_RE.test(tag)) return c.text('invalid tag', 404);
   const version = findImageVersion(tag);
   const cfg = loadConfig();
   const liveTag = currentImageTag(cfg.FLY_MACHINE_IMAGE);
   const isLive = tag === liveTag;
 
   const instances = await prisma.hermesInstance.findMany({
-    where: {
-      destroyedAt: null,
-      OR: [{ imageTag: { endsWith: `:${tag}` } }, { imageTag: tag }],
-    },
+    where: { AND: [{ destroyedAt: null }, imageTagWhere(tag)] },
     orderBy: { lastActivityAt: 'desc' },
     take: 50,
     select: {
@@ -2366,6 +2375,28 @@ function shortProvider(provider: string): string {
     outlook_calendar: 'ocal',
   };
   return names[provider] ?? provider;
+}
+
+/**
+ * Valid docker-tag token. Also blocks Prisma LIKE wildcards (% _) so a
+ * crafted ?image= can't silently match everything.
+ */
+const IMAGE_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Match instances whose imageTag carries this tag, in every stored form:
+ * full ref ("registry…/img:v21"), bare tag ("v21", from reconcile), or
+ * digest-suffixed ref ("registry…/img:v21@sha256:…").
+ */
+function imageTagWhere(tag: string): Prisma.HermesInstanceWhereInput {
+  if (!IMAGE_TAG_RE.test(tag)) return { id: '__invalid_image_tag__' };
+  return {
+    OR: [
+      { imageTag: { endsWith: `:${tag}` } },
+      { imageTag: tag },
+      { imageTag: { contains: `:${tag}@` } },
+    ],
+  };
 }
 
 function dayAgo(): Date {

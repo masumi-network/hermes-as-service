@@ -5,6 +5,18 @@ const ADMIN_USER = 'admin';
 const REALM = 'Hermes Orchestrator Admin';
 
 export const adminAuth: MiddlewareHandler = async (c, next) => {
+  // CSRF guard for state-changing admin actions: browsers replay cached Basic
+  // Auth on cross-site form POSTs, so an attacker page could auto-submit
+  // destroy/hard-reset forms. Modern browsers send Sec-Fetch-Site on every
+  // request — reject non-same-origin writes. curl/scripts don't send the
+  // header (absent → allowed), so API workflows keep working.
+  const method = c.req.method.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    const site = c.req.header('Sec-Fetch-Site');
+    if (site && site !== 'same-origin' && site !== 'none') {
+      return new Response('cross-site admin write rejected', { status: 403 });
+    }
+  }
   const expected = loadConfig().ADMIN_PASSWORD;
   const header = c.req.header('Authorization') ?? '';
   if (!header.startsWith('Basic ')) {
