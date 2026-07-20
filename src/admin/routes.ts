@@ -1644,6 +1644,23 @@ router.get('/admin/events', async (c) => {
 
 // ---------- Crons: what the background sweeps actually do ----------
 
+/** Human cadence for the fixed set of sweep cron expressions. describeCron
+ * is built for daily/weekly named crons and mangles step/range exprs. */
+function cadenceLabel(expr: string): string {
+  const map: Record<string, string> = {
+    '*/2 * * * *': 'every 2 min',
+    '*/5 * * * *': 'every 5 min',
+    '2-59/5 * * * *': 'every 5 min',
+    '0 * * * *': 'hourly (:00)',
+    '15 * * * *': 'hourly (:15)',
+    '20 * * * *': 'hourly (:20)',
+    '30 * * * *': 'hourly (:30)',
+    '45 * * * *': 'hourly (:45)',
+    '50 * * * *': 'hourly (:50)',
+  };
+  return map[expr] ?? expr;
+}
+
 const CRON_EVENT_SOURCES = new Set([
   'urgent_interrupt',
   'urgent',
@@ -1708,19 +1725,33 @@ router.get('/admin/crons', async (c) => {
   const { getCronRegistry } = await import('../cron.js');
   const registry = getCronRegistry();
 
+  // Last time each sweep actually DID something (all SweepRun rows are
+  // acted-or-errored by construction) — shown next to the heartbeat so the
+  // two timestamps live in ONE row instead of two tables that disagree.
+  const lastWork = new Map(
+    (
+      await prisma.sweepRun.groupBy({
+        by: ['sweep'],
+        _max: { startedAt: true },
+      })
+    ).map((g) => [g.sweep, g._max.startedAt]),
+  );
+
   const registryRows = registry
     .map((r) => {
-      const result = r.lastResult ? esc(JSON.stringify(r.lastResult)) : '<span class="dim">—</span>';
       const status = r.lastTickAt === null
-        ? '<span class="pill muted">no tick yet</span>'
+        ? '<span class="pill muted">not ticked yet</span>'
         : r.lastOk
           ? '<span class="pill ok">ok</span>'
           : `<span class="pill err" title="${esc(r.lastError ?? '')}">error</span>`;
+      const worked = lastWork.get(r.name);
+      const result = r.lastResult ? esc(JSON.stringify(r.lastResult)) : '<span class="dim">—</span>';
       return `<tr>
         <td class="mono">${esc(r.name)}</td>
-        <td class="mono">${esc(r.expr)}</td>
-        <td class="mono">${r.lastTickAt ? esc(relTime(r.lastTickAt)) : '—'}</td>
+        <td class="mono">${esc(cadenceLabel(r.expr))}</td>
+        <td class="mono" title="Every scheduled wake-up, including ones that found nothing to do">${r.lastTickAt ? esc(relTime(r.lastTickAt)) : '—'}</td>
         <td>${status}</td>
+        <td class="mono" title="Last tick that actually did work (prompted an agent, delivered something, warmed a machine, …)">${worked ? `<a href="/admin/crons?sweep=${encodeURIComponent(r.name)}">${esc(relTime(worked))}</a>` : '<span class="dim">never</span>'}</td>
         <td class="mono" style="font-size:11px">${result}</td>
       </tr>`;
     })
@@ -1750,17 +1781,16 @@ router.get('/admin/crons', async (c) => {
 
   const body = `
     <h1>Crons</h1>
-    <p class="dim">The orchestrator sweeps below are FLEET-WIDE — one process serves every instance, so there's one registry. Per-instance work (whose brief was delivered, which jobs got answered) shows in the activity table — filter it by user, or open an instance's detail page for its own cron section. Registry state is in-memory (resets on deploy); tick history and agent activity are durable.</p>
+    <p class="dim">The orchestrator's background jobs — fleet-wide, one process serves every instance. Each row shows two different times: <strong>last tick</strong> = the most recent scheduled wake-up (proves the cron is alive, even when there was nothing to do) and <strong>last did work</strong> = the most recent tick that actually acted. Most ticks find nothing — that's normal, not a stalled cron. Per-instance results live on each instance's detail page.</p>
 
-    <h2>Registered crons <span class="dim" style="font-weight:400;font-size:12px">(this process)</span></h2>
     <div class="card" style="padding:0;overflow:hidden">
       <table>
-        <thead><tr><th>Cron</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last result</th></tr></thead>
-        <tbody>${registryRows || '<tr><td colspan="5" class="empty">No crons registered.</td></tr>'}</tbody>
+        <thead><tr><th>Job</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last did work</th><th>Last tick result</th></tr></thead>
+        <tbody>${registryRows || '<tr><td colspan="6" class="empty">No crons registered.</td></tr>'}</tbody>
       </table>
     </div>
 
-    <h2>Non-idle ticks <span class="dim" style="font-weight:400;font-size:12px">(idle ticks aren't logged)</span></h2>
+    <h2>Work log <span class="dim" style="font-weight:400;font-size:12px">(only ticks that acted or failed — routine empty ticks aren't listed)</span></h2>
     <form method="get" action="/admin/crons" class="actions">
       <select name="sweep">
         <option value="">all sweeps</option>
