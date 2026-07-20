@@ -2217,6 +2217,24 @@ router.post('/admin/instances/:userId/toggle-bench', async (c) => {
   return c.redirect(`/admin/instances/${encodeURIComponent(userId)}`);
 });
 
+/**
+ * Admin — re-drive stuck skill installs (status='installing') onto the live
+ * machine without rebooting it. Use after a fix to the install path, or when
+ * a skill's live write failed at install time. Returns the replay counts.
+ */
+router.post('/admin/instances/:userId/skills/replay', async (c) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId }, select: { id: true } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  const { replayInstalledSkills } = await import('../skills/manager.js');
+  try {
+    const res = await replayInstalledSkills(row.id);
+    return c.json({ ok: true, ...res });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 // ---------- Tests: run standard-chat suites + compare across images ----------
 
 router.get('/admin/tests', async (c) => {

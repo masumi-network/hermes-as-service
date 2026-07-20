@@ -99,47 +99,94 @@ export function prepareSkill(
   return { slug: safeSlug, dir: `${MARKETPLACE_PREFIX}${safeSlug}`, files: fs };
 }
 
-/**
- * Build a single `/bin/sh -c` command that atomically materializes the skill:
- * write every file into a staging dir from base64, chmod readable for the
- * `hermes` user (exec runs as root), then `mv` over the live dir and print a
- * sentinel. base64 payloads contain only [A-Za-z0-9+/=]; dir/paths are
- * pre-validated to a safe charset — so nothing here is shell-injectable.
- */
-export function buildInstallCommand(prepared: PreparedSkill): string {
+// Fly's guest exec endpoint rejects an oversized request body (PayloadTooLarge)
+// — a whole skill base64'd into one command (~1.33x its bytes) blows that limit
+// for any non-trivial skill. So we materialize the skill across MULTIPLE small
+// execs: each file's base64 is appended to a temp in bounded chunks, decoded,
+// then all files are atomically swapped into place in the final exec. Every
+// exec command stays well under the limit.
+//
+// A base64 STRING can be split at any offset and concatenated as text, then
+// decoded once — so we append raw base64 chunks and `base64 -d` the whole
+// temp per file. base64 payloads contain only [A-Za-z0-9+/=]; dir/paths are
+// pre-validated to a safe charset — nothing here is shell-injectable.
+const MAX_B64_CHUNK = 16 * 1024; // max base64 chars per single printf line
+const MAX_EXEC_BYTES = 24 * 1024; // max command length per exec
+
+/** Ordered shell steps that build the skill in `staging` then swap it live.
+ *  No single step exceeds MAX_B64_CHUNK+overhead. Pure (testable). */
+export function buildInstallSteps(prepared: PreparedSkill): string[] {
   const dir = `${SKILLS_ROOT}/${prepared.dir}`;
   const staging = `${SKILLS_ROOT}/.staging-${prepared.dir}`;
-  const lines: string[] = ['set -e', `rm -rf "${staging}"`, `mkdir -p "${staging}"`];
+  const steps: string[] = [`rm -rf "${staging}"`, `mkdir -p "${staging}"`];
   for (const f of prepared.files) {
-    const b64 = Buffer.from(f.contents, 'utf8').toString('base64');
+    const filePath = `${staging}/${f.path}`;
+    const tmp = `${filePath}.b64`;
     const slash = f.path.lastIndexOf('/');
-    if (slash !== -1) lines.push(`mkdir -p "${staging}/${f.path.slice(0, slash)}"`);
-    lines.push(`printf %s '${b64}' | base64 -d > "${staging}/${f.path}"`);
+    if (slash !== -1) steps.push(`mkdir -p "${staging}/${f.path.slice(0, slash)}"`);
+    steps.push(`: > "${tmp}"`); // create/truncate the temp
+    const b64 = Buffer.from(f.contents, 'utf8').toString('base64');
+    for (let i = 0; i < b64.length; i += MAX_B64_CHUNK) {
+      steps.push(`printf %s '${b64.slice(i, i + MAX_B64_CHUNK)}' >> "${tmp}"`);
+    }
+    steps.push(`base64 -d < "${tmp}" > "${filePath}"`);
+    steps.push(`rm -f "${tmp}"`);
   }
-  lines.push(`chmod -R a+rX "${staging}"`);
-  lines.push(`rm -rf "${dir}"`);
-  lines.push(`mv "${staging}" "${dir}"`);
-  lines.push('echo SKILL_INSTALL_OK');
-  return lines.join('\n');
+  steps.push(`chmod -R a+rX "${staging}"`);
+  steps.push(`rm -rf "${dir}"`);
+  steps.push(`mv "${staging}" "${dir}"`); // atomic swap — last content step
+  return steps;
 }
 
-/** Push a prepared skill onto the running machine via exec. Throws on failure. */
+/** Pack ordered steps into `/bin/sh -c` scripts, each ≤ budget, order
+ *  preserved. Every script runs under `set -e` and ends with a sentinel so
+ *  the caller can confirm it ran to completion. Pure (testable). */
+export function packInstallExecs(steps: string[], budget = MAX_EXEC_BYTES): string[] {
+  const execs: string[] = [];
+  let cur: string[] = [];
+  let curLen = 0;
+  const flush = (): void => {
+    if (cur.length === 0) return;
+    execs.push(`set -e\n${cur.join('\n')}\necho ${BATCH_SENTINEL}`);
+    cur = [];
+    curLen = 0;
+  };
+  for (const step of steps) {
+    if (curLen + step.length + 1 > budget && cur.length > 0) flush();
+    cur.push(step);
+    curLen += step.length + 1;
+  }
+  flush();
+  return execs;
+}
+
+const BATCH_SENTINEL = 'SKILL_BATCH_OK';
+
+/**
+ * Push a prepared skill onto the running machine as a sequence of bounded
+ * execs. The live dir is only swapped in the FINAL exec, so a mid-sequence
+ * failure leaves the existing skill untouched (staging is separate). Throws
+ * on the first batch that doesn't report the sentinel.
+ */
 export async function writeSkillToMachine(
   appName: string,
   machineId: string,
   prepared: PreparedSkill,
 ): Promise<void> {
-  const res = await new FlyClient().execMachine(
-    appName,
-    machineId,
-    ['/bin/sh', '-c', buildInstallCommand(prepared)],
-    { timeoutSec: 30 },
-  );
-  if (res.exitCode !== 0 || !res.stdout.includes('SKILL_INSTALL_OK')) {
-    const msg = (res.stderr || res.stdout || '').slice(0, 300);
-    throw new Error(`skill install exec failed (exit ${res.exitCode}): ${msg}`);
+  const fly = new FlyClient();
+  const execs = packInstallExecs(buildInstallSteps(prepared));
+  for (let i = 0; i < execs.length; i++) {
+    const res = await fly.execMachine(appName, machineId, ['/bin/sh', '-c', execs[i]!], {
+      timeoutSec: 30,
+    });
+    if (res.exitCode !== 0 || !res.stdout.includes(BATCH_SENTINEL)) {
+      const msg = (res.stderr || res.stdout || '').slice(0, 300);
+      throw new Error(
+        `skill install exec failed (batch ${i + 1}/${execs.length}, exit ${res.exitCode}): ${msg}`,
+      );
+    }
   }
-  logger.info({ appName, machineId, dir: prepared.dir }, 'skill_written_to_machine');
+  logger.info({ appName, machineId, dir: prepared.dir, batches: execs.length }, 'skill_written_to_machine');
 }
 
 /** Remove a marketplace skill dir from the running machine. Best-effort. */
