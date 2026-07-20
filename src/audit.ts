@@ -53,7 +53,8 @@ export type ProvisionEventType =
   | 'eod_report_sent'
   | 'skill_installed'
   | 'skill_install_queued'
-  | 'skill_removed';
+  | 'skill_removed'
+  | 'outbox_pushed';
 
 /**
  * Persist a lifecycle event to ProvisionEvent. Never throws — auditing must

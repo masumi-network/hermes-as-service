@@ -36,6 +36,7 @@ export function layout(opts: { title: string; body: string; active?: string }): 
       ${nav('/admin/chats', 'Chats')}
       ${nav('/admin/confirmations', 'Confirmations')}
       ${nav('/admin/events', 'Events')}
+      ${nav('/admin/crons', 'Crons')}
       ${nav('/admin/images', 'Images')}
       ${nav('/admin/tests', 'Tests')}
     </nav>

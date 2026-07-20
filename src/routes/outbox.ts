@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { decryptSecret } from '../crypto.js';
 import { logger } from '../logger.js';
+import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 
 const DEFAULT_LIMIT = 50;
@@ -123,6 +124,20 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
       userId: auth.row.userId,
       content: parsed.data.content,
       kind: parsed.data.kind,
+    });
+    // Durable trace: outbox rows are DELETED when Sokosumi acks them, so
+    // this event is the only lasting record of what native cronjobs (and
+    // the outbox-send skill) actually delivered — the admin Crons page
+    // renders these.
+    await recordEvent({
+      userId: auth.row.userId,
+      instanceId: auth.row.id,
+      event: 'outbox_pushed',
+      detail: {
+        kind: parsed.data.kind,
+        chars: parsed.data.content.length,
+        preview: parsed.data.content.replace(/\s+/g, ' ').slice(0, 200),
+      },
     });
     return c.json(
       {

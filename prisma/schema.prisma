@@ -495,3 +495,21 @@ model TestTurn {
 
   @@index([runId])
 }
+
+/// One row per NON-IDLE orchestrator sweep tick (idle ticks are skipped to
+/// keep volume tiny; liveness comes from the in-memory registry on the
+/// admin Crons page). Durable history of what the background crons did.
+model SweepRun {
+  id         String   @id @default(uuid())
+  sweep      String
+  startedAt  DateTime @default(now())
+  durationMs Int      @default(0)
+  ok         Boolean  @default(true)
+  scanned    Int      @default(0)
+  acted      Int      @default(0)
+  error      String?
+  detail     Json?
+
+  @@index([sweep, startedAt])
+  @@index([startedAt])
+}

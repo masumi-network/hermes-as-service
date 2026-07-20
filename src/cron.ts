@@ -14,10 +14,38 @@ import { freshenSweepMirrors } from './schedules/system-schedules.js';
 
 const registered = new Map<string, cron.ScheduledTask>();
 
+/** In-memory tick registry surfaced on the admin Crons page: liveness +
+ * last result per cron, without a DB row per idle tick. Resets on deploy. */
+export interface CronInfo {
+  name: string;
+  expr: string;
+  lastTickAt: Date | null;
+  lastOk: boolean | null;
+  lastResult: Record<string, unknown> | null;
+  lastError: string | null;
+}
+const registry = new Map<string, CronInfo>();
+
+export function getCronRegistry(): CronInfo[] {
+  return Array.from(registry.values());
+}
+
+/** Pull the standard {scanned, <acted>} shape out of a sweep's return value. */
+function tickCounts(result: unknown): { scanned: number; acted: number } {
+  if (!result || typeof result !== 'object') return { scanned: 0, acted: 0 };
+  const obj = result as Record<string, unknown>;
+  const scanned = typeof obj['scanned'] === 'number' ? obj['scanned'] : 0;
+  const acted = Object.entries(obj)
+    .filter(([k, v]) => k !== 'scanned' && typeof v === 'number')
+    .reduce((sum, [, v]) => sum + (v as number), 0);
+  return { scanned, acted };
+}
+
 /**
  * Register a cron with the shared guard rails every sweep needs:
  * once-only registration, a try/catch so a transient error can never
  * become an unhandled rejection (node-cron does not await or catch),
+ * a durable SweepRun row for every NON-IDLE tick (admin Crons page),
  * and a best-effort freshen of the sweep's per-instance mirror rows so
  * the Sokosumi settings panel shows truthful last/next-run times.
  */
@@ -28,17 +56,46 @@ function register(
   mirrorSlug?: Parameters<typeof freshenSweepMirrors>[0],
 ): void {
   if (registered.has(name)) return;
+  const info: CronInfo = { name, expr, lastTickAt: null, lastOk: null, lastResult: null, lastError: null };
+  registry.set(name, info);
   registered.set(
     name,
     cron.schedule(
       expr,
       async () => {
+        const t0 = Date.now();
         let ok = false;
+        let result: unknown;
+        let errMsg: string | null = null;
         try {
-          await run();
+          result = await run();
           ok = true;
         } catch (err) {
+          errMsg = err instanceof Error ? err.message : String(err);
           logger.error({ err }, `${name}_threw`);
+        }
+        info.lastTickAt = new Date();
+        info.lastOk = ok;
+        info.lastResult = result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+        info.lastError = errMsg;
+        // Durable log for non-idle ticks (and every error) — idle ticks are
+        // skipped so the table stays small at high cadences.
+        const { scanned, acted } = tickCounts(result);
+        if (!ok || scanned > 0 || acted > 0) {
+          await prisma.sweepRun
+            .create({
+              data: {
+                sweep: name,
+                startedAt: new Date(t0),
+                durationMs: Date.now() - t0,
+                ok,
+                scanned,
+                acted,
+                error: errMsg,
+                detail: (info.lastResult ?? undefined) as object | undefined,
+              },
+            })
+            .catch((err) => logger.warn({ err, name }, 'sweep_run_log_failed'));
         }
         // Freshen mirrors only after a tick that actually ran — a crashed
         // sweep must not stamp a successful-looking "last run".

@@ -1612,6 +1612,150 @@ router.get('/admin/events', async (c) => {
   return c.html(layout({ title: 'Events', body, active: '/admin/events' }));
 });
 
+// ---------- Crons: what the background sweeps actually do ----------
+
+const CRON_EVENT_SOURCES = new Set([
+  'urgent_interrupt',
+  'urgent',
+  'input_responder',
+  'followup_continuation',
+  'task_augmentation',
+  'scheduler',
+  'cron',
+]);
+
+router.get('/admin/crons', async (c) => {
+  const user = c.req.query('user') ?? '';
+  const sweepFilter = c.req.query('sweep') ?? '';
+
+  const [ticks, rawEvents] = await Promise.all([
+    prisma.sweepRun.findMany({
+      where: sweepFilter ? { sweep: sweepFilter } : {},
+      orderBy: { startedAt: 'desc' },
+      take: 50,
+    }),
+    prisma.provisionEvent.findMany({
+      where: {
+        event: { in: ['chat_proxied', 'onboarding_step', 'eod_report_sent', 'outbox_pushed'] },
+        ...(user ? { userId: user } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 400,
+    }),
+  ]);
+
+  // Keep only events attributable to background cron work (the chat proxy
+  // also records chat_proxied for normal user chats — those carry no source).
+  const cronEvents = rawEvents
+    .filter((e) => {
+      const d = (e.detail ?? {}) as Record<string, unknown>;
+      if (e.event === 'eod_report_sent' || e.event === 'outbox_pushed') return true;
+      if (e.event === 'chat_proxied') return typeof d['source'] === 'string' && CRON_EVENT_SOURCES.has(String(d['source']));
+      if (e.event === 'onboarding_step') {
+        return d['step'] === 'inbox_refresh' || (d['step'] === 'sokosumi_sync' && d['source'] === 'cron');
+      }
+      return false;
+    })
+    .slice(0, 150);
+
+  const { getCronRegistry } = await import('../cron.js');
+  const registry = getCronRegistry();
+
+  const registryRows = registry
+    .map((r) => {
+      const result = r.lastResult ? esc(JSON.stringify(r.lastResult)) : '<span class="dim">—</span>';
+      const status = r.lastTickAt === null
+        ? '<span class="pill muted">no tick yet</span>'
+        : r.lastOk
+          ? '<span class="pill ok">ok</span>'
+          : `<span class="pill err" title="${esc(r.lastError ?? '')}">error</span>`;
+      return `<tr>
+        <td class="mono">${esc(r.name)}</td>
+        <td class="mono">${esc(r.expr)}</td>
+        <td class="mono">${r.lastTickAt ? esc(relTime(r.lastTickAt)) : '—'}</td>
+        <td>${status}</td>
+        <td class="mono" style="font-size:11px">${result}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const sweepNames = Array.from(new Set(registry.map((r) => r.name)));
+  const tickRows = ticks
+    .map((t) => `<tr>
+      <td class="mono" title="${esc(t.startedAt.toISOString())}">${esc(relTime(t.startedAt))}</td>
+      <td class="mono"><a href="/admin/crons?sweep=${encodeURIComponent(t.sweep)}">${esc(t.sweep)}</a></td>
+      <td class="mono">${esc(t.durationMs)}ms</td>
+      <td class="num">${esc(t.scanned)}</td>
+      <td class="num">${esc(t.acted)}</td>
+      <td>${t.ok ? '<span class="pill ok">ok</span>' : `<span class="pill err" title="${esc(t.error ?? '')}">error</span>`}</td>
+      <td class="mono" style="font-size:11px">${t.detail ? esc(JSON.stringify(t.detail)) : ''}</td>
+    </tr>`)
+    .join('');
+
+  const eventLabel = (e: (typeof cronEvents)[number]): string => {
+    const d = (e.detail ?? {}) as Record<string, unknown>;
+    if (e.event === 'outbox_pushed') return `pushed to chat (${esc(String(d['kind'] ?? 'text'))})`;
+    if (e.event === 'eod_report_sent') return 'EOD report delivered';
+    if (e.event === 'onboarding_step') return `${esc(String(d['step']))} ${esc(String(d['status'] ?? ''))}`;
+    return `${esc(String(d['source']))} agent turn`;
+  };
+  const eventDetail = (e: (typeof cronEvents)[number]): string => {
+    const d = (e.detail ?? {}) as Record<string, unknown>;
+    if (e.event === 'outbox_pushed') return esc(String(d['preview'] ?? ''));
+    const rest = { ...d };
+    delete rest['source'];
+    delete rest['preview'];
+    return esc(JSON.stringify(rest));
+  };
+  const eventRows = cronEvents
+    .map((e) => `<tr>
+      <td class="mono" title="${esc(e.createdAt.toISOString())}">${esc(relTime(e.createdAt))}</td>
+      <td><a class="mono" href="/admin/instances/${encodeURIComponent(e.userId)}">${esc(e.userId.slice(0, 14))}</a></td>
+      <td>${eventLabel(e)}</td>
+      <td class="mono" style="font-size:11px;max-width:520px;word-break:break-word">${eventDetail(e)}</td>
+    </tr>`)
+    .join('');
+
+  const body = `
+    <h1>Crons</h1>
+    <p class="dim">What the background sweeps and native cronjobs actually do. Registry state is in-memory (resets on deploy); tick history and agent activity are durable.</p>
+
+    <h2>Registered crons <span class="dim" style="font-weight:400;font-size:12px">(this process)</span></h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Cron</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last result</th></tr></thead>
+        <tbody>${registryRows || '<tr><td colspan="5" class="empty">No crons registered.</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <h2>Non-idle ticks <span class="dim" style="font-weight:400;font-size:12px">(idle ticks aren't logged)</span></h2>
+    <form method="get" action="/admin/crons" class="actions">
+      <select name="sweep">
+        <option value="">all sweeps</option>
+        ${sweepNames.map((n) => `<option value="${esc(n)}" ${n === sweepFilter ? 'selected' : ''}>${esc(n)}</option>`).join('')}
+      </select>
+      <input name="user" placeholder="filter activity by userId" value="${esc(user)}" style="min-width:280px" />
+      <button type="submit">Apply</button>
+      <a href="/admin/crons" style="margin-left:8px">Reset</a>
+    </form>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>When</th><th>Sweep</th><th>Duration</th><th>Scanned</th><th>Acted</th><th>Status</th><th>Detail</th></tr></thead>
+        <tbody>${tickRows || '<tr><td colspan="7" class="empty">No non-idle ticks recorded yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <h2>Cron-driven agent activity <span class="dim" style="font-weight:400;font-size:12px">(incl. native cronjob deliveries — durable even after Sokosumi acks them)</span></h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>When</th><th>User</th><th>What</th><th>Detail / preview</th></tr></thead>
+        <tbody>${eventRows || '<tr><td colspan="4" class="empty">Nothing yet — activity appears as the sweeps and native crons run.</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+  return c.html(layout({ title: 'Crons', body, active: '/admin/crons' }));
+});
+
 // ---------- Usage: LLM spend/token analytics ----------
 
 router.get('/admin/usage', async (c) => {
