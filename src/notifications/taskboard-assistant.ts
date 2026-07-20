@@ -256,23 +256,23 @@ function buildTaskboardPrompt(tasks: BoardTask[], autonomy: 'medium' | 'high'): 
 
   const gatingNote =
     autonomy === 'high'
-      ? 'At your autonomy level your comment/input tools execute immediately — so YOU are responsible for the sensitivity judgment below.'
-      : 'At your autonomy level every comment or input you fire raises a confirmation card for the user to approve first — that is expected and is itself the "ask the user" step; fire the tool, then stop.';
+      ? 'At high autonomy this executes immediately — you own the call.'
+      : 'At medium, firing it raises an approval card for the user — that IS the check-with-the-user step; fire it, then stop.';
 
-  return `Internal task — your reply text here is discarded; act through tools only.
+  return `Internal task — reply discarded; act through tools only.
 
-These are tasks on the user's OWN Sokosumi board that need your attention (you'll only be shown each one once, so handle it now):
+Your own tasks that just changed (handle each once, now):
 ${block}
 
-For EACH task, do the right thing based on its state:
+A task COMMENT is read by the coworker doing that task, NOT the user. Write every comment as direction to the coworker. To reach the USER, message them in chat with your outbox-send skill — NEVER put a message meant for the user in a task comment.
 
-NEWLY CREATED tasks — decide whether you have genuinely useful context to add as a comment. Check your memory, connected mail/calendar tools, and prior Sokosumi work (sokosumi_get_task, sokosumi_list_jobs). Only comment if you have real substance the task creator might not have considered (a relevant email thread, prior research, a deadline, a person worth involving). If you have nothing useful, do NOT comment — silence beats noise. Use sokosumi_add_task_comment(task_id, comment) — lead with the substance, cite sources briefly.
+NEW task → comment ONLY if you have real, specific context the creator may have missed (an email thread, prior research, a deadline, a person to involve). Otherwise skip — silence beats noise.
 
-INPUT-REQUIRED tasks — help the task CONTINUE. First call sokosumi_get_task to see exactly what input the paused job is asking for.
- - If you can answer EVERY required field from real, sourced context (the task's purpose, the user's earlier instructions, your memory, prior results) AND the answer is NOT sensitive — provide it so the job resumes (use the task's job input request → sokosumi_provide_job_input). ${gatingNote}
- - If the input is SENSITIVE or a genuine human judgment (a decision the user should make, a preference you don't know, anything involving money/credentials/publishing/external commitments) — do NOT answer it yourself. Add a short comment on the task noting what input is needed and what you'd suggest, so the user (and the coworker) can see your take, and leave the actual decision to the user.
+INPUT_REQUIRED task → the coworker is blocked. sokosumi_get_task shows what they asked for.
+ - Can you settle it from real context (the task's purpose, the user's instructions, your memory, prior results)? Then unblock the coworker: sokosumi_provide_job_input, or a comment telling them how to proceed. ${gatingNote}
+ - Is it genuinely the user's call (money, publishing, external commitments, a preference you can't source)? Don't guess and don't bury it in a task comment — message the USER in chat (outbox-send) with the options and your recommendation, then stop.
 
-HARD LIMITS: allowed tools are sokosumi_get_task, sokosumi_get_job, sokosumi_get_job_input_request, sokosumi_list_jobs, sokosumi_add_task_comment, sokosumi_provide_job_input, and your memory/mail/calendar tools. Do NOT create new tasks, do NOT start jobs, do NOT spend credits. When in doubt on an input, comment and ask rather than guess.
+Tools: sokosumi_get_task / get_job / get_job_input_request / list_jobs, sokosumi_add_task_comment, sokosumi_provide_job_input, memory/mail/calendar. Don't create tasks, start jobs, or spend credits.
 
-If nothing on this list warrants any action, reply "skip".`;
+Nothing warrants action? Reply "skip".`;
 }
