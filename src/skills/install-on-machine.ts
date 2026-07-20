@@ -110,8 +110,12 @@ export function prepareSkill(
 // decoded once — so we append raw base64 chunks and `base64 -d` the whole
 // temp per file. base64 payloads contain only [A-Za-z0-9+/=]; dir/paths are
 // pre-validated to a safe charset — nothing here is shell-injectable.
-const MAX_B64_CHUNK = 16 * 1024; // max base64 chars per single printf line
-const MAX_EXEC_BYTES = 24 * 1024; // max command length per exec
+// Fly's guest exec endpoint has a SMALL per-request body limit (empirically
+// well under 24KB — even a single ~20KB command is rejected PayloadTooLarge).
+// Keep both very conservative; a skill is materialized across however many
+// tiny execs it takes.
+const MAX_B64_CHUNK = 3 * 1024; // max base64 chars per single printf line
+const MAX_EXEC_BYTES = 4 * 1024; // max command length per exec
 
 /** Ordered shell steps that build the skill in `staging` then swap it live.
  *  No single step exceeds MAX_B64_CHUNK+overhead. Pure (testable). */

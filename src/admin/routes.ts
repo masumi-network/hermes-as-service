@@ -2235,6 +2235,51 @@ router.post('/admin/instances/:userId/skills/replay', async (c) => {
   }
 });
 
+/**
+ * Admin diagnostic — probe the Fly guest exec payload limit on a live
+ * machine. Runs `wc -c` over a payload of ?bytes, via the command inline
+ * (?mode=cmd, default) or via stdin (?mode=stdin). Reports exitCode +
+ * output so we can binary-search where PayloadTooLarge starts and whether
+ * stdin has more headroom than the command field.
+ */
+router.get('/admin/instances/:userId/skills/exec-probe', async (c) => {
+  const userId = c.req.param('userId');
+  const bytes = Math.min(Math.max(Number(c.req.query('bytes') ?? 1024), 1), 300_000);
+  const mode = c.req.query('mode') === 'stdin' ? 'stdin' : 'cmd';
+  const row = await prisma.hermesInstance.findUnique({
+    where: { userId },
+    select: { spriteName: true, spriteId: true },
+  });
+  if (!row?.spriteName || !row?.spriteId) return c.json({ error: 'no machine' }, 404);
+  const { FlyClient } = await import('../fly/client.js');
+  const payload = 'A'.repeat(bytes);
+  try {
+    const res =
+      mode === 'stdin'
+        ? await new FlyClient().execMachine(row.spriteName, row.spriteId, ['/bin/sh', '-c', 'wc -c'], {
+            stdin: payload,
+            timeoutSec: 20,
+          })
+        : await new FlyClient().execMachine(
+            row.spriteName,
+            row.spriteId,
+            ['/bin/sh', '-c', `printf %s '${payload}' | wc -c`],
+            { timeoutSec: 20 },
+          );
+    const rejected = /PayloadTooLarge|Rejection/.test(res.stdout + res.stderr);
+    return c.json({
+      mode,
+      bytes,
+      exitCode: res.exitCode,
+      rejected,
+      stdout: res.stdout.slice(0, 200),
+      stderr: res.stderr.slice(0, 200),
+    });
+  } catch (err) {
+    return c.json({ mode, bytes, error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
 // ---------- Tests: run standard-chat suites + compare across images ----------
 
 router.get('/admin/tests', async (c) => {
