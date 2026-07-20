@@ -37,7 +37,7 @@ import {
   startSokosumiDailySyncCron,
   startInboxRefreshCron,
   startUrgentInterruptCron,
-  startTaskAugmentationCron,
+  startTaskboardAssistantCron,
   startInputResponderCron,
   startEodReportCron,
   startPoolReplenishCron,
@@ -108,7 +108,7 @@ startIdleSuspendCron();
 startSokosumiDailySyncCron();
 startInboxRefreshCron();
 startUrgentInterruptCron();
-startTaskAugmentationCron();
+startTaskboardAssistantCron();
 startInputResponderCron();
 startEodReportCron();
 startPoolReplenishCron();

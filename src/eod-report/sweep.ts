@@ -246,7 +246,7 @@ export function aggregateCrons(
         if (source === 'urgent_interrupt') {
           stats.urgent.ran++;
           stats.urgent.lastDetail = `${detail.events ?? 0} event(s) considered`;
-        } else if (source === 'task_augmentation') {
+        } else if (source === 'task_augmentation' || source === 'taskboard_assistant') {
           stats.taskAugmentation.ran++;
           const scanned = Number(detail.scanned ?? 0);
           const commented = Number(detail.commented ?? 0);

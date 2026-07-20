@@ -5,7 +5,7 @@ import { loadConfig } from './config.js';
 import { runSokosumiDailySweep } from './sokosumi/sync.js';
 import { runInboxRefreshSweep } from './inbox/refresh.js';
 import { runUrgentInterruptSweep } from './notifications/urgent.js';
-import { runTaskAugmentationSweep } from './notifications/augment.js';
+import { runTaskboardAssistantSweep } from './notifications/taskboard-assistant.js';
 import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
@@ -167,14 +167,15 @@ export function startUrgentInterruptCron(): void {
 }
 
 /**
- * Hourly cron — task augmentation for HIGH-autonomy users only. Picks up
- * newly-created Sokosumi tasks since the user's lastTaskAugmentationAt,
- * asks Hermes to evaluate each one and (if it has useful context) post
- * a comment. Comments are free; LLM gating costs ~$0.001 per evaluated
- * task. Skips users at low/medium autonomy entirely.
+ * Every 5 minutes (staggered off input-responder) — taskboard assistant for
+ * medium+ users. Watches the user's own tasks: comments on new ones with
+ * useful context, and helps INPUT_REQUIRED tasks continue (answer if clear
+ * + safe, else comment + flag to the user). Task-driven so it sees
+ * coworker-run work the job sweeps can't. Only prompts the agent when a
+ * task actually changed; idle instances cost just the list call.
  */
-export function startTaskAugmentationCron(): void {
-  register('task_augmentation_cron', '45 * * * *', runTaskAugmentationSweep, 'task-augmentation');
+export function startTaskboardAssistantCron(): void {
+  register('taskboard_assistant_cron', '4-59/5 * * * *', runTaskboardAssistantSweep, 'taskboard-assistant');
 }
 
 /**

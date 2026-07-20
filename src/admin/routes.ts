@@ -1668,6 +1668,7 @@ const CRON_EVENT_SOURCES = new Set([
   'input_responder',
   'followup_continuation',
   'task_augmentation',
+  'taskboard_assistant',
   'scheduler',
   'cron',
 ]);

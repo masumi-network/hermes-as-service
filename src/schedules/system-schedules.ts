@@ -79,14 +79,15 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     minAutonomy: 'low',
   },
   {
-    slug: 'task-augmentation',
+    slug: 'taskboard-assistant',
     kind: 'system_sweep',
-    name: 'Auto-comment on new tasks',
+    name: 'Taskboard assistant',
     description:
-      'Hourly pass: Hermes reads new tasks on your board and adds useful context (relevant emails, prior work, your preferences) as a comment when it has something to add.',
-    cronExpr: '45 * * * *',
+      'Every 5 minutes: Hermes watches your taskboard. On new tasks it adds useful context as a comment when it has something to add; on tasks waiting for input it helps them continue — answering when it can source the answer safely, or leaving a comment and flagging you when the input is a judgment call. (Medium autonomy: each comment/answer is a confirmation card; high: it acts directly.)',
+    cronExpr: '4-59/5 * * * *',
     localTime: false,
-    minAutonomy: 'high',
+    minAutonomy: 'medium',
+    requires: (ctx) => ctx.sokosumiConfigured,
   },
   {
     slug: 'input-responder',
@@ -136,6 +137,45 @@ export async function syncSystemSchedules(ctx: SyncContext): Promise<{
     (s) => AUTONOMY_RANK[ctx.autonomy] >= AUTONOMY_RANK[s.minAutonomy] && (s.requires?.(ctx) ?? true),
   );
   const eligibleIds = new Set(eligible.map((s) => systemRowId(s.slug, ctx.instanceId)));
+
+  // One-time slug migration: task-augmentation → taskboard-assistant.
+  // Carry the user's enabled/disabled toggle across so a prior opt-out isn't
+  // silently lost when the old row is deleted below and the new one is
+  // created enabled-by-default.
+  const oldAugmentId = systemRowId('task-augmentation', ctx.instanceId);
+  const newBoardId = systemRowId('taskboard-assistant', ctx.instanceId);
+  const oldAugment = await prisma.scheduledTask.findUnique({
+    where: { id: oldAugmentId },
+    select: { enabled: true },
+  });
+  if (oldAugment && !oldAugment.enabled) {
+    const newRow = await prisma.scheduledTask.findUnique({ where: { id: newBoardId }, select: { id: true } });
+    if (newRow) {
+      await prisma.scheduledTask.update({ where: { id: newBoardId }, data: { enabled: false } });
+    } else {
+      // New row not created yet — stash the intent by pre-creating a disabled
+      // placeholder the upsert below will keep (its update block never touches
+      // enabled). Uses the current spec's cadence so nextRunAt is sane.
+      const boardSpec = SYSTEM_SCHEDULES.find((s) => s.slug === 'taskboard-assistant');
+      if (boardSpec) {
+        await prisma.scheduledTask.create({
+          data: {
+            id: newBoardId,
+            instanceId: ctx.instanceId,
+            userId: ctx.userId,
+            kind: 'system_sweep',
+            name: boardSpec.name,
+            description: boardSpec.description,
+            prompt: `[orchestrator] ${boardSpec.name}`,
+            cronExpr: boardSpec.cronExpr,
+            timezone: 'UTC',
+            enabled: false,
+            nextRunAt: safeNextRun(boardSpec.cronExpr, 'UTC', new Date()) ?? new Date(Date.now() + 3_600_000),
+          },
+        }).catch(() => {});
+      }
+    }
+  }
 
   const existing = await prisma.scheduledTask.findMany({
     where: { instanceId: ctx.instanceId, kind: { in: ['system_sweep', 'system_prompt'] } },
@@ -206,7 +246,7 @@ export async function freshenSweepMirrors(
     | 'sokosumi-sync'
     | 'inbox-refresh'
     | 'urgent-interrupts'
-    | 'task-augmentation'
+    | 'taskboard-assistant'
     | 'input-responder'
     | 'eod-report',
 ): Promise<void> {
@@ -245,7 +285,7 @@ export async function isSystemSweepEnabled(
     | 'sokosumi-sync'
     | 'inbox-refresh'
     | 'urgent-interrupts'
-    | 'task-augmentation'
+    | 'taskboard-assistant'
     | 'input-responder'
     | 'eod-report',
 ): Promise<boolean> {
