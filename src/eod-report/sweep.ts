@@ -25,7 +25,7 @@ export interface OutboxStat {
  * received today's report, builds a per-user roll-up of:
  *
  *   - Orchestrator-side sweeps (inbox refresh, sokosumi sync, urgent
- *     interrupts, task augmentation, hermes executor) — counts pulled from
+ *     interrupts, task augmentation) — counts pulled from
  *     ProvisionEvent in the last 24h.
  *   - Machine-side native crons — counts pulled from the user's outbox
  *     (research_intro / daily_suggestions / daily_brief / task_result).
@@ -130,7 +130,6 @@ export function composeSummary(
   lines.push(renderCron('Sokosumi sync', cronStats.sokosumiSync));
   lines.push(renderCron('Urgent interrupts', cronStats.urgent, 'check'));
   lines.push(renderCron('Task augmentation', cronStats.taskAugmentation, 'pass'));
-  lines.push(renderCron('Personal-board executor', cronStats.hermesExecutor, 'task'));
 
   const hasOutbox =
     outboxStats.researchIntro.count +
@@ -205,7 +204,6 @@ export interface AggregatedCrons {
   sokosumiSync: CronStat;
   urgent: CronStat;
   taskAugmentation: CronStat;
-  hermesExecutor: CronStat;
   totalFailed: number;
 }
 
@@ -217,7 +215,6 @@ export function aggregateCrons(
     sokosumiSync: { ran: 0, failed: 0 },
     urgent: { ran: 0, failed: 0 },
     taskAugmentation: { ran: 0, failed: 0 },
-    hermesExecutor: { ran: 0, failed: 0 },
     totalFailed: 0,
   };
 
@@ -257,14 +254,6 @@ export function aggregateCrons(
         }
         break;
       }
-      case 'hermes_task_picked':
-        stats.hermesExecutor.ran++;
-        if (detail.taskName) stats.hermesExecutor.lastDetail = String(detail.taskName);
-        break;
-      case 'hermes_task_failed':
-        stats.hermesExecutor.failed++;
-        stats.totalFailed++;
-        break;
     }
   }
   return stats;

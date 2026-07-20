@@ -89,16 +89,6 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     minAutonomy: 'high',
   },
   {
-    slug: 'hermes-executor',
-    kind: 'system_sweep',
-    name: 'Personal-board task executor',
-    description:
-      'Every 5 minutes: scans your personal Sokosumi board for tasks you assigned directly to Hermes (status READY). When one is found, Hermes works through it end-to-end and posts the result as a comment, marking the task COMPLETED. Preprod only for now.',
-    cronExpr: '*/5 * * * *',
-    localTime: false,
-    minAutonomy: 'low',
-  },
-  {
     slug: 'input-responder',
     kind: 'system_sweep',
     name: 'Auto-answer input requests',
@@ -303,7 +293,6 @@ export async function isSystemSweepEnabled(
     | 'inbox-refresh'
     | 'urgent-interrupts'
     | 'task-augmentation'
-    | 'hermes-executor'
     | 'input-responder'
     | 'eod-report',
 ): Promise<boolean> {

@@ -6,7 +6,6 @@ import { runSokosumiDailySweep } from './sokosumi/sync.js';
 import { runInboxRefreshSweep } from './inbox/refresh.js';
 import { runUrgentInterruptSweep } from './notifications/urgent.js';
 import { runTaskAugmentationSweep } from './notifications/augment.js';
-import { runHermesExecutorSweep } from './notifications/hermes-executor.js';
 import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
@@ -16,7 +15,6 @@ let sokosumiScheduled: cron.ScheduledTask | null = null;
 let inboxRefreshScheduled: cron.ScheduledTask | null = null;
 let urgentInterruptScheduled: cron.ScheduledTask | null = null;
 let taskAugmentationScheduled: cron.ScheduledTask | null = null;
-let hermesExecutorScheduled: cron.ScheduledTask | null = null;
 let inputResponderScheduled: cron.ScheduledTask | null = null;
 let eodReportScheduled: cron.ScheduledTask | null = null;
 let poolReplenishScheduled: cron.ScheduledTask | null = null;
@@ -168,39 +166,7 @@ export function stopTaskAugmentationCron(): void {
 }
 
 /**
- * Every 5 minutes — Hermes-as-executor sweep. Scans each user's
- * PERSONAL Sokosumi board for tasks in status READY assigned to the
- * Hermes coworker. For each such task, runs the description as a
- * chat prompt and posts the result as the completion comment.
- *
- * Gated to preprod only (Patrick's flag). Skips cron-mirror tasks
- * (those prefixed "Cron · ") so we don't double-process them.
- */
-export function startHermesExecutorCron(): void {
-  if (hermesExecutorScheduled) return;
-  hermesExecutorScheduled = cron.schedule(
-    '*/5 * * * *',
-    async () => {
-      try {
-        await runHermesExecutorSweep();
-      } catch (err) {
-        logger.error({ err }, 'hermes_executor_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('hermes_executor_cron_started');
-}
-
-export function stopHermesExecutorCron(): void {
-  if (hermesExecutorScheduled) {
-    hermesExecutorScheduled.stop();
-    hermesExecutorScheduled = null;
-  }
-}
-
-/**
- * Every 5 minutes (staggered from the executor) — input-responder sweep.
+ * Every 5 minutes — input-responder sweep.
  * Detects Sokosumi jobs paused in AWAITING_INPUT and, at medium/high autonomy,
  * drives Hermes to answer them (high = submit immediately, medium = raise a
  * confirmation card). Low autonomy is skipped (urgent-interrupts notifies).

@@ -23,7 +23,6 @@ import {
   startInboxRefreshCron,
   startUrgentInterruptCron,
   startTaskAugmentationCron,
-  startHermesExecutorCron,
   startInputResponderCron,
   startEodReportCron,
   startPoolReplenishCron,
@@ -94,7 +93,6 @@ startSokosumiDailySyncCron();
 startInboxRefreshCron();
 startUrgentInterruptCron();
 startTaskAugmentationCron();
-startHermesExecutorCron();
 startInputResponderCron();
 startEodReportCron();
 startPoolReplenishCron();

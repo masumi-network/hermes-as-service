@@ -91,25 +91,12 @@ describe('aggregateCrons', () => {
     expect(stats.taskAugmentation.lastDetail).toBe('5 scanned, 2 commented');
   });
 
-  it('counts hermes executor picks and failures', () => {
-    const stats = aggregateCrons([
-      { event: 'hermes_task_picked', detail: { taskId: 't1', taskName: 'Draft reply' }, createdAt: day },
-      { event: 'hermes_task_picked', detail: { taskId: 't2', taskName: 'Summarize PR' }, createdAt: day },
-      { event: 'hermes_task_failed', detail: { taskId: 't3', error: 'timeout' }, createdAt: day },
-    ]);
-    expect(stats.hermesExecutor.ran).toBe(2);
-    expect(stats.hermesExecutor.failed).toBe(1);
-    expect(stats.hermesExecutor.lastDetail).toBe('Summarize PR');
-    expect(stats.totalFailed).toBe(1);
-  });
-
   it('ignores unrelated events', () => {
     const stats = aggregateCrons([
       { event: 'integration_connected', detail: { provider: 'gmail' }, createdAt: day },
       { event: 'resumed', detail: {}, createdAt: day },
     ]);
     expect(stats.inboxRefresh.ran).toBe(0);
-    expect(stats.hermesExecutor.ran).toBe(0);
   });
 });
 
@@ -182,9 +169,6 @@ describe('renderCron', () => {
     expect(renderCron('Urgent interrupts', { ran: 5, failed: 0 }, 'check')).toBe(
       '- Urgent interrupts: 5 checks',
     );
-    expect(renderCron('Personal-board executor', { ran: 1, failed: 0 }, 'task')).toBe(
-      '- Personal-board executor: 1 task',
-    );
   });
 });
 
@@ -219,7 +203,6 @@ describe('composeSummary', () => {
     expect(out).toContain('- Sokosumi sync: _no activity_');
     expect(out).toContain('- Urgent interrupts: _no activity_');
     expect(out).toContain('- Task augmentation: _no activity_');
-    expect(out).toContain('- Personal-board executor: _no activity_');
     expect(out).not.toContain('_Messages sent to your chat today_');
     expect(out).not.toContain('failure');
   });
@@ -252,20 +235,28 @@ describe('composeSummary', () => {
   it('appends a failure footer when totalFailed > 0', () => {
     const events = [
       {
-        event: 'hermes_task_failed',
-        detail: { taskId: 't1', error: 'timeout' },
+        event: 'onboarding_step',
+        detail: { step: 'sokosumi_sync', status: 'failed', source: 'cron' },
         createdAt: startOfDay,
       },
     ];
     const out = composeSummary(events, [], startOfDay, tz);
-    expect(out).toContain('- Personal-board executor: 1 failed');
+    expect(out).toContain('- Sokosumi sync: 1 failed');
     expect(out).toContain('_1 failure today');
   });
 
   it('pluralizes the failure footer for >1', () => {
     const events = [
-      { event: 'hermes_task_failed', detail: {}, createdAt: startOfDay },
-      { event: 'hermes_task_failed', detail: {}, createdAt: startOfDay },
+      {
+        event: 'onboarding_step',
+        detail: { step: 'sokosumi_sync', status: 'failed', source: 'cron' },
+        createdAt: startOfDay,
+      },
+      {
+        event: 'onboarding_step',
+        detail: { step: 'inbox_refresh', status: 'failed', source: 'cron' },
+        createdAt: startOfDay,
+      },
     ];
     const out = composeSummary(events, [], startOfDay, tz);
     expect(out).toContain('_2 failures today');
