@@ -61,14 +61,26 @@ describe('skill install chunking', () => {
     }
   });
 
-  it('the atomic swap (mv) is the last step, in the final exec', () => {
+  it('rm+mv swap is a single last step, in the final exec, not split', () => {
     const prepared = makePrepared([{ path: 'SKILL.md', contents: 'z'.repeat(60 * 1024) }]);
     const steps = buildInstallSteps(prepared);
-    expect(steps[steps.length - 1]).toMatch(/^mv ".+" ".+"$/);
+    // The destroy + swap are ONE step so they can never split across execs.
+    expect(steps[steps.length - 1]).toMatch(/^rm -rf ".+" && mv ".+" ".+"$/);
     const execs = packInstallExecs(steps);
-    expect(execs[execs.length - 1]).toContain('mv ');
-    // No non-final exec performs the swap.
-    for (let i = 0; i < execs.length - 1; i++) expect(execs[i]).not.toContain('\nmv ');
+    expect(execs[execs.length - 1]).toContain('&& mv ');
+    for (let i = 0; i < execs.length - 1; i++) expect(execs[i]).not.toContain('mv ');
+  });
+
+  it('the b64 temp lives outside the staging tree (no sibling-file collision)', () => {
+    // A skill file whose name ends in .b64 must NOT be clobbered by the temp.
+    const prepared = makePrepared([
+      { path: 'SKILL.md', contents: '# s' },
+      { path: 'data.b64', contents: 'AAAA' },
+    ]);
+    const decoded = simulate(packInstallExecs(buildInstallSteps(prepared)));
+    const dataFile = [...decoded.keys()].find((k) => k.endsWith('/data.b64'));
+    expect(dataFile, 'data.b64 survived').toBeTruthy();
+    expect(decoded.get(dataFile!)).toBe('AAAA');
   });
 
   it('a tiny skill fits in a single exec', () => {

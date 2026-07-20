@@ -118,10 +118,13 @@ const MAX_EXEC_BYTES = 24 * 1024; // max command length per exec
 export function buildInstallSteps(prepared: PreparedSkill): string[] {
   const dir = `${SKILLS_ROOT}/${prepared.dir}`;
   const staging = `${SKILLS_ROOT}/.staging-${prepared.dir}`;
-  const steps: string[] = [`rm -rf "${staging}"`, `mkdir -p "${staging}"`];
+  // The b64 temp lives OUTSIDE the staging tree so it can never collide with
+  // a skill file named "<x>.b64" (which would otherwise be truncated/deleted
+  // as another file's temp). Reused across files (truncated per file).
+  const tmp = `${staging}.b64tmp`;
+  const steps: string[] = [`rm -rf "${staging}" "${tmp}"`, `mkdir -p "${staging}"`];
   for (const f of prepared.files) {
     const filePath = `${staging}/${f.path}`;
-    const tmp = `${filePath}.b64`;
     const slash = f.path.lastIndexOf('/');
     if (slash !== -1) steps.push(`mkdir -p "${staging}/${f.path.slice(0, slash)}"`);
     steps.push(`: > "${tmp}"`); // create/truncate the temp
@@ -130,11 +133,12 @@ export function buildInstallSteps(prepared: PreparedSkill): string[] {
       steps.push(`printf %s '${b64.slice(i, i + MAX_B64_CHUNK)}' >> "${tmp}"`);
     }
     steps.push(`base64 -d < "${tmp}" > "${filePath}"`);
-    steps.push(`rm -f "${tmp}"`);
   }
+  steps.push(`rm -f "${tmp}"`);
   steps.push(`chmod -R a+rX "${staging}"`);
-  steps.push(`rm -rf "${dir}"`);
-  steps.push(`mv "${staging}" "${dir}"`); // atomic swap — last content step
+  // Swap in ONE step so `rm -rf dir` and `mv` can never split across execs
+  // (a split could delete the live skill then fail before replacing it).
+  steps.push(`rm -rf "${dir}" && mv "${staging}" "${dir}"`);
   return steps;
 }
 
@@ -163,43 +167,77 @@ export function packInstallExecs(steps: string[], budget = MAX_EXEC_BYTES): stri
 const BATCH_SENTINEL = 'SKILL_BATCH_OK';
 
 /**
+ * Serialize skill mutations per (machine, slug). The staging path is
+ * deterministic per slug, so two concurrent write/remove sequences for the
+ * same skill would race on it (one truncating the temp another is decoding,
+ * or one rm-ing staging another is mv-ing) → corruption. With a single
+ * orchestrator replica (see warm-pool design), an in-process mutex is a
+ * complete fix. Callers overlap in practice: an install POST, the
+ * provision-time replay, and the admin replay endpoint can all fire at once.
+ */
+const skillLocks = new Map<string, Promise<unknown>>();
+function withSkillLock<T>(appName: string, machineId: string, slug: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${machineId}:${slug}`;
+  const prev = skillLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  // Tail swallows errors so a failed op doesn't wedge the chain; prune when
+  // this op is the last in line so the map doesn't grow unbounded.
+  const tail = run.then(
+    () => {},
+    () => {},
+  );
+  skillLocks.set(key, tail);
+  void tail.then(() => {
+    if (skillLocks.get(key) === tail) skillLocks.delete(key);
+  });
+  return run;
+}
+
+/**
  * Push a prepared skill onto the running machine as a sequence of bounded
  * execs. The live dir is only swapped in the FINAL exec, so a mid-sequence
  * failure leaves the existing skill untouched (staging is separate). Throws
- * on the first batch that doesn't report the sentinel.
+ * on the first batch that doesn't report the sentinel. Serialized per skill.
  */
 export async function writeSkillToMachine(
   appName: string,
   machineId: string,
   prepared: PreparedSkill,
 ): Promise<void> {
-  const fly = new FlyClient();
-  const execs = packInstallExecs(buildInstallSteps(prepared));
-  for (let i = 0; i < execs.length; i++) {
-    const res = await fly.execMachine(appName, machineId, ['/bin/sh', '-c', execs[i]!], {
-      timeoutSec: 30,
-    });
-    if (res.exitCode !== 0 || !res.stdout.includes(BATCH_SENTINEL)) {
-      const msg = (res.stderr || res.stdout || '').slice(0, 300);
-      throw new Error(
-        `skill install exec failed (batch ${i + 1}/${execs.length}, exit ${res.exitCode}): ${msg}`,
-      );
+  return withSkillLock(appName, machineId, prepared.slug, async () => {
+    const fly = new FlyClient();
+    const execs = packInstallExecs(buildInstallSteps(prepared));
+    for (let i = 0; i < execs.length; i++) {
+      const res = await fly.execMachine(appName, machineId, ['/bin/sh', '-c', execs[i]!], {
+        timeoutSec: 30,
+      });
+      if (res.exitCode !== 0 || !res.stdout.includes(BATCH_SENTINEL)) {
+        const msg = (res.stderr || res.stdout || '').slice(0, 300);
+        throw new Error(
+          `skill install exec failed (batch ${i + 1}/${execs.length}, exit ${res.exitCode}): ${msg}`,
+        );
+      }
     }
-  }
-  logger.info({ appName, machineId, dir: prepared.dir, batches: execs.length }, 'skill_written_to_machine');
+    logger.info({ appName, machineId, dir: prepared.dir, batches: execs.length }, 'skill_written_to_machine');
+  });
 }
 
-/** Remove a marketplace skill dir from the running machine. Best-effort. */
+/** Remove a marketplace skill dir (and any leftover staging/temp) from the
+ *  running machine. Best-effort. Serialized against writes for the same skill. */
 export async function removeSkillFromMachine(
   appName: string,
   machineId: string,
   slug: string,
 ): Promise<void> {
-  const dir = `${SKILLS_ROOT}/${MARKETPLACE_PREFIX}${sanitizeSlug(slug)}`;
-  await new FlyClient().execMachine(
-    appName,
-    machineId,
-    ['/bin/sh', '-c', `rm -rf "${dir}" && echo SKILL_REMOVE_OK`],
-    { timeoutSec: 20 },
+  const safe = sanitizeSlug(slug);
+  const dir = `${SKILLS_ROOT}/${MARKETPLACE_PREFIX}${safe}`;
+  const staging = `${SKILLS_ROOT}/.staging-${MARKETPLACE_PREFIX}${safe}`;
+  await withSkillLock(appName, machineId, safe, () =>
+    new FlyClient().execMachine(
+      appName,
+      machineId,
+      ['/bin/sh', '-c', `rm -rf "${dir}" "${staging}" "${staging}.b64tmp" && echo SKILL_REMOVE_OK`],
+      { timeoutSec: 20 },
+    ),
   );
 }
