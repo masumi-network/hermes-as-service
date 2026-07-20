@@ -78,10 +78,12 @@ function register(
         info.lastOk = ok;
         info.lastResult = result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
         info.lastError = errMsg;
-        // Durable log for non-idle ticks (and every error) — idle ticks are
-        // skipped so the table stays small at high cadences.
+        // Durable log only for ticks that DID something (acted>0) or
+        // errored. Scanned-but-idle ticks (the common case: the 5-min sweep
+        // scans every instance and finds nothing) stay out of the table —
+        // liveness lives in the in-memory registry.
         const { scanned, acted } = tickCounts(result);
-        if (!ok || scanned > 0 || acted > 0) {
+        if (!ok || acted > 0) {
           await prisma.sweepRun
             .create({
               data: {

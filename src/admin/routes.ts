@@ -681,6 +681,20 @@ router.get('/admin/instances/:userId', async (c) => {
     orderBy: { createdAt: 'asc' },
     take: 50,
   });
+  // This user's cron-driven activity: sweep agent turns, memory refreshes,
+  // and native cronjob deliveries (durable outbox_pushed previews).
+  const cronActivity = (
+    await prisma.provisionEvent.findMany({
+      where: {
+        userId: row.userId,
+        event: { in: ['chat_proxied', 'onboarding_step', 'eod_report_sent', 'outbox_pushed'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 120,
+    })
+  )
+    .filter(isCronDrivenEvent)
+    .slice(0, 25);
   const capPct = (mtdSpend / cfg.MONTHLY_USD_CAP_PER_USER) * 100;
   const capPill =
     capPct >= 100
@@ -866,6 +880,22 @@ router.get('/admin/instances/:userId', async (c) => {
                 </td>
               </tr>
             `).join('')}
+          </tbody>
+        </table>
+      `}
+    </div>
+
+    <h2>Cron activity <a href="/admin/crons?user=${encodeURIComponent(row.userId)}" style="font-weight:400;font-size:12px">full history →</a></h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      ${cronActivity.length === 0 ? '<div class="empty">No cron-driven activity for this user yet — briefs, sweep agent turns and native cron deliveries appear here as they happen.</div>' : `
+        <table>
+          <thead><tr><th>When</th><th>What</th><th>Detail / preview</th></tr></thead>
+          <tbody>
+            ${cronActivity.map((e) => `<tr>
+              <td class="mono" title="${esc(e.createdAt.toISOString())}">${esc(relTime(e.createdAt))}</td>
+              <td>${cronEventLabel(e)}</td>
+              <td class="mono" style="font-size:11px;max-width:560px;word-break:break-word">${cronEventDetail(e)}</td>
+            </tr>`).join('')}
           </tbody>
         </table>
       `}
@@ -1624,6 +1654,35 @@ const CRON_EVENT_SOURCES = new Set([
   'cron',
 ]);
 
+/** Events attributable to background cron work (the chat proxy also records
+ * chat_proxied for normal user chats — those carry no source marker). */
+function isCronDrivenEvent(e: { event: string; detail: unknown }): boolean {
+  const d = (e.detail ?? {}) as Record<string, unknown>;
+  if (e.event === 'eod_report_sent' || e.event === 'outbox_pushed') return true;
+  if (e.event === 'chat_proxied') return typeof d['source'] === 'string' && CRON_EVENT_SOURCES.has(String(d['source']));
+  if (e.event === 'onboarding_step') {
+    return d['step'] === 'inbox_refresh' || (d['step'] === 'sokosumi_sync' && d['source'] === 'cron');
+  }
+  return false;
+}
+
+function cronEventLabel(e: { event: string; detail: unknown }): string {
+  const d = (e.detail ?? {}) as Record<string, unknown>;
+  if (e.event === 'outbox_pushed') return `pushed to chat (${esc(String(d['kind'] ?? 'text'))})`;
+  if (e.event === 'eod_report_sent') return 'EOD report delivered';
+  if (e.event === 'onboarding_step') return `${esc(String(d['step']))} ${esc(String(d['status'] ?? ''))}`;
+  return `${esc(String(d['source']))} agent turn`;
+}
+
+function cronEventDetail(e: { event: string; detail: unknown }): string {
+  const d = (e.detail ?? {}) as Record<string, unknown>;
+  if (e.event === 'outbox_pushed') return esc(String(d['preview'] ?? ''));
+  const rest = { ...d };
+  delete rest['source'];
+  delete rest['preview'];
+  return esc(JSON.stringify(rest));
+}
+
 router.get('/admin/crons', async (c) => {
   const user = c.req.query('user') ?? '';
   const sweepFilter = c.req.query('sweep') ?? '';
@@ -1644,19 +1703,7 @@ router.get('/admin/crons', async (c) => {
     }),
   ]);
 
-  // Keep only events attributable to background cron work (the chat proxy
-  // also records chat_proxied for normal user chats — those carry no source).
-  const cronEvents = rawEvents
-    .filter((e) => {
-      const d = (e.detail ?? {}) as Record<string, unknown>;
-      if (e.event === 'eod_report_sent' || e.event === 'outbox_pushed') return true;
-      if (e.event === 'chat_proxied') return typeof d['source'] === 'string' && CRON_EVENT_SOURCES.has(String(d['source']));
-      if (e.event === 'onboarding_step') {
-        return d['step'] === 'inbox_refresh' || (d['step'] === 'sokosumi_sync' && d['source'] === 'cron');
-      }
-      return false;
-    })
-    .slice(0, 150);
+  const cronEvents = rawEvents.filter(isCronDrivenEvent).slice(0, 150);
 
   const { getCronRegistry } = await import('../cron.js');
   const registry = getCronRegistry();
@@ -1692,33 +1739,18 @@ router.get('/admin/crons', async (c) => {
     </tr>`)
     .join('');
 
-  const eventLabel = (e: (typeof cronEvents)[number]): string => {
-    const d = (e.detail ?? {}) as Record<string, unknown>;
-    if (e.event === 'outbox_pushed') return `pushed to chat (${esc(String(d['kind'] ?? 'text'))})`;
-    if (e.event === 'eod_report_sent') return 'EOD report delivered';
-    if (e.event === 'onboarding_step') return `${esc(String(d['step']))} ${esc(String(d['status'] ?? ''))}`;
-    return `${esc(String(d['source']))} agent turn`;
-  };
-  const eventDetail = (e: (typeof cronEvents)[number]): string => {
-    const d = (e.detail ?? {}) as Record<string, unknown>;
-    if (e.event === 'outbox_pushed') return esc(String(d['preview'] ?? ''));
-    const rest = { ...d };
-    delete rest['source'];
-    delete rest['preview'];
-    return esc(JSON.stringify(rest));
-  };
   const eventRows = cronEvents
     .map((e) => `<tr>
       <td class="mono" title="${esc(e.createdAt.toISOString())}">${esc(relTime(e.createdAt))}</td>
       <td><a class="mono" href="/admin/instances/${encodeURIComponent(e.userId)}">${esc(e.userId.slice(0, 14))}</a></td>
-      <td>${eventLabel(e)}</td>
-      <td class="mono" style="font-size:11px;max-width:520px;word-break:break-word">${eventDetail(e)}</td>
+      <td>${cronEventLabel(e)}</td>
+      <td class="mono" style="font-size:11px;max-width:520px;word-break:break-word">${cronEventDetail(e)}</td>
     </tr>`)
     .join('');
 
   const body = `
     <h1>Crons</h1>
-    <p class="dim">What the background sweeps and native cronjobs actually do. Registry state is in-memory (resets on deploy); tick history and agent activity are durable.</p>
+    <p class="dim">The orchestrator sweeps below are FLEET-WIDE — one process serves every instance, so there's one registry. Per-instance work (whose brief was delivered, which jobs got answered) shows in the activity table — filter it by user, or open an instance's detail page for its own cron section. Registry state is in-memory (resets on deploy); tick history and agent activity are durable.</p>
 
     <h2>Registered crons <span class="dim" style="font-weight:400;font-size:12px">(this process)</span></h2>
     <div class="card" style="padding:0;overflow:hidden">

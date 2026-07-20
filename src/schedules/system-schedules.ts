@@ -176,6 +176,9 @@ export async function syncSystemSchedules(ctx: SyncContext): Promise<{
         prompt: spec.prompt ?? `[orchestrator] ${spec.name}`,
         cronExpr: spec.cronExpr,
         timezone: tz,
+        // Heal stale next-run displays (rows created before a cadence
+        // change kept their old nextRunAt until the sweep's next freshen).
+        nextRunAt,
       },
     });
     if (existed.createdAt.getTime() > Date.now() - 5_000) created++;
