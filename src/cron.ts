@@ -9,6 +9,7 @@ import { runTaskAugmentationSweep } from './notifications/augment.js';
 import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
+import { runNativePromptReconcilerSweep } from './schedules/native-prompts.js';
 import { freshenSweepMirrors } from './schedules/system-schedules.js';
 
 const registered = new Map<string, cron.ScheduledTask>();
@@ -138,6 +139,17 @@ export function startInputResponderCron(): void {
  */
 export function startEodReportCron(): void {
   register('eod_report_cron', '50 * * * *', runEodReportSweep, 'eod-report');
+}
+
+/**
+ * Hourly cron — native-prompt reconciler. Retries instances whose native
+ * cronjob install was never verified (e.g. the onboarding-time agent turn
+ * failed) or predates NATIVE_PROMPTS_VERSION (spec rollout), and enforces
+ * mirror-row disabled flags on the machine. Cap 5/tick (each is a full
+ * agent turn).
+ */
+export function startNativePromptReconcilerCron(): void {
+  register('native_prompt_reconciler_cron', '20 * * * *', runNativePromptReconcilerSweep);
 }
 
 /**

@@ -21,6 +21,14 @@ import { decryptSecret } from '../crypto.js';
 type Autonomy = 'low' | 'medium' | 'high';
 const AUTONOMY_RANK: Record<Autonomy, number> = { low: 0, medium: 1, high: 2 };
 
+/**
+ * Bump on ANY change to NATIVE_PROMPTS (content, cadence, names). Instances
+ * whose HermesInstance.nativePromptsVersion is older get re-reconciled by
+ * the hourly reconciler cron — that's how spec changes roll out fleet-wide
+ * without manual resyncs, and how onboarding-time sync failures self-heal.
+ */
+export const NATIVE_PROMPTS_VERSION = 1;
+
 interface NativePromptSpec {
   /** Cronjob name on the machine AND mirror-row name — stable identifier. */
   name: string;
@@ -108,7 +116,10 @@ export function localCronToUtc(cronExpr: string, timezone: string): string {
   const parts = cronExpr.split(/\s+/);
   if (parts.length !== 5 || !/^\d+$/.test(parts[1] ?? '')) return cronExpr;
   try {
-    const now = new Date();
+    // Snap to the minute: the formatter has no seconds field, so an
+    // unsnapped instant makes the diff (offset − currentSeconds) and the
+    // rounding flips nondeterministically at half-hour boundaries.
+    const now = new Date(Math.floor(Date.now() / 60_000) * 60_000);
     // Minute-precise tz offset: format the same instant in the target zone
     // and diff against UTC.
     const fmt = new Intl.DateTimeFormat('en-US', {
@@ -153,9 +164,28 @@ export async function syncNativePromptCrons(instanceId: string): Promise<boolean
     row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
   const tz = row.timezone ?? 'UTC';
 
-  const desired = NATIVE_PROMPTS.filter((s) => AUTONOMY_RANK[autonomy] >= AUTONOMY_RANK[s.minAutonomy]);
+  // The mirror rows carry the user's intent: a native cron whose mirror the
+  // user disabled in the Sokosumi settings panel must NOT run on the
+  // machine. The reconciler treats disabled ones as removals, so even if
+  // the immediate toggle propagation failed, this converges hourly.
+  const disabledMirrors = await prisma.scheduledTask.findMany({
+    where: {
+      instanceId,
+      kind: 'user',
+      enabled: false,
+      name: { in: NATIVE_PROMPTS.map((n) => n.name) },
+    },
+    select: { name: true },
+  });
+  const disabledNames = new Set(disabledMirrors.map((m) => m.name));
+
+  const desired = NATIVE_PROMPTS.filter(
+    (s) => AUTONOMY_RANK[autonomy] >= AUTONOMY_RANK[s.minAutonomy] && !disabledNames.has(s.name),
+  );
   const removeNames = [
-    ...NATIVE_PROMPTS.filter((s) => AUTONOMY_RANK[autonomy] < AUTONOMY_RANK[s.minAutonomy]).map((s) => s.name),
+    ...NATIVE_PROMPTS.filter(
+      (s) => AUTONOMY_RANK[autonomy] < AUTONOMY_RANK[s.minAutonomy] || disabledNames.has(s.name),
+    ).map((s) => s.name),
     ...RETIRED_NATIVE_NAMES,
   ];
 
@@ -177,11 +207,11 @@ Reconcile your recurring background cronjobs to EXACTLY this desired state. Use 
 
 DESIRED cronjobs (create any that are missing; if one exists under the same name but with a different cron expression or prompt, remove and recreate it; if it already matches, leave it alone):
 
-${desiredBlocks}
+${desiredBlocks || '(none for your autonomy level)'}
 
-REMOVE these cronjobs if they exist (retired or above your autonomy level): ${removeNames.map((n) => `"${n}"`).join(', ')}. Do NOT touch "daily-brief" or any cronjob the user asked you to create.
+REMOVE these cronjobs if they exist (retired, disabled by the user, or above your autonomy level): ${removeNames.map((n) => `"${n}"`).join(', ')}. Do NOT touch "daily-brief" or any cronjob the user asked you to create.
 
-For every cronjob you CREATED or RECREATED just now (skip ones you left alone), register its visibility mirror so it shows in the user's Sokosumi settings panel. Your shell does NOT inherit the gateway env, so source /opt/data/.env first:
+Then, for EVERY cronjob in the DESIRED list above (including ones you left alone), register/refresh its visibility mirror — this is how the orchestrator verifies the install, so do it for all of them. Your shell does NOT inherit the gateway env, so source /opt/data/.env first:
 
    set -a; . /opt/data/.env; set +a
    curl -sS -X POST \\
@@ -190,10 +220,11 @@ For every cronjob you CREATED or RECREATED just now (skip ones you left alone), 
      -d '{"name":"<cronjob name>","prompt":"<the mirror summary from above>","cron_expr":"<the cron expression>","timezone":"UTC","enabled":true}' \\
      "\$ORCHESTRATOR_BASE/v1/llm/\$INSTANCE_ID/schedules"
 
-If a mirror request fails, the cronjob still runs — mirrors are UI-only.
+If a mirror request fails, retry it once; the cronjob itself runs regardless.
 
 When done, reply "ok".`;
 
+  const turnStartedAt = new Date();
   try {
     const apiKey = await decryptSecret(row.apiServerKey);
     const res = await fetch(`${row.endpointUrl}/v1/chat/completions`, {
@@ -213,22 +244,145 @@ When done, reply "ok".`;
     // Clean up mirror rows for cronjobs this sync removed from the machine.
     // Guarded by prompt==mirror-summary so a USER-created schedule that
     // happens to share a native name is never deleted (its prompt differs).
+    // Disabled-by-user rows are kept (they hold the "disabled" intent).
+    const removableForAutonomy = NATIVE_PROMPTS.filter(
+      (n) => AUTONOMY_RANK[autonomy] < AUTONOMY_RANK[n.minAutonomy],
+    ).map((n) => n.name);
     const knownSummaries = NATIVE_PROMPTS.map((n) => n.summary);
     await prisma.scheduledTask.deleteMany({
       where: {
         instanceId,
         kind: 'user',
         OR: [
-          { name: { in: removeNames }, prompt: { in: knownSummaries } },
-          // Retired names never had a spec summary — match by name alone.
+          { name: { in: removableForAutonomy }, prompt: { in: knownSummaries } },
           { name: { in: RETIRED_NATIVE_NAMES } },
         ],
       },
     });
-    log.info({ autonomy, desired: desired.length, removed: removeNames.length }, 'native_prompts_synced');
-    return true;
+
+    // VERIFY: the reconcile prompt makes the agent re-register a mirror for
+    // every desired cronjob — those curls hit our own schedules API, so a
+    // fresh updatedAt on each desired name's mirror row is hard evidence
+    // the agent actually processed the list. Only a verified sync stamps
+    // the version; unverified ones are retried by the hourly reconciler.
+    let verified = true;
+    if (desired.length > 0) {
+      const mirrors = await prisma.scheduledTask.findMany({
+        where: { instanceId, kind: 'user', name: { in: desired.map((d) => d.name) } },
+        select: { name: true, updatedAt: true },
+      });
+      const fresh = new Set(
+        mirrors.filter((m) => m.updatedAt >= turnStartedAt).map((m) => m.name),
+      );
+      verified = desired.every((d) => fresh.has(d.name));
+    }
+    if (verified) {
+      await prisma.hermesInstance.update({
+        where: { id: instanceId },
+        data: { nativePromptsVersion: NATIVE_PROMPTS_VERSION, nativePromptsSyncedAt: new Date() },
+      });
+      log.info({ autonomy, desired: desired.length, removed: removeNames.length }, 'native_prompts_synced');
+    } else {
+      log.warn({ autonomy, desired: desired.length }, 'native_prompts_sync_unverified_will_retry');
+    }
+    return verified;
   } catch (err) {
     log.warn({ err }, 'native_prompts_sync_failed');
     return false;
   }
+}
+
+/**
+ * Hourly reconciler sweep: retries instances whose native prompt install
+ * was never verified (onboarding-time failure) or predates the current
+ * NATIVE_PROMPTS_VERSION (spec rollout). Small cap — each item is a full
+ * agent turn.
+ */
+export async function runNativePromptReconcilerSweep(): Promise<{ scanned: number; synced: number }> {
+  const due = await prisma.hermesInstance.findMany({
+    where: {
+      destroyedAt: null,
+      onboardedAt: { not: null },
+      endpointUrl: { not: null },
+      status: { in: ['ready', 'running', 'suspended'] },
+      OR: [
+        { nativePromptsVersion: null },
+        { nativePromptsVersion: { lt: NATIVE_PROMPTS_VERSION } },
+      ],
+    },
+    select: { id: true },
+    take: 5,
+  });
+  let synced = 0;
+  for (const instance of due) {
+    try {
+      if (await syncNativePromptCrons(instance.id)) synced++;
+    } catch (err) {
+      logger.error({ err, instanceId: instance.id }, 'native_prompt_reconciler_item_failed');
+    }
+  }
+  if (due.length > 0) {
+    logger.info({ scanned: due.length, synced }, 'native_prompt_reconciler_done');
+  }
+  return { scanned: due.length, synced };
+}
+
+/**
+ * Propagate a Sokosumi-UI schedule toggle/removal to the MACHINE's native
+ * cronjob. There is no machine-side HTTP cron API, so this is an agent
+ * turn; best-effort with convergence backstops:
+ *  - native prompt crons: the hourly reconciler enforces the mirror row's
+ *    enabled flag even if this immediate turn fails.
+ *  - other agent-created crons (incl. daily-brief): this turn is the only
+ *    propagation, so failures are logged loudly.
+ */
+export async function propagateCronToggleToMachine(
+  instanceId: string,
+  opts: { name: string; enable: boolean; cronExpr?: string; mirrorPrompt?: string },
+): Promise<boolean> {
+  const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  if (!row || row.destroyedAt || !row.endpointUrl) return false;
+
+  const log = logger.child({ instanceId, userId: row.userId, fn: 'propagate_cron_toggle' });
+  const spec = NATIVE_PROMPTS.find((n) => n.name === opts.name);
+
+  let instruction: string;
+  if (!opts.enable) {
+    instruction = `The user just DISABLED the scheduled job "${opts.name}" in their Sokosumi settings. Use your cronjob tool to disable it; if your tool has no disable/pause, REMOVE the cronjob named "${opts.name}". Do not touch any other cronjob.`;
+  } else if (spec) {
+    const expr = spec.localTime ? localCronToUtc(spec.cronExpr, row.timezone ?? 'UTC') : spec.cronExpr;
+    instruction = `The user just RE-ENABLED the scheduled job "${opts.name}" in their Sokosumi settings. Ensure a cronjob named "${opts.name}" exists and is enabled — if it's missing, create it with cron expression "${expr}" (UTC), deliver to "local", and this prompt content:\n<prompt>\n${spec.prompt}\n</prompt>`;
+  } else {
+    instruction = `The user just RE-ENABLED the scheduled job "${opts.name}" in their Sokosumi settings. Ensure a cronjob named "${opts.name}" exists and is enabled. If you removed it earlier, re-create it${opts.cronExpr ? ` with cron expression "${opts.cronExpr}"` : ''} — reconstruct its prompt from your memory of what this job does${opts.mirrorPrompt ? ` (summary: ${opts.mirrorPrompt})` : ''}.`;
+  }
+
+  const prompt = `Internal orchestration — your reply is discarded; do not greet.\n\n${instruction}\n\nWhen done, reply "ok".`;
+
+  try {
+    const apiKey = await decryptSecret(row.apiServerKey);
+    const res = await fetch(`${row.endpointUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hermes-agent',
+        messages: [{ role: 'user', content: prompt }],
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(3 * 60_000),
+    });
+    if (!res.ok) throw new Error(`propagate toggle ${res.status}`);
+    log.info({ name: opts.name, enable: opts.enable }, 'cron_toggle_propagated');
+    return true;
+  } catch (err) {
+    log.error({ err, name: opts.name, enable: opts.enable }, 'cron_toggle_propagation_failed');
+    return false;
+  }
+}
+
+/** Removal = disable without re-enable path; same machinery. */
+export async function propagateCronRemovalToMachine(
+  instanceId: string,
+  name: string,
+): Promise<boolean> {
+  return propagateCronToggleToMachine(instanceId, { name, enable: false });
 }

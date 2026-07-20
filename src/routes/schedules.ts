@@ -82,9 +82,20 @@ sokosumi.delete('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
   const scheduleId = c.req.param('scheduleId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.json({ error: { message: 'instance not found' } }, 404);
-  await prisma.scheduledTask.deleteMany({
+  const task = await prisma.scheduledTask.findFirst({
     where: { id: scheduleId, instanceId: row.id, kind: 'user' },
+    select: { id: true, name: true },
   });
+  if (task) {
+    await prisma.scheduledTask.delete({ where: { id: task.id } }).catch(() => {});
+    // kind='user' rows mirror NATIVE machine cronjobs (native cron is THE
+    // scheduler) — deleting the mirror must also remove the cron on the
+    // machine, or it keeps firing invisibly. Fire-and-forget agent turn;
+    // for native prompt names the hourly reconciler enforces convergence
+    // even if this turn fails.
+    const { propagateCronRemovalToMachine } = await import('../schedules/native-prompts.js');
+    void propagateCronRemovalToMachine(row.id, task.name).catch(() => {});
+  }
   return c.body(null, 204);
 });
 
@@ -102,6 +113,19 @@ sokosumi.patch('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
     where: { id: scheduleId, instanceId: row.id },
   });
   if (!task) return c.json({ error: { message: 'schedule not found' } }, 404);
+  // Propagate enabled-flag flips on kind='user' rows to the MACHINE's
+  // native cronjob (the mirror row alone gates nothing — native cron is
+  // the real scheduler). system_sweep rows need no propagation: the
+  // orchestrator sweeps read their enabled flag directly.
+  if (task.kind === 'user' && parsed.data.enabled !== undefined && parsed.data.enabled !== task.enabled) {
+    const { propagateCronToggleToMachine } = await import('../schedules/native-prompts.js');
+    void propagateCronToggleToMachine(row.id, {
+      name: task.name,
+      enable: parsed.data.enabled,
+      cronExpr: task.cronExpr,
+      mirrorPrompt: task.prompt,
+    }).catch(() => {});
+  }
   return updateScheduleResponse(c, task, parsed.data);
 });
 

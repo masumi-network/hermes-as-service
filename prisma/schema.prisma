@@ -100,6 +100,12 @@ model HermesInstance {
   /// Kept separate from lastInboxRefreshAt because that column doubles as
   /// the "scan mail since X" boundary and must only move on SUCCESS.
   lastInboxRefreshAttemptAt DateTime?
+  /// Native-prompt cronjob reconciliation bookkeeping: version of the
+  /// NATIVE_PROMPTS spec set last VERIFIED installed on the machine, and
+  /// when. null / stale version = the hourly reconciler cron retries the
+  /// install (covers onboarding-time failures and future spec rollouts).
+  nativePromptsVersion Int?
+  nativePromptsSyncedAt DateTime?
   /// Watermark for the follow-up continuation pass (same 5-min sweep):
   /// newly-COMPLETED jobs since this stamp get a "was there a planned next
   /// step?" agent prompt. Separate from lastJobNoticeAt (urgent NOTIFY sweep).
