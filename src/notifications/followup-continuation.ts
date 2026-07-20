@@ -5,6 +5,7 @@ import { recordEvent } from '../audit.js';
 import { SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
+import { runCronAgentTurn } from './cron-agent-turn.js';
 
 /**
  * Plan continuation — the "do X, then when it's done do Y" follow-through.
@@ -85,11 +86,16 @@ export async function continueFollowupsForInstance(
       const jobs = (await orgClient.listJobs({ status: 'COMPLETED', limit: 15 })) as Array<{
         id?: string;
         name?: string;
+        status?: string;
         completedAt?: string;
         updatedAt?: string;
         createdAt?: string;
       }>;
       for (const j of jobs) {
+        // Sokosumi's /jobs endpoint ignores the status filter (returns all
+        // statuses, lowercase) — re-check client-side so we only continue
+        // plans off genuinely completed jobs.
+        if (j.status && j.status.toLowerCase() !== 'completed') continue;
         // completedAt preferred (same as urgent.ts): updatedAt moves on any
         // post-completion touch (rating, refund) and would replay old jobs.
         const stampStr = j.completedAt ?? j.updatedAt ?? j.createdAt;
@@ -133,8 +139,18 @@ export async function continueFollowupsForInstance(
   });
 
   const apiKey = await decryptSecret(row.apiServerKey);
+  let requestId: string;
   try {
-    await driveAgentToContinue(row.endpointUrl, apiKey, batch, autonomy, log);
+    const turn = await runCronAgentTurn({
+      instanceId,
+      userId: row.userId,
+      endpointUrl: row.endpointUrl,
+      apiKey,
+      source: 'followup_continuation',
+      prompt: buildContinuePrompt(batch, autonomy),
+      timeoutMs: AGENT_TURN_TIMEOUT_MS,
+    });
+    requestId = turn.requestId;
   } catch (err) {
     log.warn({ err }, 'followup_agent_turn_failed');
     return { prompted: 0, reason: 'agent_turn_failed' };
@@ -143,20 +159,13 @@ export async function continueFollowupsForInstance(
     userId: row.userId,
     instanceId,
     event: 'chat_proxied',
-    detail: { source: 'followup_continuation', jobs: batch.length, autonomy },
+    detail: { source: 'followup_continuation', jobs: batch.length, autonomy, requestId },
   });
   log.info({ jobs: batch.length, autonomy }, 'followup_continuation_prompted');
   return { prompted: batch.length };
 }
 
-async function driveAgentToContinue(
-  endpointUrl: string,
-  apiKey: string,
-  jobs: CompletedJob[],
-  autonomy: 'medium' | 'high',
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log: any,
-): Promise<void> {
+function buildContinuePrompt(jobs: CompletedJob[], autonomy: 'medium' | 'high'): string {
   const jobsBlock = jobs
     .map((j, i) => `${i + 1}. "${j.name}" — job_id=${j.jobId} (workspace org=${j.orgId})`)
     .join('\n');
@@ -166,7 +175,7 @@ async function driveAgentToContinue(
       ? 'At your autonomy level your write tools execute immediately.'
       : 'At your autonomy level sokosumi_create_task / sokosumi_add_task_comment raise confirmation cards for the user to approve — that is expected; fire the tool, then stop.';
 
-  const prompt = `Internal task — your reply text here is discarded; act through tools only.
+  return `Internal task — your reply text here is discarded; act through tools only.
 
 These Sokosumi job(s) just COMPLETED:
 ${jobsBlock}
@@ -179,21 +188,4 @@ For EACH one, check whether it unblocks a next step the user and you ACTUALLY ag
 5. If there was NO agreed next step: reply "skip". Do NOT invent follow-up work — a completion alone is not a plan. The separate notification sweep handles telling the user about interesting completions.
 
 HARD LIMITS for this turn: allowed tools are sokosumi_get_job, sokosumi_get_task, sokosumi_list_tasks, sokosumi_list_jobs, sokosumi_list_coworkers, sokosumi_create_task, sokosumi_add_task_comment, and your memory tools. Do NOT start jobs (sokosumi_create_job), do NOT spend credits, do NOT message the user directly.`;
-
-  const res = await fetch(`${endpointUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'hermes-agent',
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(AGENT_TURN_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`followup continuation agent turn ${res.status}: ${body.slice(0, 200)}`);
-  }
-  const json = (await res.json().catch(() => null)) as { choices?: { message?: { content?: string } }[] } | null;
-  log.info({ reply: (json?.choices?.[0]?.message?.content ?? '').slice(0, 200) }, 'followup_agent_replied');
 }

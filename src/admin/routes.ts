@@ -1307,7 +1307,7 @@ router.get('/admin/chats', async (c) => {
 
   const where: { userId?: string; kind?: string } = {};
   if (userFilter) where.userId = userFilter;
-  if (kindFilter && (kindFilter === 'chat' || kindFilter === 'scheduled')) {
+  if (kindFilter && (kindFilter === 'chat' || kindFilter === 'scheduled' || kindFilter === 'cron')) {
     where.kind = kindFilter;
   }
 
@@ -1381,6 +1381,7 @@ router.get('/admin/chats', async (c) => {
         <option value="">all kinds</option>
         <option value="chat" ${kindFilter === 'chat' ? 'selected' : ''}>chat</option>
         <option value="scheduled" ${kindFilter === 'scheduled' ? 'selected' : ''}>scheduled</option>
+        <option value="cron" ${kindFilter === 'cron' ? 'selected' : ''}>cron</option>
       </select>
       <input name="limit" placeholder="limit" value="${esc(limit)}" style="width:80px" />
       <button type="submit">Apply</button>
@@ -1688,7 +1689,14 @@ function cronEventLabel(e: { event: string; detail: unknown }): string {
   if (e.event === 'outbox_pushed') return `pushed to chat (${esc(String(d['kind'] ?? 'text'))})`;
   if (e.event === 'eod_report_sent') return 'EOD report delivered';
   if (e.event === 'onboarding_step') return `${esc(String(d['step']))} ${esc(String(d['status'] ?? ''))}`;
-  return `${esc(String(d['source']))} agent turn`;
+  // Sweep agent turns capture the full prompt+response under requestId —
+  // link straight to the chat-detail view so the operator can read exactly
+  // what the cron sent and what the agent did.
+  const label = `${esc(String(d['source']))} agent turn`;
+  const reqId = d['requestId'];
+  return typeof reqId === 'string' && reqId
+    ? `<a href="/admin/chats/${encodeURIComponent(reqId)}">${label} — view prompt + response →</a>`
+    : label;
 }
 
 function cronEventDetail(e: { event: string; detail: unknown }): string {

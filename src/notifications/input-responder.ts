@@ -5,6 +5,7 @@ import { recordEvent } from '../audit.js';
 import { SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
+import { runCronAgentTurn } from './cron-agent-turn.js';
 
 /**
  * INPUT_REQUIRED auto-responder.
@@ -88,10 +89,16 @@ export async function respondToInputRequestsForInstance(
       const jobs = (await orgClient.listJobs({ status: 'AWAITING_INPUT', limit: 15 })) as Array<{
         id?: string;
         name?: string;
+        status?: string;
         updatedAt?: string;
         createdAt?: string;
       }>;
       for (const j of jobs) {
+        // Sokosumi's /jobs endpoint ignores the status query filter and
+        // returns all statuses (lowercase), so re-check client-side —
+        // otherwise a recently-touched COMPLETED job would be treated as
+        // awaiting input and waste an agent turn.
+        if (j.status && j.status.toLowerCase() !== 'awaiting_input') continue;
         const stampStr = j.updatedAt ?? j.createdAt;
         if (!stampStr || !j.id) continue;
         const stamp = new Date(stampStr);
@@ -123,8 +130,18 @@ export async function respondToInputRequestsForInstance(
   const batch = paused.slice(0, MAX_JOBS_PER_TICK);
 
   const apiKey = await decryptSecret(row.apiServerKey);
+  let requestId: string;
   try {
-    await driveAgentToAnswer(row.endpointUrl, apiKey, batch, autonomy, log);
+    const turn = await runCronAgentTurn({
+      instanceId,
+      userId: row.userId,
+      endpointUrl: row.endpointUrl,
+      apiKey,
+      source: 'input_responder',
+      prompt: buildAnswerPrompt(batch, autonomy),
+      timeoutMs: AGENT_TURN_TIMEOUT_MS,
+    });
+    requestId = turn.requestId;
   } catch (err) {
     // Transient agent-turn failure (endpoint down / timeout): do NOT advance the
     // watermark — a paused job doesn't bump its own updatedAt, so advancing here
@@ -147,7 +164,7 @@ export async function respondToInputRequestsForInstance(
     userId: row.userId,
     instanceId,
     event: 'chat_proxied',
-    detail: { source: 'input_responder', jobs: batch.length, autonomy },
+    detail: { source: 'input_responder', jobs: batch.length, autonomy, requestId },
   });
   log.info({ jobs: batch.length, autonomy }, 'input_responder_prompted');
   return { prompted: batch.length };
@@ -203,14 +220,7 @@ async function runInputResponderSweepInner(): Promise<{ scanned: number; prompte
   return { scanned: due.length, prompted };
 }
 
-async function driveAgentToAnswer(
-  endpointUrl: string,
-  apiKey: string,
-  jobs: PausedJob[],
-  autonomy: 'medium' | 'high',
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log: any,
-): Promise<void> {
+function buildAnswerPrompt(jobs: PausedJob[], autonomy: 'medium' | 'high'): string {
   const jobsBlock = jobs
     .map((j, i) => `${i + 1}. "${j.name}" — job_id=${j.jobId} (workspace org=${j.orgId})`)
     .join('\n');
@@ -220,7 +230,7 @@ async function driveAgentToAnswer(
       ? 'At your autonomy level your sokosumi_provide_job_input call submits the answer immediately.'
       : 'At your autonomy level your sokosumi_provide_job_input call raises a confirmation card for the user to approve — that is expected; fire the tool, then stop.';
 
-  const prompt = `Internal task — your reply text here is discarded; act through tools only.
+  return `Internal task — your reply text here is discarded; act through tools only.
 
 These Sokosumi job(s) are paused in AWAITING_INPUT and will not finish until someone answers:
 ${jobsBlock}
@@ -232,23 +242,4 @@ For EACH job, in order:
 4. Otherwise — a human decision, a preference you don't know, or missing info — DO NOT GUESS and DO NOT invent values. Skip that job and leave it paused for the user. A fabricated answer is far worse than a paused job, and at high autonomy it submits unreviewed.
 
 HARD LIMITS for this turn: the ONLY tools you may use are sokosumi_get_job_input_request and sokosumi_provide_job_input. Do NOT create tasks, do NOT start jobs, do NOT spend credits, do NOT comment, do NOT take any action other than answering the input requests above. Never make up input values; when in doubt, skip.`;
-
-  const res = await fetch(`${endpointUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'hermes-agent',
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(AGENT_TURN_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`input_responder agent turn ${res.status}: ${body.slice(0, 200)}`);
-  }
-  // Reply is discarded — the value is in the tool calls the agent made. Log a
-  // snippet for debugging.
-  const json = (await res.json().catch(() => null)) as { choices?: { message?: { content?: string } }[] } | null;
-  log.info({ reply: (json?.choices?.[0]?.message?.content ?? '').slice(0, 200) }, 'input_responder_agent_replied');
 }
