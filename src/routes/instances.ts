@@ -200,6 +200,10 @@ router.patch('/v1/instances/:userId', async (c) => {
           sokosumiConfigured: true,
           hasMailOrCalendar,
         });
+        // Reconcile the machine's native prompt cronjobs to the new autonomy
+        // (fire-and-forget — the agent turn can take a couple of minutes).
+        const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
+        void syncNativePromptCrons(row.id).catch(() => {});
       } catch (err) {
         logger.warn({ err, userId }, 'patch_instance_resync_schedules_failed');
       }

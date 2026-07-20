@@ -96,6 +96,14 @@ model HermesInstance {
   /// that one is owned by the urgent-interrupt NOTIFY sweep; sharing it would
   /// let the two sweeps hide events from each other.
   lastInputResponderAt DateTime?
+  /// Last inbox-refresh ATTEMPT (success or failure) — retry gating only.
+  /// Kept separate from lastInboxRefreshAt because that column doubles as
+  /// the "scan mail since X" boundary and must only move on SUCCESS.
+  lastInboxRefreshAttemptAt DateTime?
+  /// Watermark for the follow-up continuation pass (same 5-min sweep):
+  /// newly-COMPLETED jobs since this stamp get a "was there a planned next
+  /// step?" agent prompt. Separate from lastJobNoticeAt (urgent NOTIFY sweep).
+  lastFollowupSweepAt DateTime?
   /// HIGH-autonomy users get a hourly task-augmentation pass: Hermes
   /// scans newly-created tasks since this watermark and adds enriching
   /// comments where it has useful context (mail, memory, prior jobs).

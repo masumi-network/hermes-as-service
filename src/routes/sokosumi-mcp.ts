@@ -269,7 +269,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_coworkers',
     description:
-      "List the user's whitelisted Sokosumi coworkers (id, slug, name, caption, capabilities). These are the AI personas — like Hannah, Demos, Elena — that actually DO the work. Tasks get assigned to coworkers; jobs run under their identity. Different from sokosumi_list_agents (which is the marketplace catalog). YOU (Hermes) are one of them, with slug=hermes — but never assign tasks to yourself; you're the coordinator, not the executor. Call this before sokosumi_create_task so you can pick the right coworker for the work (e.g., research → Hannah, project management → Elena, social media → Pheme).",
+      "List the user's whitelisted Sokosumi coworkers (id, slug, name, caption, capabilities). These are the AI personas — like Hannah, Demos, Elena — that actually DO the work. Tasks get assigned to coworkers; jobs run under their identity. Different from sokosumi_list_agents (which is the marketplace catalog). YOU (Hermes) are NOT in this list — you are the first-party orchestrator, not a coworker, so never try to assign tasks to yourself; you coordinate, the coworkers execute. Call this before sokosumi_create_task so you can pick the right coworker for the work (e.g., research → Hannah, project management → Elena, social media → Pheme).",
     inputSchema: {
       type: 'object',
       properties: {

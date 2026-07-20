@@ -14,6 +14,21 @@ import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
 import { confirmationsRouter } from './routes/confirmations.js';
 import { skillsSokosumiRouter } from './routes/skills.js';
 import { adminAuth } from './admin/auth.js';
+
+// Backstop: a stray unhandled rejection (e.g. an unawaited promise inside a
+// cron tick) must never kill the orchestrator. Every cron has its own
+// try/catch; this catches whatever slips past.
+process.on('unhandledRejection', (reason) => {
+  // During the first minute (boot) keep Node's crash semantics — a failed
+  // boot promise should exit nonzero so the platform restarts us clean.
+  // After that, log-and-survive: a stray rejection in a cron tick must not
+  // kill a healthy orchestrator.
+  if (process.uptime() < 60) {
+    logger.fatal({ reason }, 'unhandled_rejection_during_boot');
+    process.exit(1);
+  }
+  logger.error({ reason }, 'unhandled_rejection');
+});
 import { adminRouter } from './admin/routes.js';
 import { restoreMasumiProfile } from './notify/masumi-restore.js';
 import { sendMasumiTest, masumiConfigured } from './notify/masumi.js';

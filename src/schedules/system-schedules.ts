@@ -5,17 +5,17 @@ import { safeNextRun } from './cron.js';
 /**
  * The orchestrator owns a set of "system" ScheduledTask rows per instance,
  * created at onboarding-finalize and re-synced any time the autonomy
- * level changes. They come in two flavors:
+ * level changes. These are all kind "system_sweep": informational mirrors
+ * of orchestrator-level background sweeps (sokosumi-sync, inbox-refresh,
+ * urgent-interrupts, task-augmentation, input-responder, eod-report). The
+ * scheduler never dispatches them; the matching sweep in cron.ts reads the
+ * row's `enabled` flag to gate work per user, and freshens the row's
+ * last/next-run stamps after each tick so the settings panel stays honest.
  *
- * - "system_sweep"  — informational mirror of an orchestrator-level
- *                     background sweep (sokosumi-sync, inbox-refresh,
- *                     urgent-interrupts, task-augmentation). The scheduler
- *                     ignores these; the matching sweep in cron.ts reads
- *                     the row's `enabled` flag to gate work per user.
- *
- * - "system_prompt" — a recurring chat prompt (morning-brief, weekly-wrap,
- *                     etc.) that the scheduler dispatches like any
- *                     user-created cron. Auto-created based on autonomy.
+ * Recurring AGENT prompts (weekly wrap, stuck-jobs reminder, etc.) are NOT
+ * orchestrator rows anymore — they're installed as native cronjobs on the
+ * machine itself (see native-prompts.ts), per the locked scheduling design:
+ * the built-in cronjob tool is THE scheduler; orchestrator rows are mirrors.
  *
  * All rows are stable-IDed (`{name}-{instanceId}`) so this function is
  * idempotent: re-running it never duplicates rows. Rows can be deleted
@@ -51,7 +51,7 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     kind: 'system_sweep',
     name: 'Sokosumi workspace sync',
     description:
-      'Daily refresh of your Sokosumi workspace (tasks, completed jobs, conversations, credits, coworkers) into Hermes’ memory so the agent stays current.',
+      'Daily refresh of your Sokosumi workspace (tasks, completed jobs, credits, coworkers) into Hermes’ memory so the agent stays current.',
     cronExpr: '0 9 * * *',
     localTime: false,
     minAutonomy: 'low',
@@ -93,7 +93,7 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     kind: 'system_sweep',
     name: 'Auto-answer input requests',
     description:
-      'Every 5 minutes: detects Sokosumi jobs paused on AWAITING_INPUT and has Hermes answer them for you when it can tell what the job needs — at high autonomy it submits the answer immediately, at medium it raises a confirmation card for you to approve. (At low autonomy you just get the urgent-interrupt notification instead.)',
+      'Every 5 minutes: detects Sokosumi jobs paused on AWAITING_INPUT and has Hermes answer them for you when it can tell what the job needs — at high autonomy it submits the answer immediately, at medium it raises a confirmation card for you to approve. Also spots jobs that just COMPLETED and, when you and Hermes had agreed on a next step, continues the plan (follow-up tasks arrive as confirmation cards at medium autonomy). (At low autonomy you just get the urgent-interrupt notification instead.)',
     cronExpr: '2-59/5 * * * *',
     localTime: false,
     minAutonomy: 'medium',
@@ -103,105 +103,12 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     kind: 'system_sweep',
     name: 'End-of-day cron summary',
     description:
-      'Each evening at 10 PM (your time): a brief recap of what Hermes’ background sweeps did for you today — inbox refreshes, Sokosumi syncs, urgent interrupts, auto-comments, executor runs, and any proactive messages sent to your chat.',
+      'Each evening at 10 PM (your time): a brief recap of what Hermes’ background sweeps did for you today — inbox refreshes, Sokosumi syncs, urgent interrupts, auto-comments, and any proactive messages sent to your chat.',
     cronExpr: '0 22 * * *',
     localTime: true,
     minAutonomy: 'low',
   },
 
-  // ---------- system_prompt rows (medium+) ----------
-  {
-    slug: 'morning-brief',
-    kind: 'system_prompt',
-    name: 'Weekday morning brief',
-    description:
-      'Mon–Fri 8am brief: yesterday’s completed jobs, today’s calendar, notable email, anything actionable from your connected tools, and the top open tasks needing action.',
-    cronExpr: '0 8 * * 1-5',
-    localTime: true,
-    minAutonomy: 'medium',
-    prompt:
-      'Good morning. Give the user their weekday brief. Pull from EVERY data source you actually have connected MCP tools for — skip any section you have no tools for, and never tell the user a source is missing (just omit it silently):\n' +
-      '(a) Sokosumi jobs that completed since their last brief — names + 1-line takeaway each.\n' +
-      '(b) Today’s calendar at a glance, if a calendar MCP (Google/Outlook) is connected.\n' +
-      '(c) Notable email since yesterday, if a mail MCP (Gmail/Outlook) is connected — urgent threads, anything awaiting your reply, and anything tied to today’s meetings. Don’t list every message; surface what matters and who’s waiting on you.\n' +
-      '(d) Anything actionable from your OTHER connected integrations — check each one you have tools for (Slack, Linear, GitHub, Notion, HubSpot, X/Twitter, etc.): unread mentions/DMs, issues or PRs assigned to or awaiting the user, review requests, stalled threads. Only the integrations actually connected; only items worth acting on today.\n' +
-      '(e) The 2–3 open Sokosumi tasks most worth touching today.\n' +
-      'Lead with whatever is most time-sensitive across all of the above. Group by source so it’s scannable. Keep it tight — under 250 words, no preamble.',
-  },
-  {
-    slug: 'weekly-wrap',
-    kind: 'system_prompt',
-    name: 'Friday weekly wrap',
-    description:
-      'Friday 4pm: this week’s job completions, credit spend, and what to chase on Monday.',
-    cronExpr: '0 16 * * 5',
-    localTime: true,
-    minAutonomy: 'medium',
-    prompt:
-      'Give the user a Friday wrap-up: (a) Sokosumi jobs completed this week with a 1-line takeaway per job, (b) total credits spent this week and the top 3 most expensive jobs, (c) open tasks that should move first thing Monday. Tight, scannable, under 200 words.',
-  },
-  {
-    slug: 'awaiting-input-chaser',
-    kind: 'system_prompt',
-    name: 'Stuck jobs reminder',
-    description:
-      'Every 4 hours: nudges you about Sokosumi jobs that have been waiting on your input for over a day.',
-    cronExpr: '0 */4 * * *',
-    localTime: false,
-    minAutonomy: 'medium',
-    prompt:
-      'Scan for Sokosumi jobs in AWAITING_INPUT status that have been stuck for >24h. If any exist, send a short reminder naming the job and what input the agent needs. If none are stuck, reply with the literal string "ok" and nothing else — the orchestrator will discard short acknowledgements so the user isn’t spammed.',
-  },
-  {
-    slug: 'low-credits-watcher',
-    kind: 'system_prompt',
-    name: 'Low credits watcher',
-    description:
-      'Daily 9am check: pings you when your Sokosumi credit balance drops below 25.',
-    cronExpr: '0 9 * * *',
-    localTime: true,
-    minAutonomy: 'medium',
-    prompt:
-      'Call sokosumi_get_credits. If the balance is below 25, send a one-sentence heads-up about the current balance and the 1–2 most recent jobs that drove the spend. If balance is 25 or above, reply only with "ok" (orchestrator drops it).',
-  },
-
-  // ---------- system_prompt rows (high only) ----------
-  {
-    slug: 'followup-task-generator',
-    kind: 'system_prompt',
-    name: 'Auto follow-up tasks',
-    description:
-      'Daily 6am: reads yesterday’s completed Sokosumi jobs and creates follow-up tasks (assigned to the right coworker) when the result implies a clear next step.',
-    cronExpr: '0 6 * * *',
-    localTime: true,
-    minAutonomy: 'high',
-    prompt:
-      'For each Sokosumi job that completed in the last 24h, read the result and decide whether it implies a clearly defined next task. For each qualifying job: pick the right coworker via sokosumi_list_coworkers, create the follow-up task via sokosumi_create_task, and add a brief comment linking back to the source job. Skip jobs where the next step is ambiguous — do not invent work. End with a one-paragraph summary of what you created, or "ok" if no follow-ups were warranted.',
-  },
-  {
-    slug: 'workspace-cleanup',
-    kind: 'system_prompt',
-    name: 'Sunday workspace cleanup',
-    description:
-      'Sunday 11pm: surfaces stale DRAFT tasks untouched for 30+ days and offers to refund FAILED jobs older than a week.',
-    cronExpr: '0 23 * * 0',
-    localTime: true,
-    minAutonomy: 'high',
-    prompt:
-      'Audit the user’s Sokosumi workspace: list DRAFT tasks untouched for >30 days and FAILED jobs older than 7 days that were never refunded. Offer to cancel/refund them in plain language — do not act without confirmation in chat. Skip the message entirely (reply "ok") if neither category has anything.',
-  },
-  {
-    slug: 'coworker-idle-nudge',
-    kind: 'system_prompt',
-    name: 'Idle coworker nudge',
-    description:
-      'Monday 10am: flags Sokosumi coworkers you haven’t used in 30+ days with a short note on what they could help with.',
-    cronExpr: '0 10 * * 1',
-    localTime: true,
-    minAutonomy: 'high',
-    prompt:
-      'List coworkers from sokosumi_list_coworkers who have no tasks assigned in the last 30 days. For each, write one sentence on what they could help with based on their capabilities. Cap at 3 coworkers; if all are active, reply "ok".',
-  },
 ];
 
 export interface SyncContext {
@@ -280,6 +187,49 @@ export async function syncSystemSchedules(ctx: SyncContext): Promise<{
 
 export function systemRowId(slug: string, instanceId: string): string {
   return `system-${slug}-${instanceId}`;
+}
+
+/**
+ * Stamp a sweep's per-instance mirror rows with truthful last/next-run
+ * times after the orchestrator-side sweep ticked. Without this the settings
+ * panel shows the mirrors as perpetually overdue with "last run: —" even
+ * though the sweep runs fine (only sokosumi-sync used to freshen its row).
+ *
+ * UTC-cron slugs share one nextRunAt; local-time rows (eod-report) get a
+ * per-row computation since each user's timezone differs.
+ */
+export async function freshenSweepMirrors(
+  slug:
+    | 'sokosumi-sync'
+    | 'inbox-refresh'
+    | 'urgent-interrupts'
+    | 'task-augmentation'
+    | 'input-responder'
+    | 'eod-report',
+): Promise<void> {
+  const spec = SYSTEM_SCHEDULES.find((s) => s.slug === slug);
+  if (!spec) return;
+  const now = new Date();
+  // Only enabled rows: a user who toggled a sweep off must not see a fresh
+  // "last run" stamp on the thing they disabled (the sweep skips them via
+  // isSystemSweepEnabled, so a stamp would be a lie).
+  if (!spec.localTime) {
+    const nextRunAt = safeNextRun(spec.cronExpr, 'UTC', now) ?? new Date(now.getTime() + 60 * 60_000);
+    await prisma.scheduledTask.updateMany({
+      where: { id: { startsWith: `system-${slug}-` }, kind: 'system_sweep', enabled: true },
+      data: { lastRunAt: now, nextRunAt },
+    });
+    return;
+  }
+  // Local-time rows: few enough to update individually per timezone.
+  const rows = await prisma.scheduledTask.findMany({
+    where: { id: { startsWith: `system-${slug}-` }, kind: 'system_sweep', enabled: true },
+    select: { id: true, timezone: true },
+  });
+  for (const r of rows) {
+    const nextRunAt = safeNextRun(spec.cronExpr, r.timezone, now) ?? new Date(now.getTime() + 24 * 60 * 60_000);
+    await prisma.scheduledTask.update({ where: { id: r.id }, data: { lastRunAt: now, nextRunAt } }).catch(() => {});
+  }
 }
 
 /**

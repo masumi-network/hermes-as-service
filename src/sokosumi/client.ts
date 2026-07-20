@@ -514,14 +514,17 @@ export async function fetchWorkspaceSnapshot(
     return [] as Array<{ id: string; name?: string; slug?: string }>;
   });
 
-  // Per-org pulls — tasks, completed jobs, conversations. Run in parallel
+  // Per-org pulls — tasks, completed jobs, coworkers. Run in parallel
   // across orgs (typically 1–3 per user). Cap so we don't fan out badly
-  // for users with many orgs.
+  // for users with many orgs. NOTE: marketplace conversations are NOT
+  // pulled — the first-party orchestrator actor always gets 403 on
+  // /conversations, so the fetch was pure daily log noise; the snapshot's
+  // conversations field stays empty by construction.
   const orgsToFetch = orgs.slice(0, 5);
   const orgWorkspaces = await Promise.all(
     orgsToFetch.map(async (org) => {
       const orgClient = baseClient.withOrganization(org.id);
-      const [tasks, completedJobs, conversations, coworkers] = await Promise.all([
+      const [tasks, completedJobs, coworkers] = await Promise.all([
         orgClient.listTasks({ limit: 50, scope: 'workspace' }).catch((err) => {
           logger.warn({ err, userId, orgId: org.id, endpoint: '/tasks' }, 'sokosumi_partial_failure');
           return [] as unknown[];
@@ -530,15 +533,12 @@ export async function fetchWorkspaceSnapshot(
           logger.warn({ err, userId, orgId: org.id, endpoint: '/jobs' }, 'sokosumi_partial_failure');
           return [] as unknown[];
         }),
-        orgClient.listConversations({ limit: 5 }).catch((err) => {
-          logger.warn({ err, userId, orgId: org.id, endpoint: '/conversations' }, 'sokosumi_partial_failure');
-          return [] as unknown[];
-        }),
         orgClient.listCoworkers({ scope: 'whitelisted', limit: 30 }).catch((err) => {
           logger.warn({ err, userId, orgId: org.id, endpoint: '/coworkers' }, 'sokosumi_partial_failure');
           return [] as unknown[];
         }),
       ]);
+      const conversations: unknown[] = [];
 
       // Enrich top-10 most recent tasks with full body (description, events,
       // linked jobs). The list endpoint returns TaskListItem (summary only);

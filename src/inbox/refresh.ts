@@ -6,6 +6,7 @@ import { listIntegrations } from '../integrations/manager.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60_000; // 6h
+const RETRY_BACKOFF_MS = 2 * 60 * 60_000; // failed attempts retry after ~2h, not hourly
 
 /**
  * Silent inbox refresh — keep Hermes' memory current with the user's mail.
@@ -32,10 +33,13 @@ export async function refreshInboxForInstance(instanceId: string): Promise<boole
 
   // Skip if no mail/calendar MCPs are connected — there's nothing to scan.
   const integrations = await listIntegrations(row.userId);
+  // 'connected' ONLY: 'pending' explicitly means the MCP is NOT on the
+  // machine yet (queued while it was down) — prompting the agent to scan
+  // mail with tools it doesn't have burns an LLM turn and confuses memory.
   const mailProviders = integrations
     .filter(
       (i) =>
-        (i.status === 'connected' || i.status === 'connecting' || i.status === 'pending') &&
+        i.status === 'connected' &&
         (i.provider === 'gmail' ||
           i.provider === 'outlook' ||
           i.provider === 'google_calendar' ||
@@ -54,10 +58,26 @@ export async function refreshInboxForInstance(instanceId: string): Promise<boole
 
   const prompt = buildInboxRefreshPrompt(mailProviders, since);
 
+  // Stamp the ATTEMPT before calling: failed attempts back off ~2h via the
+  // sweep's attempt filter instead of retrying every hourly tick. The
+  // success watermark (lastInboxRefreshAt) is deliberately untouched on
+  // failure — it doubles as the "scan mail since X" boundary, and moving
+  // it forward would permanently skip the unscanned mail window.
+  await prisma.hermesInstance.update({
+    where: { id: instanceId },
+    data: { lastInboxRefreshAttemptAt: new Date() },
+  });
+
   try {
     await callHermesChat(row.endpointUrl, apiKey, prompt, 5 * 60_000);
   } catch (err) {
     log.warn({ err }, 'inbox_refresh_call_failed');
+    await recordEvent({
+      userId: row.userId,
+      instanceId,
+      event: 'onboarding_step',
+      detail: { step: 'inbox_refresh', status: 'failed', providers: mailProviders },
+    });
     return false;
   }
 
@@ -80,14 +100,33 @@ export async function refreshInboxForInstance(instanceId: string): Promise<boole
  * them sequentially. Capped per tick so a backlog doesn't stall the
  * orchestrator.
  */
+let sweepInFlight = false;
+
 export async function runInboxRefreshSweep(): Promise<{ scanned: number; refreshed: number }> {
+  // Re-entrancy guard (same pattern as the pool sweep): a worst-case tick
+  // (50 instances x 5-min timeout) exceeds the hourly cron interval, and an
+  // overlapping sweep would re-select the same in-flight instances and pay
+  // for duplicate agent turns.
+  if (sweepInFlight) return { scanned: 0, refreshed: 0 };
+  sweepInFlight = true;
+  try {
+    return await runInboxRefreshSweepInner();
+  } finally {
+    sweepInFlight = false;
+  }
+}
+
+async function runInboxRefreshSweepInner(): Promise<{ scanned: number; refreshed: number }> {
   const cutoff = new Date(Date.now() - REFRESH_INTERVAL_MS);
+  const attemptCutoff = new Date(Date.now() - RETRY_BACKOFF_MS);
   const due = await prisma.hermesInstance.findMany({
     where: {
       destroyedAt: null,
       onboardedAt: { not: null },
       status: { in: ['ready', 'running', 'suspended'] },
       OR: [{ lastInboxRefreshAt: null }, { lastInboxRefreshAt: { lt: cutoff } }],
+      // Failed attempts back off: skip anyone attempted in the last ~2h.
+      AND: [{ OR: [{ lastInboxRefreshAttemptAt: null }, { lastInboxRefreshAttemptAt: { lt: attemptCutoff } }] }],
     },
     select: { id: true, userId: true },
     take: 50,

@@ -1208,6 +1208,13 @@ router.post('/admin/maintenance/resync-system-schedules', async (c) => {
         sokosumiConfigured: true,
         hasMailOrCalendar,
       });
+      // ?native=1 also reconciles each machine's native prompt cronjobs
+      // (one agent turn per instance — sequential, so an all-fleet resync
+      // with native takes a while; run it when rolling out prompt changes).
+      if (c.req.query('native') === '1') {
+        const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
+        await syncNativePromptCrons(row.id);
+      }
       synced++;
     } catch (err) {
       failures.push({ userId: row.userId, error: err instanceof Error ? err.message : String(err) });

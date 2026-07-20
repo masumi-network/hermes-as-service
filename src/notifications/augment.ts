@@ -91,7 +91,11 @@ export async function augmentTasksForInstance(instanceId: string): Promise<{ com
     return { commented: 0, scanned: 0 };
   }
 
-  newTasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // OLDEST first, watermark advanced only past what we actually handled —
+  // same semantics as the input-responder. (Newest-first + advance-to-newest
+  // silently skipped the over-cap tasks forever when >MAX arrived in one
+  // window.)
+  newTasks.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const targets = newTasks.slice(0, MAX_TASKS_PER_TICK);
 
   const apiKey = await decryptSecret(row.apiServerKey);
@@ -106,10 +110,12 @@ export async function augmentTasksForInstance(instanceId: string): Promise<{ com
     }
   }
 
-  // Advance watermark to the newest task we considered.
+  // Advance watermark to the newest task we HANDLED (clamped to now); tasks
+  // beyond the per-tick cap stay above it and get picked up next tick.
+  const handledTs = new Date(targets[targets.length - 1]!.createdAt).getTime();
   await prisma.hermesInstance.update({
     where: { id: instanceId },
-    data: { lastTaskAugmentationAt: new Date(targets[0]!.createdAt) },
+    data: { lastTaskAugmentationAt: new Date(Math.min(handledTs, Date.now())) },
   });
   await recordEvent({
     userId: row.userId,

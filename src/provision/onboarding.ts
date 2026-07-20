@@ -320,6 +320,16 @@ export async function runOnboarding(
     event: 'onboarding_done',
     detail: { connectedProviders },
   });
+  // Install the recurring background prompts as native cronjobs on the
+  // machine (weekly wrap, stuck-jobs reminder, …). MUST run after the
+  // status flip above — the sync helper refuses non-ready instances.
+  // Fire-and-forget: the agent turn is slow and onboarding is done.
+  try {
+    const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
+    void syncNativePromptCrons(row.id).catch(() => {});
+  } catch (err) {
+    log.warn({ err }, 'native_prompts_kickoff_failed');
+  }
   log.info('onboarding complete');
 }
 
@@ -637,7 +647,11 @@ deliver to "local". Prompt content:
       Use your Gmail/Outlook tools if connected.
    4. Today's calendar — only mention meetings that need prep or that \
       they might forget. Skip routine recurring blocks.
-   5. One concrete next action — the single most valuable thing they \
+   5. Other connected tools — if you have MCP tools for Slack, Linear, \
+      GitHub, Notion, HubSpot or similar, check each for unread mentions, \
+      items assigned to or awaiting the user, and review requests. Only \
+      items worth acting on today; silently skip tools you don't have.
+   6. One concrete next action — the single most valuable thing they \
       could do in the next hour, with the exact prompt they could send \
       you to start it.
 
@@ -1035,7 +1049,7 @@ function formatSokosumiSnapshotForMemory(snapshot: {
     // assigns work to these (not to itself).
     if (Array.isArray(ws.coworkers) && ws.coworkers.length > 0) {
       lines.push(`## Coworkers in this org (${ws.coworkers.length})`);
-      lines.push('These are the workers Hermes can assign tasks to. Hermes is one of them — but should NEVER assign tasks to itself; Hermes is the coordinator, not the executor.');
+      lines.push('These are the workers Hermes can assign tasks to. Hermes itself is NOT in this list — it is the first-party orchestrator, not a coworker, and must never try to assign tasks to itself; Hermes coordinates, the coworkers execute.');
       for (const c of ws.coworkers as Array<{
         id?: string;
         slug?: string;

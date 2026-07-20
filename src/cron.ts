@@ -9,25 +9,60 @@ import { runTaskAugmentationSweep } from './notifications/augment.js';
 import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
+import { freshenSweepMirrors } from './schedules/system-schedules.js';
 
-let scheduled: cron.ScheduledTask | null = null;
-let sokosumiScheduled: cron.ScheduledTask | null = null;
-let inboxRefreshScheduled: cron.ScheduledTask | null = null;
-let urgentInterruptScheduled: cron.ScheduledTask | null = null;
-let taskAugmentationScheduled: cron.ScheduledTask | null = null;
-let inputResponderScheduled: cron.ScheduledTask | null = null;
-let eodReportScheduled: cron.ScheduledTask | null = null;
-let poolReplenishScheduled: cron.ScheduledTask | null = null;
+const registered = new Map<string, cron.ScheduledTask>();
 
 /**
- * Marks idle instances as suspended in the DB. Sprites itself releases compute
- * automatically on idle, so this is bookkeeping only — Sokosumi reads `status`
- * to decide whether to call /resume before sending traffic.
+ * Register a cron with the shared guard rails every sweep needs:
+ * once-only registration, a try/catch so a transient error can never
+ * become an unhandled rejection (node-cron does not await or catch),
+ * and a best-effort freshen of the sweep's per-instance mirror rows so
+ * the Sokosumi settings panel shows truthful last/next-run times.
+ */
+function register(
+  name: string,
+  expr: string,
+  run: () => Promise<unknown>,
+  mirrorSlug?: Parameters<typeof freshenSweepMirrors>[0],
+): void {
+  if (registered.has(name)) return;
+  registered.set(
+    name,
+    cron.schedule(
+      expr,
+      async () => {
+        let ok = false;
+        try {
+          await run();
+          ok = true;
+        } catch (err) {
+          logger.error({ err }, `${name}_threw`);
+        }
+        // Freshen mirrors only after a tick that actually ran — a crashed
+        // sweep must not stamp a successful-looking "last run".
+        if (ok && mirrorSlug) {
+          try {
+            await freshenSweepMirrors(mirrorSlug);
+          } catch (err) {
+            logger.warn({ err, mirrorSlug }, 'sweep_mirror_freshen_failed');
+          }
+        }
+      },
+      { scheduled: true },
+    ),
+  );
+  logger.info(`${name}_started`);
+}
+
+/**
+ * Marks idle instances as suspended in the DB. Pure bookkeeping on Fly
+ * always-on (no compute is released; the chat proxy flips status back to
+ * running on the next message) — Sokosumi uses it as a "we haven't heard
+ * from this user lately" signal.
  */
 export function startIdleSuspendCron(): void {
-  if (scheduled) return;
-  scheduled = cron.schedule('*/5 * * * *', runOnce, { scheduled: true });
-  logger.info('idle_suspend_cron_started');
+  register('idle_suspend_cron', '*/5 * * * *', runOnce);
 }
 
 export async function runOnce(): Promise<number> {
@@ -43,39 +78,13 @@ export async function runOnce(): Promise<number> {
   return result.count;
 }
 
-export function stopIdleSuspendCron(): void {
-  if (scheduled) {
-    scheduled.stop();
-    scheduled = null;
-  }
-}
-
 /**
  * Hourly cron that picks every instance whose Sokosumi workspace snapshot
  * is >23h old and re-syncs. Caps at 100 instances per tick. Skips
- * gracefully if SOKOSUMI_COWORKER_API_KEY isn't configured.
+ * gracefully if no Sokosumi API key is configured.
  */
 export function startSokosumiDailySyncCron(): void {
-  if (sokosumiScheduled) return;
-  sokosumiScheduled = cron.schedule(
-    '0 * * * *', // top of every hour
-    async () => {
-      try {
-        await runSokosumiDailySweep();
-      } catch (err) {
-        logger.error({ err }, 'sokosumi_daily_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('sokosumi_daily_sync_cron_started');
-}
-
-export function stopSokosumiDailySyncCron(): void {
-  if (sokosumiScheduled) {
-    sokosumiScheduled.stop();
-    sokosumiScheduled = null;
-  }
+  register('sokosumi_daily_sync_cron', '0 * * * *', runSokosumiDailySweep, 'sokosumi-sync');
 }
 
 /**
@@ -84,26 +93,7 @@ export function stopSokosumiDailySyncCron(): void {
  * scan new mail and update memory. No user-visible output.
  */
 export function startInboxRefreshCron(): void {
-  if (inboxRefreshScheduled) return;
-  inboxRefreshScheduled = cron.schedule(
-    '15 * * * *', // 15 past every hour
-    async () => {
-      try {
-        await runInboxRefreshSweep();
-      } catch (err) {
-        logger.error({ err }, 'inbox_refresh_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('inbox_refresh_cron_started');
-}
-
-export function stopInboxRefreshCron(): void {
-  if (inboxRefreshScheduled) {
-    inboxRefreshScheduled.stop();
-    inboxRefreshScheduled = null;
-  }
+  register('inbox_refresh_cron', '15 * * * *', runInboxRefreshSweep, 'inbox-refresh');
 }
 
 /**
@@ -113,26 +103,7 @@ export function stopInboxRefreshCron(): void {
  * to prevent spam. YES events fire a notification to the user's outbox.
  */
 export function startUrgentInterruptCron(): void {
-  if (urgentInterruptScheduled) return;
-  urgentInterruptScheduled = cron.schedule(
-    '30 * * * *', // 30 past every hour (staggered from inbox refresh)
-    async () => {
-      try {
-        await runUrgentInterruptSweep();
-      } catch (err) {
-        logger.error({ err }, 'urgent_interrupt_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('urgent_interrupt_cron_started');
-}
-
-export function stopUrgentInterruptCron(): void {
-  if (urgentInterruptScheduled) {
-    urgentInterruptScheduled.stop();
-    urgentInterruptScheduled = null;
-  }
+  register('urgent_interrupt_cron', '30 * * * *', runUrgentInterruptSweep, 'urgent-interrupts');
 }
 
 /**
@@ -143,85 +114,30 @@ export function stopUrgentInterruptCron(): void {
  * task. Skips users at low/medium autonomy entirely.
  */
 export function startTaskAugmentationCron(): void {
-  if (taskAugmentationScheduled) return;
-  taskAugmentationScheduled = cron.schedule(
-    '45 * * * *', // 45 past every hour (staggered from urgent interrupts)
-    async () => {
-      try {
-        await runTaskAugmentationSweep();
-      } catch (err) {
-        logger.error({ err }, 'task_augmentation_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('task_augmentation_cron_started');
-}
-
-export function stopTaskAugmentationCron(): void {
-  if (taskAugmentationScheduled) {
-    taskAugmentationScheduled.stop();
-    taskAugmentationScheduled = null;
-  }
+  register('task_augmentation_cron', '45 * * * *', runTaskAugmentationSweep, 'task-augmentation');
 }
 
 /**
- * Every 5 minutes — input-responder sweep.
+ * Every 5 minutes — input-responder + follow-up continuation sweep.
  * Detects Sokosumi jobs paused in AWAITING_INPUT and, at medium/high autonomy,
  * drives Hermes to answer them (high = submit immediately, medium = raise a
  * confirmation card). Low autonomy is skipped (urgent-interrupts notifies).
+ * The same sweep also spots newly-COMPLETED jobs and asks Hermes whether a
+ * planned next step should continue (create follow-up tasks / comment).
  */
 export function startInputResponderCron(): void {
-  if (inputResponderScheduled) return;
-  inputResponderScheduled = cron.schedule(
-    '2-59/5 * * * *',
-    async () => {
-      try {
-        await runInputResponderSweep();
-      } catch (err) {
-        logger.error({ err }, 'input_responder_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('input_responder_cron_started');
-}
-
-export function stopInputResponderCron(): void {
-  if (inputResponderScheduled) {
-    inputResponderScheduled.stop();
-    inputResponderScheduled = null;
-  }
+  register('input_responder_cron', '2-59/5 * * * *', runInputResponderSweep, 'input-responder');
 }
 
 /**
- * Hourly cron — end-of-day personal cron summary. Fires every hour; the
- * sweep itself filters by current local hour (22:00) per-user via the
- * instance's stored timezone, and gates on the user's "eod-report"
- * system_sweep toggle. Each delivery is idempotent (skipped if today's
- * report already sits in the user's outbox).
+ * Hourly cron — end-of-day personal cron summary. Fires at :50 (staggered
+ * off the :00 sokosumi-sync tick); the sweep itself filters by current
+ * local hour (22:00) per-user via the instance's stored timezone, and
+ * gates on the user's "eod-report" system_sweep toggle. Each delivery is
+ * idempotent (skipped if today's report already sits in the user's outbox).
  */
 export function startEodReportCron(): void {
-  if (eodReportScheduled) return;
-  eodReportScheduled = cron.schedule(
-    '0 * * * *',
-    async () => {
-      try {
-        await runEodReportSweep();
-      } catch (err) {
-        logger.error({ err }, 'eod_report_sweep_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  logger.info('eod_report_cron_started');
-}
-
-export function stopEodReportCron(): void {
-  if (eodReportScheduled) {
-    eodReportScheduled.stop();
-    eodReportScheduled = null;
-  }
+  register('eod_report_cron', '50 * * * *', runEodReportSweep, 'eod-report');
 }
 
 /**
@@ -231,26 +147,6 @@ export function stopEodReportCron(): void {
  * fills after a deploy without waiting for the first tick.
  */
 export function startPoolReplenishCron(): void {
-  if (poolReplenishScheduled) return;
-  poolReplenishScheduled = cron.schedule(
-    '*/2 * * * *',
-    async () => {
-      try {
-        await runPoolReplenishSweep();
-      } catch (err) {
-        logger.error({ err }, 'pool_replenish_cron_threw');
-      }
-    },
-    { scheduled: true },
-  );
-  // Fill immediately on boot (background).
+  register('pool_replenish_cron', '*/2 * * * *', runPoolReplenishSweep);
   schedulePoolReplenishSoon();
-  logger.info('pool_replenish_cron_started');
-}
-
-export function stopPoolReplenishCron(): void {
-  if (poolReplenishScheduled) {
-    poolReplenishScheduled.stop();
-    poolReplenishScheduled = null;
-  }
 }

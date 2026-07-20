@@ -172,6 +172,32 @@ async function createScheduleResponse(
   }
   const next = safeNextRun(input.cron_expr, input.timezone);
   if (!next) return c.json({ error: { message: 'could not compute next run' } }, 400);
+  // Upsert by (instance, name) — but ONLY for the orchestrator-defined
+  // native prompt names (+ daily-brief): agents re-register those mirrors
+  // on every reconcile pass and duplicates would double-list them. User
+  // schedules keep plain-create semantics so a re-used name can never
+  // silently clobber an existing user schedule's content.
+  const { NATIVE_PROMPTS } = await import('../schedules/native-prompts.js');
+  const upsertableNames = new Set([...NATIVE_PROMPTS.map((n) => n.name), 'daily-brief']);
+  const existing = upsertableNames.has(input.name)
+    ? await prisma.scheduledTask.findFirst({
+        where: { instanceId: row.id, name: input.name, kind: 'user' },
+        select: { id: true },
+      })
+    : null;
+  if (existing) {
+    const updated = await prisma.scheduledTask.update({
+      where: { id: existing.id },
+      data: {
+        prompt: input.prompt,
+        cronExpr: input.cron_expr,
+        timezone: input.timezone,
+        enabled: input.enabled,
+        nextRunAt: next,
+      },
+    });
+    return c.json(toApiShape(updated), 200);
+  }
   const created = await prisma.scheduledTask.create({
     data: {
       instanceId: row.id,

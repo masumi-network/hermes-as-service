@@ -153,7 +153,24 @@ export async function respondToInputRequestsForInstance(
   return { prompted: batch.length };
 }
 
+let sweepInFlight = false;
+
 export async function runInputResponderSweep(): Promise<{ scanned: number; prompted: number }> {
+  // Re-entrancy guard: each instance with paused jobs holds a 4-minute
+  // agent-turn timeout, so two busy instances already exceed the 5-minute
+  // tick — an overlapping sweep would read the not-yet-advanced watermark
+  // and prompt the SAME jobs concurrently (duplicate spend; at high
+  // autonomy potentially duplicate provide_job_input submissions).
+  if (sweepInFlight) return { scanned: 0, prompted: 0 };
+  sweepInFlight = true;
+  try {
+    return await runInputResponderSweepInner();
+  } finally {
+    sweepInFlight = false;
+  }
+}
+
+async function runInputResponderSweepInner(): Promise<{ scanned: number; prompted: number }> {
   const due = await prisma.hermesInstance.findMany({
     where: {
       destroyedAt: null,
@@ -163,6 +180,7 @@ export async function runInputResponderSweep(): Promise<{ scanned: number; promp
     select: { id: true },
     take: 100,
   });
+  const { continueFollowupsForInstance } = await import('./followup-continuation.js');
   let prompted = 0;
   for (const instance of due) {
     try {
@@ -170,6 +188,13 @@ export async function runInputResponderSweep(): Promise<{ scanned: number; promp
       if (res.prompted > 0) prompted++;
     } catch (err) {
       logger.error({ err, instanceId: instance.id }, 'input_responder_sweep_item_failed');
+    }
+    // Plan continuation rides the same tick: newly-COMPLETED jobs get a
+    // "was there an agreed next step?" pass (see followup-continuation.ts).
+    try {
+      await continueFollowupsForInstance(instance.id);
+    } catch (err) {
+      logger.error({ err, instanceId: instance.id }, 'followup_continuation_item_failed');
     }
   }
   if (due.length > 0) {

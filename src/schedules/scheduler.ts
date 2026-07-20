@@ -25,10 +25,34 @@ export function stopScheduler(): void {
 
 /** Public so tests / admin endpoints can trigger a tick on demand. */
 export async function runDueOnce(): Promise<number> {
+  // Rows overdue by MORE than an hour are re-armed to their next occurrence
+  // WITHOUT dispatching. The orchestrator scheduler is normally disabled
+  // (native machine cron is THE scheduler), so rows can sit overdue for
+  // weeks — dispatching that backlog on an admin "run now" would fire
+  // dozens of paid agent turns + off-hours messages at once; but silently
+  // ignoring them would strand the rows forever (nextRunAt is only ever
+  // advanced here). Skip-and-re-arm keeps them alive and cheap.
+  const stale = await prisma.scheduledTask.findMany({
+    where: {
+      enabled: true,
+      nextRunAt: { lt: new Date(Date.now() - 60 * 60_000) },
+      kind: { in: ['user', 'system_prompt'] },
+    },
+    select: { id: true, cronExpr: true, timezone: true },
+    take: 200,
+  });
+  for (const row of stale) {
+    const next = safeNextRun(row.cronExpr, row.timezone, new Date());
+    await prisma.scheduledTask
+      .update({ where: { id: row.id }, data: next ? { nextRunAt: next } : { enabled: false, lastError: 'invalid cron expression' } })
+      .catch(() => {});
+  }
+
   const due = await prisma.scheduledTask.findMany({
     where: {
       enabled: true,
-      nextRunAt: { lte: new Date() },
+      // Due within the last hour ONLY — older rows were just re-armed above.
+      nextRunAt: { lte: new Date(), gte: new Date(Date.now() - 60 * 60_000) },
       // system_sweep rows are informational mirrors of orchestrator-level
       // background sweeps — they don't dispatch a prompt themselves.
       kind: { in: ['user', 'system_prompt'] },
@@ -93,22 +117,6 @@ async function runOne(task: Task): Promise<void> {
     });
     return;
   }
-
-  // Mirror this firing as a Sokosumi task on the user's personal scope
-  // when the env supports it (preprod today). Silent no-op everywhere
-  // else. The cron runs regardless of whether the mirror succeeds.
-  const { startCronTask } = await import('./cron-task-logger.js');
-  const cronTask = await startCronTask({
-    userId: instance.userId,
-    sokosumiEnv: instance.sokosumiEnv,
-    cronName: task.name,
-    cronExpr: task.cronExpr,
-    prompt: task.prompt,
-  }).catch((err) => {
-    log.warn({ err }, 'cron_task_mirror_start_failed');
-    return null;
-  });
-  await cronTask?.markRunning();
 
   const requestId = randomUUID();
   let apiServerKey: string;
@@ -177,7 +185,6 @@ async function runOne(task: Task): Promise<void> {
       data: { nextRunAt: next, lastRunAt: new Date(), lastError: err instanceof Error ? err.message : 'fetch failed' },
     });
     await recordEvent({ userId: instance.userId, instanceId: instance.id, event: 'chat_failed', detail: { scheduledTaskId: task.id, source: 'scheduler' } });
-    await cronTask?.markFailed(err instanceof Error ? err.message : 'fetch failed');
     return;
   }
 
@@ -240,9 +247,12 @@ async function runOne(task: Task): Promise<void> {
   });
 
   // Push the result to the user's outbox so Sokosumi's poll picks it up.
-  // Skip on errors with empty content — no point notifying the user about
-  // an internal failure (it shows in the admin dashboard instead).
-  if (content) {
+  // Skip on errors with empty content, and drop quiet acknowledgements —
+  // same sentinel set the machine's cron-outbox-bridge discards, so both
+  // delivery paths behave identically and "ok" never reaches the chat.
+  const QUIET_ACKS = new Set(['', 'ok', 'ok.', 'done', 'done.', '[silent]', '[noop]', '[none]', '[noreply]']);
+  const isQuietAck = QUIET_ACKS.has(content.trim().toLowerCase());
+  if (content && !isQuietAck) {
     await enqueueOutboxMessage({
       instanceId: instance.id,
       userId: instance.userId,
@@ -258,16 +268,5 @@ async function runOne(task: Task): Promise<void> {
     detail: { scheduledTaskId: task.id, source: 'scheduler', latencyMs: Date.now() - t0 },
   });
 
-  // Finalise the Sokosumi task mirror with the result (or the error).
-  if (errorMessage) {
-    await cronTask?.markFailed(errorMessage);
-  } else {
-    const summary =
-      content.length > 0
-        ? content
-        : '(cron ran but produced no chat output — likely a silent acknowledgement)';
-    await cronTask?.markCompleted(summary);
-  }
-
-  log.info({ latencyMs: Date.now() - t0, errorMessage, cronTaskMirrored: !!cronTask }, 'scheduled_task_done');
+  log.info({ latencyMs: Date.now() - t0, errorMessage }, 'scheduled_task_done');
 }
