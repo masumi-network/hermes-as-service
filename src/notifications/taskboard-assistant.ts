@@ -257,7 +257,7 @@ function buildTaskboardPrompt(tasks: BoardTask[], autonomy: 'medium' | 'high'): 
   const gatingNote =
     autonomy === 'high'
       ? 'At high autonomy this executes immediately — you own the call.'
-      : 'At medium, firing it raises an approval card for the user — that IS the check-with-the-user step; fire it, then stop.';
+      : 'At medium, just fire the tool and stop — the orchestrator handles it (a comment posts now; a provide_job_input goes to the user to approve). Don\'t ask in chat first.';
 
   return `Internal task — reply discarded; act through tools only.
 

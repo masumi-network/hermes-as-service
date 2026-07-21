@@ -117,11 +117,21 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 // ---------- MCP tool catalog ----------
 // Each tool tagged with the minimum autonomy required:
-//   read    — available at all autonomy levels
-//   write   — requires medium or high
-//   spend   — requires medium or high (Hermes asks first at medium, fires
-//             autonomously at high). Costs Sokosumi credits.
-type ToolAccess = 'read' | 'write' | 'spend';
+//   read        — available at all autonomy levels; always executes.
+//   write-light — a trivial, free, reversible write (task comments). Blocked
+//                 at low; at medium it EXECUTES immediately (no confirmation
+//                 card), same as a read; executes at high.
+//   write       — requires medium or high. At medium, raises a confirmation
+//                 card the user must approve.
+//   spend       — requires medium or high (confirmation card at medium, fires
+//                 autonomously at high). Costs Sokosumi credits.
+type ToolAccess = 'read' | 'write-light' | 'write' | 'spend';
+
+/** Writes that raise a confirmation card at medium autonomy (write-light and
+ *  read do not). Keeps the gating in one place. */
+export function confirmsAtMedium(access: ToolAccess): boolean {
+  return access === 'write' || access === 'spend';
+}
 
 interface ToolDef {
   name: string;
@@ -279,7 +289,10 @@ const TOOLS_ALL: ToolDef[] = [
   },
   // ---------- write tools (medium + high autonomy) ----------
   {
-    access: 'write',
+    // write-light: comments are free + reversible, so at medium they execute
+    // immediately (no confirmation card) — same feel as a read. Still blocked
+    // at low. Creating tasks/jobs and spending stay gated ('write'/'spend').
+    access: 'write-light',
     name: 'sokosumi_add_task_comment',
     description:
       "Post a comment on ANY Sokosumi task you can access — including tasks owned by OTHER coworkers (with the user's granted workspace access). Free (no credits). Two main uses: (1) add useful context/background the task creator should know, and (2) ANSWER a coworker's question — when a coworker asks something in a task's events/comments, reply here to unblock them. Don't comment without substance. If it returns PARKED (task_parked) the task is frozen pending the user's approval; if it returns grant-required, the user must approve your workspace access first.",
@@ -384,7 +397,7 @@ const TOOLS_ALL: ToolDef[] = [
  * always exposed; write tools at medium + high; spend tools at medium +
  * high (medium is gated by SOUL.md rules at the prompt layer, not here).
  */
-function toolsForAutonomy(level: 'low' | 'medium' | 'high'): ToolDef[] {
+export function toolsForAutonomy(level: 'low' | 'medium' | 'high'): ToolDef[] {
   if (level === 'low') return TOOLS_ALL.filter((t) => t.access === 'read');
   // medium + high get everything; gating between them is handled by SOUL.md
   // rules ("ask first" at medium, "go" at high).
@@ -522,8 +535,8 @@ export async function callTool(
   // confirmation box. Sokosumi posts /approve or /reject back to the
   // orchestrator; on approve, the orchestrator replays this same tool
   // call with the stored args and pushes the result to Hermes via the
-  // outbox.
-  if (toolDef && toolDef.access !== 'read' && ctx.autonomyLevel === 'medium') {
+  // outbox. write-light tools (comments) are exempt — they execute now.
+  if (toolDef && confirmsAtMedium(toolDef.access) && ctx.autonomyLevel === 'medium') {
     const { createPendingConfirmation, summarizeToolCall } = await import('../confirmations/store.js');
     const summary = await summarizeToolCall(name, args, ctx);
     const pending = await createPendingConfirmation({
