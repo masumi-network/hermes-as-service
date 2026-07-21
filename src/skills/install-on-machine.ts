@@ -110,12 +110,14 @@ export function prepareSkill(
 // decoded once — so we append raw base64 chunks and `base64 -d` the whole
 // temp per file. base64 payloads contain only [A-Za-z0-9+/=]; dir/paths are
 // pre-validated to a safe charset — nothing here is shell-injectable.
-// Fly's guest exec endpoint has a SMALL per-request body limit (empirically
-// well under 24KB — even a single ~20KB command is rejected PayloadTooLarge).
-// Keep both very conservative; a skill is materialized across however many
-// tiny execs it takes.
-const MAX_B64_CHUNK = 3 * 1024; // max base64 chars per single printf line
-const MAX_EXEC_BYTES = 4 * 1024; // max command length per exec
+// Fly's guest exec endpoint rejects a command payload over ~8KB
+// (PayloadTooLarge — measured: 8KB passes, 16KB fails). Stay under that with
+// margin. Bigger-but-safe chunks also mean fewer exec CALLS, which matters
+// because Fly rate-limits the exec API (429) — see the throttle + retry below.
+const MAX_B64_CHUNK = 6 * 1024; // max base64 chars per single printf line
+const MAX_EXEC_BYTES = 7 * 1024; // max command length per exec
+const EXEC_THROTTLE_MS = 200; // pause between execs to stay under Fly's rate limit
+const EXEC_MAX_RETRIES = 5; // retry a rate-limited (429) exec with backoff
 
 /** Ordered shell steps that build the skill in `staging` then swap it live.
  *  No single step exceeds MAX_B64_CHUNK+overhead. Pure (testable). */
@@ -212,9 +214,8 @@ export async function writeSkillToMachine(
     const fly = new FlyClient();
     const execs = packInstallExecs(buildInstallSteps(prepared));
     for (let i = 0; i < execs.length; i++) {
-      const res = await fly.execMachine(appName, machineId, ['/bin/sh', '-c', execs[i]!], {
-        timeoutSec: 30,
-      });
+      if (i > 0) await sleep(EXEC_THROTTLE_MS);
+      const res = await execWithRetry(fly, appName, machineId, execs[i]!);
       if (res.exitCode !== 0 || !res.stdout.includes(BATCH_SENTINEL)) {
         const msg = (res.stderr || res.stdout || '').slice(0, 300);
         throw new Error(
@@ -224,6 +225,29 @@ export async function writeSkillToMachine(
     }
     logger.info({ appName, machineId, dir: prepared.dir, batches: execs.length }, 'skill_written_to_machine');
   });
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Run one exec, retrying with exponential backoff on Fly's 429 rate limit
+ *  (many small execs per install can trip it). */
+async function execWithRetry(
+  fly: FlyClient,
+  appName: string,
+  machineId: string,
+  script: string,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fly.execMachine(appName, machineId, ['/bin/sh', '-c', script], { timeoutSec: 30 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const rateLimited = /failed: 429|rate limit|resource_exhausted/i.test(msg);
+      if (!rateLimited || attempt >= EXEC_MAX_RETRIES) throw err;
+      await sleep(500 * 2 ** attempt); // 0.5, 1, 2, 4, 8s
+      logger.info({ appName, machineId, attempt: attempt + 1 }, 'skill_exec_rate_limited_retry');
+    }
+  }
 }
 
 /** Remove a marketplace skill dir (and any leftover staging/temp) from the

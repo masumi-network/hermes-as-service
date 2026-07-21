@@ -5,7 +5,7 @@ import {
   prepareSkill,
 } from '../src/skills/install-on-machine.js';
 
-const MAX_EXEC_BYTES = 24 * 1024;
+const MAX_EXEC_BYTES = 7 * 1024;
 
 function makePrepared(files: { path: string; contents: string }[]) {
   // prepareSkill sanitizes + requires a top-level SKILL.md; add one if missing.
