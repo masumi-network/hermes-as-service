@@ -612,18 +612,31 @@ export async function executeTool(
 
   switch (name) {
     case 'sokosumi_list_organizations': {
+      // Org enumeration is session-only since Sokosumi #3394 and returns []
+      // for us. Say so explicitly rather than implying the user has no orgs.
       const orgs = await client.listOrganizations();
+      if (orgs.length === 0) {
+        return JSON.stringify(
+          {
+            count: 0,
+            organizations: [],
+            note: 'Organization enumeration is not available to the assistant. Working in the personal workspace.',
+          },
+          null,
+          2,
+        );
+      }
       return JSON.stringify({ count: orgs.length, organizations: orgs }, null, 2);
     }
 
     case 'sokosumi_list_tasks': {
       // Aggregate across orgs in parallel — sequential per-org calls were
       // adding ~500–800ms per extra org for users with multiple workspaces.
-      const orgs = await client.listOrganizations();
+      const orgs = await client.listWorkspaceScopes();
       const status = typeof args['status'] === 'string' ? (args['status'] as string) : undefined;
       const q = typeof args['q'] === 'string' ? (args['q'] as string).toLowerCase() : undefined;
       const limit = clampNumber(args['limit'], 50, 100);
-      const allTasks: Array<{ orgId: string; orgName?: string; task: unknown }> = [];
+      const allTasks: Array<{ orgId: string | null; orgName?: string; task: unknown }> = [];
       const settled = await Promise.allSettled(
         orgs.slice(0, 5).map((org) =>
           client.withOrganization(org.id).listTasks({ limit, scope: 'workspace' }).then((tasks) => ({ org, tasks })),
@@ -657,7 +670,7 @@ export async function executeTool(
       try {
         return JSON.stringify(await client.getTask(id), null, 2);
       } catch {
-        const orgs = await client.listOrganizations();
+        const orgs = await client.listWorkspaceScopes();
         const attempts = orgs.map((org) =>
           client.withOrganization(org.id).getTask(id).then((task) => ({ orgId: org.id, task })),
         );
@@ -671,7 +684,7 @@ export async function executeTool(
     }
 
     case 'sokosumi_list_jobs': {
-      const orgs = await client.listOrganizations();
+      const orgs = await client.listWorkspaceScopes();
       const status = typeof args['status'] === 'string' ? (args['status'] as string) : undefined;
       const agentId = typeof args['agent_id'] === 'string' ? (args['agent_id'] as string) : undefined;
       const limit = clampNumber(args['limit'], 30, 100);
@@ -756,7 +769,7 @@ export async function executeTool(
         (credits) => ({ ok: true, credits }) as const,
         (err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }) as const,
       );
-      const orgs = await client.listOrganizations();
+      const orgs = await client.listWorkspaceScopes();
       const settled = await Promise.allSettled(
         orgs.slice(0, 10).map((org) =>
           client
@@ -765,7 +778,7 @@ export async function executeTool(
             .then((credits) => ({ org, credits })),
         ),
       );
-      const orgsCredits: Array<{ orgId: string; orgName?: string; credits: unknown }> = [];
+      const orgsCredits: Array<{ orgId: string | null; orgName?: string; credits: unknown }> = [];
       for (const r of settled) {
         if (r.status === 'fulfilled') {
           orgsCredits.push({ orgId: r.value.org.id, orgName: r.value.org.name, credits: r.value.credits });
@@ -792,8 +805,8 @@ export async function executeTool(
     case 'sokosumi_list_coworkers': {
       const limit = clampNumber(args['limit'], 30, 100);
       // Per-org delegation needed — fan out across the user's orgs in parallel.
-      const orgs = await client.listOrganizations();
-      const all: Array<{ orgId: string; orgName?: string; coworker: unknown }> = [];
+      const orgs = await client.listWorkspaceScopes();
+      const all: Array<{ orgId: string | null; orgName?: string; coworker: unknown }> = [];
       const settled = await Promise.allSettled(
         orgs.slice(0, 5).map((org) =>
           client
@@ -823,7 +836,7 @@ export async function executeTool(
         const result = await client.addTaskEvent(taskId, { comment });
         return JSON.stringify(result, null, 2);
       } catch {
-        const orgs = await client.listOrganizations();
+        const orgs = await client.listWorkspaceScopes();
         for (const org of orgs) {
           try {
             const result = await client.withOrganization(org.id).addTaskEvent(taskId, { comment });
@@ -894,7 +907,7 @@ export async function executeTool(
         );
       }
 
-      const orgs = await client.listOrganizations();
+      const orgs = await client.listWorkspaceScopes();
       if (orgs.length === 0) throw new Error('user has no orgs to create the task in');
 
       let targetOrgId: string | null = null;
@@ -1005,7 +1018,7 @@ export async function executeTool(
       if (!agentId || !inputSchema) {
         throw new Error('missing required args: agent_id, input_schema');
       }
-      const orgs = await client.listOrganizations();
+      const orgs = await client.listWorkspaceScopes();
       if (orgs.length === 0) throw new Error('user has no orgs to create the job in');
       const result = await client
         .withOrganization(orgs[0]!.id)

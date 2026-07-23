@@ -65,12 +65,14 @@ export function resolveSokosumiTarget(
  * through a path that isn't a request from Sokosumi itself (admin/manual, test
  * cleanup, future GC/expiry). Sokosumi-initiated deletes clean up on their side.
  *
- * Contract: POST {base}/v1/hermes/instances/{userId}/purge — orchestrator
- * (orch_) key auth, NO body, NO X-Context headers, env-routed, idempotent
- * (200 even if nothing stored), 5xx is retry-safe.
+ * Contract (Sokosumi #3371 — per-user hermes instance as orchestrator):
+ * POST {base}/v1/orchestrators/me/purge, auth = the orchestrator SERVICE
+ * token (Bearer), JSON body {userId}, NO X-Context headers, env-routed.
+ * 200 → {purged:true,userId} (archives the per-user orchestrator row);
+ * 503 is explicitly retry-safe.
  *
- * Best-effort: never throws into the destroy caller. Requires the orch_ key for
- * the instance's env (the endpoint 403s coworker keys) — logs + skips otherwise.
+ * Best-effort: never throws into the destroy caller. Needs the service token
+ * for the instance's env (coworker keys are rejected) — logs + skips otherwise.
  */
 export async function purgeSokosumiMirror(
   rawUserId: string,
@@ -83,17 +85,23 @@ export async function purgeSokosumiMirror(
     return;
   }
   if (cfg.actor !== 'orchestrator') {
-    // The purge endpoint 403s coworker keys — it needs the first-party orch_ key.
+    // The purge endpoint rejects coworker keys — it needs the service token.
     logger.warn({ userId, env: env ?? 'mainnet' }, 'sokosumi_purge_skipped_no_orch_key');
     return;
   }
-  const url = `${cfg.baseUrl.replace(/\/$/, '')}/hermes/instances/${encodeURIComponent(userId)}/purge`;
+  const url = `${cfg.baseUrl.replace(/\/$/, '')}/orchestrators/me/purge`;
   const MAX_ATTEMPTS = 3;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cfg.apiKey}`, Accept: 'application/json' },
+        headers: {
+          Authorization: `Bearer ${cfg.apiKey}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        // The user is identified by the BODY now, not the path.
+        body: JSON.stringify({ userId }),
         signal: AbortSignal.timeout(20_000),
       });
       if (res.ok) {
@@ -135,6 +143,31 @@ export async function purgeSokosumiMirror(
  * (POST /tasks, POST /agents/:id/jobs, etc.) intentionally absent — those
  * land in Phase C with a user-consent flow.
  */
+
+/**
+ * A workspace the orchestrator can read. `id: null` is the user's personal
+ * workspace — reachable with no org header, and the only scope guaranteed to
+ * survive the loss of org enumeration (Sokosumi #3394).
+ */
+export interface WorkspaceScope {
+  id: string | null;
+  name?: string;
+  slug?: string;
+}
+
+/**
+ * True when a request failed because it hit `/v1/users/{id}/*`, which
+ * Sokosumi #3394 ("block coworker impersonation via user context") made
+ * session-only: `requireAccessToTargetUserData` now calls
+ * `requireUserAuthContext`, so our orchestrator service token is rejected
+ * regardless of the context headers. Not our bug and not fixable from here —
+ * org enumeration and credits are simply gone until Sokosumi reopens them.
+ */
+function isUserPathForbidden(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('403') && msg.includes('User authentication required');
+}
+
 export class SokosumiClient {
   private readonly userId: string;
   private readonly env: SokosumiEnv | null | undefined;
@@ -270,9 +303,11 @@ export class SokosumiClient {
    * for cost-awareness checks per SOUL.md rules — orchestrator does not
    * enforce a hard cap here.
    *
-   * If taskId is provided, the job is created under that task
-   * (POST /tasks/:id/jobs). Otherwise it's created under the agent
-   * directly (POST /agents/:id/jobs).
+   * Always goes through POST /agents/:id/jobs. The task-scoped route
+   * (POST /tasks/:id/jobs) is `requireCoworkerAuthContext` — coworkers only,
+   * deliberately, pending per-coworker delegation authz (SOK-554) — so as an
+   * orchestrator actor we get a flat 403 there. taskId is kept for logging /
+   * caller ergonomics; it does not change the endpoint.
    */
   async createJob(args: {
     agentId: string;
@@ -280,16 +315,10 @@ export class SokosumiClient {
     taskId?: string | null;
     identifierFromPurchaser?: string;
   }): Promise<unknown> {
-    const body = args.taskId
-      ? await this.post(`/tasks/${encodeURIComponent(args.taskId)}/jobs`, {
-          agentId: args.agentId,
-          inputSchema: args.inputSchema,
-          identifierFromPurchaser: args.identifierFromPurchaser,
-        })
-      : await this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
-          inputSchema: args.inputSchema,
-          identifierFromPurchaser: args.identifierFromPurchaser,
-        });
+    const body = await this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
+      inputSchema: args.inputSchema,
+      identifierFromPurchaser: args.identifierFromPurchaser,
+    });
     return unwrapData(body);
   }
 
@@ -348,6 +377,18 @@ export class SokosumiClient {
     logger.info({ method: 'POST', path, ms, status: res.status, env: this.env ?? 'mainnet' }, 'sokosumi_http');
     if (!res.ok) {
       const respBody = await res.text().catch(() => '');
+      // Sokosumi #3371 attributes every task write to the user's own
+      // Orchestrator row. If that row is missing or archived, auth still
+      // succeeds but the write 400s — and we cannot create or unarchive it
+      // (the provisioning route is user-session only). Translate it into
+      // something the assistant can actually relay to the user.
+      if (res.status === 400 && respBody.includes('orchestrator instance')) {
+        throw new Error(
+          `sokosumi POST ${path} → 400: this user has no active assistant instance in Sokosumi. ` +
+            'They need to (re)activate their Personal Assistant in Sokosumi before it can create ' +
+            `tasks or post comments. (raw: ${respBody.slice(0, 200)})`,
+        );
+      }
       throw new Error(`sokosumi POST ${path} → ${res.status}: ${respBody.slice(0, 300)}`);
     }
     return (await res.json()) as T;
@@ -375,8 +416,20 @@ export class SokosumiClient {
 
   // ---------- credits + meta ----------
 
+  /**
+   * Credits. UNAVAILABLE to the orchestrator actor since Sokosumi #3394 —
+   * `/users/{id}/*` is session-only (`requireUserAuthContext`), so we get a
+   * 403 no matter what context we send. Returns null rather than throwing so
+   * a snapshot/tool doesn't die over a field we simply can't read anymore.
+   */
   async getCredits(): Promise<unknown> {
-    return this.get(`/users/${encodeURIComponent(this.userId)}/credits`);
+    return this.get(`/users/${encodeURIComponent(this.userId)}/credits`).catch((err) => {
+      if (isUserPathForbidden(err)) {
+        logger.debug({ userId: this.userId }, 'sokosumi_credits_unavailable_session_only');
+        return null;
+      }
+      throw err;
+    });
   }
 
   async listAgents(opts: { limit?: number } = {}): Promise<unknown[]> {
@@ -415,15 +468,44 @@ export class SokosumiClient {
    * memory.
    */
   async listOrganizations(): Promise<Array<{ id: string; name?: string; slug?: string }>> {
-    const body = await this.get<{ data?: Array<{ id: string; name?: string; slug?: string }> }>(
-      `/users/${encodeURIComponent(this.userId)}/organizations`,
-    );
-    return body.data ?? [];
+    try {
+      const body = await this.get<{ data?: Array<{ id: string; name?: string; slug?: string }> }>(
+        `/users/${encodeURIComponent(this.userId)}/organizations`,
+      );
+      return body.data ?? [];
+    } catch (err) {
+      // Sokosumi #3394 made `/users/{id}/*` session-only, so the orchestrator
+      // can no longer enumerate orgs. Degrade to "no orgs" instead of
+      // throwing — callers sweep the personal workspace via
+      // listWorkspaceScopes(), which is always reachable.
+      if (isUserPathForbidden(err)) {
+        logger.debug({ userId: this.userId }, 'sokosumi_org_enumeration_unavailable');
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Every workspace we can actually read, personal first.
+   *
+   * The personal workspace needs no org header at all — Sokosumi's workspace
+   * middleware upserts `(userId, null)` for the context user — so it survives
+   * the loss of org enumeration. Org entries are a best-effort bonus.
+   *
+   * Use this instead of listOrganizations() anywhere you fan out over
+   * workspaces; an empty org list must never mean "read nothing".
+   */
+  async listWorkspaceScopes(): Promise<WorkspaceScope[]> {
+    const orgs = await this.listOrganizations();
+    return [{ id: null, name: 'Personal' }, ...orgs];
   }
 
   /** Withdraws an org-context-bound copy of this client. Subsequent calls
-   *  attach `X-Delegation-Organization-Id`. */
-  withOrganization(organizationId: string): SokosumiClient {
+   *  attach `X-Delegation-Organization-Id`. `null` = the personal workspace,
+   *  which is this client unchanged (no org header). */
+  withOrganization(organizationId: string | null): SokosumiClient {
+    if (!organizationId) return this;
     return new SokosumiClient(this.userId, this.env, organizationId);
   }
 
@@ -478,7 +560,8 @@ export class SokosumiClient {
  * the user is a member of.
  */
 export interface OrgWorkspace {
-  organization: { id: string; name?: string; slug?: string };
+  /** `id: null` = the user's personal workspace. */
+  organization: WorkspaceScope;
   tasks: unknown[];
   completedJobs: unknown[];
   conversations: unknown[];
@@ -508,19 +591,22 @@ export async function fetchWorkspaceSnapshot(
   }
   const baseClient = new SokosumiClient(userId, env);
 
-  // First: list the user's orgs. Without this we can't pull org-scoped data.
-  const orgs = await baseClient.listOrganizations().catch((err) => {
+  // Every workspace we can read, personal first. Org enumeration 403s since
+  // Sokosumi #3394, so this is usually just the personal workspace — which is
+  // exactly where a per-user assistant's tasks live. Never let an empty org
+  // list collapse the sweep to nothing.
+  const scopes = await baseClient.listWorkspaceScopes().catch((err) => {
     logger.warn({ err, userId }, 'sokosumi_list_orgs_failed');
-    return [] as Array<{ id: string; name?: string; slug?: string }>;
+    return [{ id: null, name: 'Personal' }] as WorkspaceScope[];
   });
 
-  // Per-org pulls — tasks, completed jobs, coworkers. Run in parallel
-  // across orgs (typically 1–3 per user). Cap so we don't fan out badly
-  // for users with many orgs. NOTE: marketplace conversations are NOT
-  // pulled — the first-party orchestrator actor always gets 403 on
-  // /conversations, so the fetch was pure daily log noise; the snapshot's
-  // conversations field stays empty by construction.
-  const orgsToFetch = orgs.slice(0, 5);
+  // Per-workspace pulls — tasks, completed jobs, coworkers. Run in parallel
+  // (typically 1–3 per user). Cap so we don't fan out badly for users with
+  // many orgs. NOTE: marketplace conversations are NOT pulled — the
+  // first-party orchestrator actor always gets 403 on /conversations, so the
+  // fetch was pure daily log noise; the snapshot's conversations field stays
+  // empty by construction.
+  const orgsToFetch = scopes.slice(0, 5);
   const orgWorkspaces = await Promise.all(
     orgsToFetch.map(async (org) => {
       const orgClient = baseClient.withOrganization(org.id);

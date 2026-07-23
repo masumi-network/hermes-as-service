@@ -56,11 +56,17 @@ const schema = z.object({
   SOKOSUMI_API_BASE_PREPROD: z.string().url().default('https://api.preprod.sokosumi.com/v1'),
   SOKOSUMI_COWORKER_API_KEY_MAINNET: z.string().optional().default(''),
   SOKOSUMI_API_BASE_MAINNET: z.string().url().default('https://api.sokosumi.com/v1'),
-  // First-party ORCHESTRATOR (orch_) API keys — Hermes is now a Sokosumi
+  // Orchestrator SERVICE token (Sokosumi #3371) — Hermes is a Sokosumi
   // "orchestrator" actor (not a coworker), with user-like workspace access and
   // NO vendor grants. When set, these take precedence over the coworker key for
-  // that env; unsetting reverts to the coworker key. Minted via the admin API
-  // POST /v1/orchestrators/{id}/api-keys.
+  // that env; unsetting reverts to the coworker key.
+  //
+  // This is now ONE shared secret per env, matching Sokosumi's own
+  // ORCHESTRATOR_SERVICE_TOKEN — not a per-orchestrator minted key. The old
+  // `orch_`-prefixed DB keys and the POST /v1/orchestrators/{id}/api-keys
+  // endpoint that minted them were deleted in #3371; Sokosumi's env schema now
+  // rejects values starting with `orch_`/`coworker_` and requires >= 32 chars.
+  // The per-user identity comes from the X-Context-User-Id header, not the key.
   SOKOSUMI_ORCHESTRATOR_API_KEY_DEV: z.string().optional().default(''),
   SOKOSUMI_ORCHESTRATOR_API_KEY_PREPROD: z.string().optional().default(''),
   SOKOSUMI_ORCHESTRATOR_API_KEY_MAINNET: z.string().optional().default(''),
@@ -151,7 +157,7 @@ export function getSokosumiConfig(
       orchestratorKey = cfg.SOKOSUMI_ORCHESTRATOR_API_KEY_MAINNET;
       break;
   }
-  // Prefer the first-party orchestrator (orch_) key when configured. It gives
+  // Prefer the orchestrator service token when configured. It gives
   // user-like workspace access with no vendor grants; unsetting it reverts to
   // the legacy coworker key cleanly.
   const apiKey = orchestratorKey || coworkerKey;

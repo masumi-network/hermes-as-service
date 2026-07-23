@@ -132,7 +132,7 @@ export async function runSokosumiDailySweep(): Promise<{ scanned: number; synced
 
 function formatSnapshotForMemory(snapshot: {
   organizations: Array<{
-    organization: { id: string; name?: string; slug?: string };
+    organization: { id: string | null; name?: string; slug?: string };
     tasks: unknown[];
     completedJobs: unknown[];
     conversations: unknown[];
