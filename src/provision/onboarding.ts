@@ -50,11 +50,14 @@ export async function runOnboarding(
   }
   const apiKey = await decryptSecret(row.apiServerKey);
 
-  // Hermes' API server can take 30–60s to actually start listening after
-  // the Fly machine reaches `started`. Poll until it responds before
-  // sending the first boot prompt, otherwise we get 503 storms.
-  await waitForHermesReady(row.endpointUrl, apiKey, log);
-
+  // Build + PUBLISH the real step list BEFORE waiting for the machine. None of
+  // this depends on the machine being up — integrations come from our DB, the
+  // rest is config — so we can hand Sokosumi's onboarding poll the accurate,
+  // final step list within ~1s of the user clicking "Let's go". Previously we
+  // published only *after* waitForHermesReady (up to 120s), so the poll
+  // returned an empty list during the whole machine boot; Sokosumi filled that
+  // gap with a fixed 6-step skeleton that then visibly swapped to the real
+  // (dynamic) list mid-onboarding. Publishing first eliminates that swap.
   const integrations = await listIntegrations(row.userId);
   const connectedProviders = integrations
     .filter((i) => i.status === 'connected' || i.status === 'connecting')
@@ -65,7 +68,16 @@ export async function runOnboarding(
   const sokosumiEnv: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
   const sokosumiConfigured = SokosumiClient.isConfigured(sokosumiEnv, row.userId);
   const steps: OnboardingStep[] = [
-    { id: 'memory', label: 'Saving your details', status: 'pending' },
+    // 'memory' starts 'running' immediately: it's the umbrella for "we're
+    // setting up your assistant" and it covers the machine-boot wait right
+    // below, so the loader always has one live step instead of sitting on an
+    // all-pending list that reads as frozen.
+    {
+      id: 'memory',
+      label: 'Saving your details',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    },
     ...(connectedProviders.length > 0
       ? [{ id: 'verify_mcps', label: 'Connecting to your integrations', status: 'pending' as const }]
       : []),
@@ -92,8 +104,16 @@ export async function runOnboarding(
     detail: { providers: connectedProviders, researchDepth },
   });
 
+  // Hermes' API server can take up to ~120s to start listening after the Fly
+  // machine starts (launcher runs, ~87 skills sync, gateway boots, model
+  // loads). Poll until it responds before sending the first boot prompt,
+  // otherwise we get 503 storms. The loader already shows 'Saving your
+  // details' running throughout this wait.
+  await waitForHermesReady(row.endpointUrl, apiKey, log);
+
   // ---- 1. memory + boot prompt ----
-  await markStep(instanceId, 'memory', 'running');
+  // ('memory' is already 'running' from the published list above — no need to
+  // re-mark it, which would only push startedAt past the boot wait.)
   try {
     await callHermes(
       row.endpointUrl,
