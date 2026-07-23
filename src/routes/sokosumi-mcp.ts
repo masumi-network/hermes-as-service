@@ -140,6 +140,16 @@ interface ToolDef {
   access: ToolAccess;
 }
 
+/**
+ * Task statuses the assistant may set via POST /tasks/{id}/events.
+ *
+ * Deliberately a subset of Sokosumi's full enum: RUNNING, INPUT_REQUIRED,
+ * OUT_OF_CREDITS, GRANT_PENDING and friends are driven by the coworker (or
+ * Sokosumi itself) actually executing the work. Letting the assistant assert
+ * them would fake board state it isn't in a position to know.
+ */
+const SETTABLE_TASK_STATUSES = new Set(['DRAFT', 'READY', 'COMPLETED', 'CANCELED']);
+
 const TOOLS_ALL: ToolDef[] = [
   {
     access: 'read',
@@ -303,6 +313,31 @@ const TOOLS_ALL: ToolDef[] = [
         comment: { type: 'string', description: 'Your comment, 1-3 short paragraphs.' },
       },
       required: ['task_id', 'comment'],
+    },
+  },
+  {
+    // 'write': moving a task to READY makes it startable by its coworker —
+    // the same downstream effect as creating a READY task — so it takes the
+    // same gate as sokosumi_create_task (card at medium, autonomous at high).
+    access: 'write',
+    name: 'sokosumi_set_task_status',
+    description:
+      "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). You cannot set RUNNING or the input/credit states — those are driven by the coworker actually doing the work. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task id.' },
+        status: {
+          type: 'string',
+          enum: ['DRAFT', 'READY', 'COMPLETED', 'CANCELED'],
+          description: 'The new status.',
+        },
+        comment: {
+          type: 'string',
+          description: 'Optional short note recorded with the status change.',
+        },
+      },
+      required: ['task_id', 'status'],
     },
   },
   {
@@ -825,6 +860,40 @@ export async function executeTool(
           }
         }
         throw new Error(`task ${taskId} not found in any org`);
+      }
+    }
+
+    case 'sokosumi_set_task_status': {
+      const taskId = String(args['task_id'] ?? '');
+      const status = String(args['status'] ?? '').toUpperCase();
+      const comment = typeof args['comment'] === 'string' ? (args['comment'] as string) : undefined;
+      if (!taskId || !status) throw new Error('missing required args: task_id, status');
+      if (!SETTABLE_TASK_STATUSES.has(status)) {
+        throw new Error(
+          `status must be one of ${[...SETTABLE_TASK_STATUSES].join(', ')}. RUNNING and the ` +
+            'input/credit/grant states are driven by the coworker doing the work — you cannot set them.',
+        );
+      }
+      const body = { status, ...(comment ? { comment } : {}) };
+      // A task id alone doesn't tell us its workspace: try personal first,
+      // then any org scope we can still see (same shape as add_task_comment).
+      try {
+        const result = await client.addTaskEvent(taskId, body);
+        return JSON.stringify({ taskId, status, result }, null, 2);
+      } catch (err) {
+        for (const org of await client.listWorkspaceScopes()) {
+          if (org.id === null) continue; // personal already attempted above
+          try {
+            const result = await client.withOrganization(org.id).addTaskEvent(taskId, body);
+            return JSON.stringify({ orgId: org.id, taskId, status, result }, null, 2);
+          } catch {
+            /* try next scope */
+          }
+        }
+        // Rethrow the original failure — it carries Sokosumi's actual reason
+        // (not found / parked / forbidden), which is far more useful than a
+        // generic "not found in any org".
+        throw err instanceof Error ? err : new Error(String(err));
       }
     }
 
