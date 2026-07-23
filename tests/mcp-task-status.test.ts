@@ -92,3 +92,28 @@ describe('sokosumi_set_task_status', () => {
     expect(at('high')?.access).toBe('write');
   });
 });
+
+describe('confirmation-card copy for set_task_status', () => {
+  // The card is what the user actually reads before approving. Without a
+  // dedicated case it fell through to `Run <tool> with arguments: {json}` —
+  // confirmed live against the deployed build before this was added.
+  const summarize = async (args: Record<string, unknown>) => {
+    const { summarizeToolCall } = await import('../src/confirmations/store.js');
+    return summarizeToolCall('sokosumi_set_task_status', args);
+  };
+
+  it('reads as a sentence, not raw JSON', async () => {
+    const s = await summarize({ task_id: 'tsk_1', status: 'READY' });
+    expect(s).toBe('Move task tsk_1 to READY so its assigned coworker can start it.');
+    expect(s).not.toContain('{');
+  });
+
+  it('phrases cancel and complete naturally', async () => {
+    expect(await summarize({ task_id: 't', status: 'CANCELED' })).toBe('Cancel task t.');
+    expect(await summarize({ task_id: 't', status: 'COMPLETED' })).toBe('Mark task t as completed.');
+  });
+
+  it('includes the note when one is given', async () => {
+    expect(await summarize({ task_id: 't', status: 'READY', comment: 'go' })).toMatch(/with the note "go"\.$/);
+  });
+});

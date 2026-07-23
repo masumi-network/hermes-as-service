@@ -87,6 +87,20 @@ export async function summarizeToolCall(
       const snippet = comment.length > 140 ? comment.slice(0, 140) + '…' : comment;
       return `Post a comment on task ${taskId}: "${snippet}".`;
     }
+    case 'sokosumi_set_task_status': {
+      const taskId = String(args['task_id'] ?? '(unspecified)');
+      const status = String(args['status'] ?? '(unspecified)').toUpperCase();
+      const verb =
+        status === 'READY'
+          ? `Move task ${taskId} to READY so its assigned coworker can start it`
+          : status === 'CANCELED'
+            ? `Cancel task ${taskId}`
+            : status === 'COMPLETED'
+              ? `Mark task ${taskId} as completed`
+              : `Move task ${taskId} back to ${status}`;
+      const note = String(args['comment'] ?? '').trim();
+      return note ? `${verb}, with the note "${note.slice(0, 120)}".` : `${verb}.`;
+    }
     case 'sokosumi_provide_job_input': {
       const jobId = String(args['job_id'] ?? '(unspecified)');
       return `Provide input to job ${jobId} so it can continue.`;
