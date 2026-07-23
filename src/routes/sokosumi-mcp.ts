@@ -145,7 +145,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_organizations',
     description:
-      "List the organizations (shared workspaces) the user belongs to. Each Sokosumi user has a personal workspace plus zero or more organizations (their company, department, team). Tasks in an organization are shared with every member of that org. Returns id, name, and (when available) slug/role for each. Call this when the user asks about their team, when you need to know which workspaces to consider, or when distinguishing personal-vs-shared work matters.",
+      "Try to list the user's organizations (shared team workspaces). NOTE: this is usually NOT available to you — Sokosumi only lets the signed-in user enumerate their orgs, so this typically returns an empty list with a note. You still work in any org the user directs you to: when they pick a workspace (e.g. on a confirmation card) you get its id and can create/read there. Don't rely on this to discover workspaces.",
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -251,7 +251,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_get_credits',
     description:
-      "Fetch Sokosumi credit balances. CRITICAL: credits are scoped PER WORKSPACE — the user's personal workspace and each organization (e.g. 'utxo AG', 'Serviceplan Group') has its OWN separate balance. A job in Serviceplan Group cannot spend personal credits, and vice versa. Without organization_id this returns balances for personal AND every organization the user belongs to in one response — read the right one for your context. Pass organization_id to scope to a single workspace. Before any sokosumi_create_job, ALWAYS check the balance of the workspace the job will run in, not personal.",
+      "Check whether Sokosumi credit balances are visible to you. They usually are NOT — balances are only shown to the signed-in user, not the assistant. Use sokosumi_get_agent_input_schema for a job's price instead; if a workspace is short, the job fails when it runs and the user tops up. Don't block on 'checking the balance first'.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -309,7 +309,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_create_task',
     description:
-      "Create a new task in a specific workspace and ASSIGN IT TO A COWORKER. FREE — tasks themselves cost zero credits and have NO upfront price; spending only happens later when jobs run under the task. Don't conflate this with sokosumi_create_job (which spends). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). STRONGLY RECOMMENDED: organization_id — coworkers like Hannah and Elena exist in MULTIPLE orgs (utxo AG, Serviceplan Group, etc.) and without organization_id the task lands in whichever org gets enumerated first, which is rarely what the user wants. Read organization_id from sokosumi_list_coworkers' output (each entry is tagged with orgId/orgName) or from sokosumi_list_organizations. When the user names a workspace (\"in utxo AG\", \"for Serviceplan\"), you MUST pass the matching organization_id. Tasks live on the user's board going DRAFT → READY → RUNNING → COMPLETED as the coworker drives jobs underneath.",
+      "Create a new task and ASSIGN IT TO A COWORKER. FREE — tasks cost zero credits; spending happens later when jobs run under the task (that's sokosumi_create_job). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). organization_id: omit for the user's personal workspace (the default). Only pass one when the user has picked a specific workspace — you get that id from the workspace selector on a confirmation card, not by enumerating (you can't list the user's orgs). Tasks live on the board DRAFT → READY → RUNNING → COMPLETED.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -757,39 +757,18 @@ export async function executeTool(
     }
 
     case 'sokosumi_get_credits': {
-      const orgIdArg = typeof args['organization_id'] === 'string' ? (args['organization_id'] as string) : undefined;
-      if (orgIdArg) {
-        const credits = await client.withOrganization(orgIdArg).getCredits();
-        return JSON.stringify({ scope: 'organization', organizationId: orgIdArg, credits }, null, 2);
-      }
-      // Default: personal + every org the user belongs to. Surfacing them
-      // all in one shot is the whole point of this tool — agents kept
-      // checking personal balance before a job that runs in an org.
-      const personalResult = await client.getCredits().then(
-        (credits) => ({ ok: true, credits }) as const,
-        (err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }) as const,
-      );
-      const orgs = await client.listWorkspaceScopes();
-      const settled = await Promise.allSettled(
-        orgs.slice(0, 10).map((org) =>
-          client
-            .withOrganization(org.id)
-            .getCredits()
-            .then((credits) => ({ org, credits })),
-        ),
-      );
-      const orgsCredits: Array<{ orgId: string | null; orgName?: string; credits: unknown }> = [];
-      for (const r of settled) {
-        if (r.status === 'fulfilled') {
-          orgsCredits.push({ orgId: r.value.org.id, orgName: r.value.org.name, credits: r.value.credits });
-        }
-      }
+      // Credit BALANCES are no longer readable by the assistant: every
+      // balance endpoint lives under /users/{id}/* which Sokosumi #3394 made
+      // session-only (403 for the orchestrator), for personal AND org scope.
+      // Don't fake a number — tell the truth so the model stops trying to
+      // "check the balance first". Affordability now comes from the job price
+      // (sokosumi_get_agent_input_schema) and, at run time, an out-of-credits
+      // failure the user resolves by topping up in Sokosumi.
       return JSON.stringify(
         {
-          scope: 'all',
-          note: 'Credits are per-workspace. Use the balance of the workspace the job will run in — NOT personal — when deciding affordability.',
-          personal: personalResult,
-          organizations: orgsCredits,
+          available: false,
+          reason:
+            'Credit balances are only visible to the signed-in user in Sokosumi, not to the assistant. Get a job\'s price from sokosumi_get_agent_input_schema; if a workspace is short on credits the job fails when it runs and the user tops up in Sokosumi.',
         },
         null,
         2,
@@ -907,27 +886,22 @@ export async function executeTool(
         );
       }
 
-      const orgs = await client.listWorkspaceScopes();
-      if (orgs.length === 0) throw new Error('user has no orgs to create the task in');
-
       let targetOrgId: string | null = null;
       let coworkerSlug: string | undefined;
       let coworkerName: string | undefined;
 
       if (organizationIdArg) {
-        // Caller specified the org. Validate the coworker exists there
-        // before committing — wrong org + valid coworker would silently
-        // land the task somewhere else if we skipped this check.
-        const targetOrg = orgs.find((o) => o.id === organizationIdArg);
-        if (!targetOrg) {
-          const known = orgs.map((o) => `${o.name ?? '?'} (${o.id})`).join(', ');
-          throw new Error(
-            `organization_id ${organizationIdArg} is not one of the user's orgs. The user belongs to: ${known}. Pick one and retry.`,
-          );
-        }
+        // Caller named the org — typically the user's workspace pick on a
+        // confirmation card. We can NO LONGER pre-validate that id against an
+        // org list: enumeration (/users/{id}/organizations) is session-only
+        // since Sokosumi #3394 and 403s for us. We don't need to either —
+        // listing coworkers SCOPED to the org is itself membership-gated
+        // server-side (a non-member gets 400 "User is not a member"), and a
+        // coworker that isn't whitelisted there simply won't be in the list.
+        // So trust the id and let the scoped call be the gate.
         try {
           const list = (await client
-            .withOrganization(targetOrg.id)
+            .withOrganization(organizationIdArg)
             .listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
             id?: string;
             slug?: string;
@@ -936,22 +910,23 @@ export async function executeTool(
           const match = list.find((c) => c.id === coworkerId);
           if (!match) {
             throw new Error(
-              `coworker_id ${coworkerId} is not whitelisted in organization "${targetOrg.name ?? targetOrg.id}". Call sokosumi_list_coworkers and pick a coworker that exists in that org.`,
+              `coworker_id ${coworkerId} is not whitelisted in organization ${organizationIdArg}. Call sokosumi_list_coworkers with that organization_id and pick a coworker that exists there.`,
             );
           }
-          targetOrgId = targetOrg.id;
+          targetOrgId = organizationIdArg;
           coworkerSlug = match.slug;
           coworkerName = match.name;
         } catch (err) {
           if (err instanceof Error && err.message.startsWith('coworker_id ')) throw err;
           throw new Error(
-            `failed to verify coworker ${coworkerId} in org ${organizationIdArg}: ${err instanceof Error ? err.message : String(err)}`,
+            `failed to file task in organization ${organizationIdArg}: ${err instanceof Error ? err.message : String(err)}. If the user isn't a member of that workspace, ask them to pick another.`,
           );
         }
       } else {
-        // Legacy fallback: iterate orgs, take the first match. Hermes is
-        // strongly nudged in the tool description NOT to rely on this —
-        // it produces wrong-org tasks for users with multi-org coworkers.
+        // No org named — sweep the workspaces we can see (personal, plus any
+        // org we managed to enumerate; usually just personal now) and take
+        // the first where the coworker is whitelisted.
+        const orgs = await client.listWorkspaceScopes();
         for (const org of orgs.slice(0, 5)) {
           try {
             const list = (await client.withOrganization(org.id).listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
@@ -1018,12 +993,17 @@ export async function executeTool(
       if (!agentId || !inputSchema) {
         throw new Error('missing required args: agent_id, input_schema');
       }
-      const orgs = await client.listWorkspaceScopes();
-      if (orgs.length === 0) throw new Error('user has no orgs to create the job in');
+      // Honor an explicit workspace: string = that org, null/absent =
+      // personal (the only scope we can pick without enumeration). Sokosumi
+      // validates org membership server-side, so no client-side pre-check.
+      // Previously this blindly used the first enumerated org, which now
+      // always resolves to personal AND dropped the user's workspace pick.
+      const rawOrgArg = args['organization_id'];
+      const targetOrgId = typeof rawOrgArg === 'string' ? rawOrgArg : null;
       const result = await client
-        .withOrganization(orgs[0]!.id)
+        .withOrganization(targetOrgId)
         .createJob({ agentId, inputSchema, taskId });
-      return JSON.stringify({ orgId: orgs[0]!.id, job: result }, null, 2);
+      return JSON.stringify({ orgId: targetOrgId, job: result }, null, 2);
     }
 
     case 'sokosumi_provide_job_input': {
