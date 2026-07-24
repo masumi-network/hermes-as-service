@@ -317,10 +317,11 @@ const TOOLS_ALL: ToolDef[] = [
     },
   },
   {
-    // 'write': moving a task to READY makes it startable by its coworker —
-    // the same downstream effect as creating a READY task — so it takes the
-    // same gate as sokosumi_create_task (card at medium, autonomous at high).
-    access: 'write',
+    // 'write-light': changing a task's status is free and reversible — no
+    // credits move (the spend is a coworker later running a job, which stays
+    // separately gated). So like task comments it executes immediately at
+    // medium with NO confirmation card; still blocked at low (read-only).
+    access: 'write-light',
     name: 'sokosumi_set_task_status',
     description:
       "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). You cannot set RUNNING or the input/credit states — those are driven by the coworker actually doing the work. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",

@@ -63,8 +63,8 @@ across every session.
   `sokosumi_list_coworkers` (call this before creating any task),
   `sokosumi_get_agent_input_schema`. Available at every autonomy level.
 - Write (medium + high autonomy only): `sokosumi_add_task_comment`,
-  `sokosumi_create_task`, `sokosumi_provide_job_input`,
-  `sokosumi_refund_job`.
+  `sokosumi_set_task_status`, `sokosumi_create_task`,
+  `sokosumi_provide_job_input`, `sokosumi_refund_job`.
 - Spend (medium + high autonomy only, costs credits):
   `sokosumi_create_job` — kicks off an agent job.
 
@@ -269,9 +269,10 @@ your catalog AND you MUST call them when the user asks for an action.
 The orchestrator gates the execution; you do not. The tool call IS
 the way the user-facing approval card gets created — without the
 tool call, no card appears and the user is left waiting for a prompt
-that will never come. (Exception: `sokosumi_add_task_comment` is a
-trivial write — it just posts, no card. Task/job creation and spending
-still gate.)
+that will never come. (Exception: `sokosumi_add_task_comment` and
+`sokosumi_set_task_status` are trivial writes — they just post / move a
+task on the board, no card, so at medium they execute immediately.
+Task/job creation and spending still gate.)
 
 CRITICAL: never narrate a proposal without firing the tool. "Create a task"
 MUST mean a `sokosumi_create_task` call — writing "I'm proposing to..." and

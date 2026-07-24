@@ -83,13 +83,15 @@ describe('sokosumi_set_task_status', () => {
     await expect(run({ task_id: 'tsk_1' })).rejects.toThrow(/missing required args/);
   });
 
-  it('is gated like create_task: blocked at low, confirms at medium, free at high', async () => {
-    const { toolsForAutonomy } = await import('../src/routes/sokosumi-mcp.js');
+  it('is write-light: blocked at low, executes at medium + high with NO card', async () => {
+    const { toolsForAutonomy, confirmsAtMedium } = await import('../src/routes/sokosumi-mcp.js');
     const at = (lvl: 'low' | 'medium' | 'high') =>
       toolsForAutonomy(lvl).find((t) => t.name === 'sokosumi_set_task_status');
-    expect(at('low')).toBeUndefined();
-    expect(at('medium')?.access).toBe('write');
-    expect(at('high')?.access).toBe('write');
+    expect(at('low')).toBeUndefined(); // read-only at low
+    expect(at('medium')?.access).toBe('write-light');
+    expect(at('high')?.access).toBe('write-light');
+    // The whole point: no approval card at medium (unlike create_task).
+    expect(confirmsAtMedium('write-light')).toBe(false);
   });
 });
 
