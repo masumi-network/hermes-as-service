@@ -22,10 +22,35 @@ export async function runCronAgentTurn(opts: {
   source: string;
   prompt: string;
   timeoutMs: number;
+  /** Prepend the most recent N real chat messages (user↔agent, excluding
+   *  other cron turns) so the agent has conversational context. Hermes cron
+   *  sessions are otherwise history-blind by design (see the cron docs), which
+   *  is why a task-responding sweep with no context defaults to "ask the user"
+   *  instead of acting on what it already knows. Memory is still reached via
+   *  the agent's own memory tool — the prompt should tell it to. */
+  includeHistory?: number;
 }): Promise<{ requestId: string; reply: string; ok: boolean }> {
   const { instanceId, userId, endpointUrl, apiKey, source, prompt, timeoutMs } = opts;
   const requestId = randomUUID();
   const t0 = Date.now();
+
+  // Build the turn: optional recent chat history, then this sweep's prompt.
+  const messages: { role: string; content: string }[] = [];
+  if (opts.includeHistory && opts.includeHistory > 0) {
+    const recent = await prisma.chatMessage
+      .findMany({
+        where: { userId, role: { in: ['user', 'assistant'] }, kind: 'chat' },
+        orderBy: { createdAt: 'desc' },
+        take: opts.includeHistory,
+        select: { role: true, content: true },
+      })
+      .catch((err) => {
+        logger.warn({ err, source }, 'cron_turn_history_load_failed');
+        return [] as { role: string; content: string }[];
+      });
+    for (const m of recent.reverse()) messages.push({ role: m.role, content: m.content });
+  }
+  messages.push({ role: 'user', content: prompt });
 
   // Persist the prompt first so it survives even if the call hangs.
   await prisma.chatMessage
@@ -46,7 +71,7 @@ export async function runCronAgentTurn(opts: {
     const res = await fetch(`${endpointUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'hermes-agent', messages: [{ role: 'user', content: prompt }], stream: false }),
+      body: JSON.stringify({ model: 'hermes-agent', messages, stream: false }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();

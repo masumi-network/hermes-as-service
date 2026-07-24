@@ -140,6 +140,9 @@ export async function respondToInputRequestsForInstance(
       source: 'input_responder',
       prompt: buildAnswerPrompt(batch, autonomy),
       timeoutMs: AGENT_TURN_TIMEOUT_MS,
+      // The recent conversation is a first-class source for answering a paused
+      // job — often the user already stated the value in chat.
+      includeHistory: 8,
     });
     requestId = turn.requestId;
   } catch (err) {
@@ -237,7 +240,7 @@ ${jobsBlock}
 
 For EACH job, in order:
 1. Call sokosumi_get_job_input_request with the job_id to read exactly what it needs — you'll get an event_id plus the question / requested fields.
-2. Decide the answer ONLY from real context you actually have: the task's purpose, the user's earlier instructions in this workspace, your memory, and prior job results. For EVERY field you fill, you must be able to point to where the value came from. If any required field has no clear source, treat the whole job as unanswerable.
+2. Decide the answer ONLY from real context you actually have: the recent conversation above, the task's purpose, the user's earlier instructions in this workspace, your memory (memory tool), and prior job results. For EVERY field you fill, you must be able to point to where the value came from. If any required field has no clear source, treat the whole job as unanswerable.
 3. If — and only if — every required field has a real source, call sokosumi_provide_job_input with the job_id, that event_id, and input_data matching the requested fields. ${gatingNote}
 4. Otherwise — a human decision, a preference you don't know, or missing info — DO NOT GUESS and DO NOT invent values. Skip that job and leave it paused for the user. A fabricated answer is far worse than a paused job, and at high autonomy it submits unreviewed.
 

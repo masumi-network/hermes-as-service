@@ -174,6 +174,9 @@ export async function assistTaskboardForInstance(
       source: 'taskboard_assistant',
       prompt: buildTaskboardPrompt(batch, autonomy),
       timeoutMs: AGENT_TURN_TIMEOUT_MS,
+      // Give the agent the recent conversation so it responds like it knows
+      // the user (their preferences/decisions) instead of asking open questions.
+      includeHistory: 8,
     });
     requestId = turn.requestId;
   } catch (err) {
@@ -261,6 +264,8 @@ function buildTaskboardPrompt(tasks: BoardTask[], autonomy: 'medium' | 'high'): 
 
   return `Internal task — reply discarded; act through tools only.
 
+The recent conversation is above; also read your memory (memory tool) for the user's standing preferences and past decisions. Respond like you KNOW this user: take a position, handle what you can yourself, and never ask an open "what would you like to do?".
+
 Your own tasks that just changed (handle each once, now):
 ${block}
 
@@ -270,7 +275,7 @@ NEW task → comment ONLY if you have real, specific context the creator may hav
 
 INPUT_REQUIRED task → the coworker is blocked. sokosumi_get_task shows what they asked for.
  - Can you settle it from real context (the task's purpose, the user's instructions, your memory, prior results)? Then unblock the coworker: sokosumi_provide_job_input, or a comment telling them how to proceed. ${gatingNote}
- - Is it genuinely the user's call (money, publishing, external commitments, a preference you can't source)? Don't guess and don't bury it in a task comment — message the USER in chat (outbox-send) with the options and your recommendation, then stop.
+ - Genuinely the user's call (spends credits, publishes, external commitment)? First handle every free/reversible part yourself (comment your approval where nothing is spent, direct the coworker), so all that's left is the actual decision. Then message the USER in chat (outbox-send) LEADING WITH YOUR RECOMMENDATION and one line of why — e.g. "I'd go with the 6-month plan (X) because Y; approve to proceed." A bare list of options with "what would you like to do?" is a failure — always recommend.
 
 Tools: sokosumi_get_task / get_job / get_job_input_request / list_jobs, sokosumi_add_task_comment, sokosumi_provide_job_input, memory/mail/calendar. Don't create tasks, start jobs, or spend credits.
 
