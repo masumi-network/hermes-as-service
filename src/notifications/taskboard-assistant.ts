@@ -51,7 +51,8 @@ interface BoardTask {
   name: string;
   description: string | null;
   status: string;
-  orgId: string;
+  /** null = the user's personal workspace. */
+  orgId: string | null;
   kind: 'new' | 'input';
   /** Sort key — oldest first so over-cap tasks are handled next tick. */
   sortKey: string;
@@ -84,9 +85,13 @@ export async function assistTaskboardForInstance(
   const { userId: effectiveUserId } = resolveSokosumiTarget(row.userId, env);
   const ownerIds = new Set([row.userId, effectiveUserId]);
 
-  let orgs: Array<{ id: string }> = [];
+  // Workspaces to scan, personal first. MUST be listWorkspaceScopes, not
+  // listOrganizations — org enumeration is 403 for the orchestrator now, so
+  // listOrganizations returns [] and the sweep would scan NOTHING, never
+  // seeing a personal INPUT_REQUIRED task (id:null = personal, always present).
+  let orgs: Array<{ id: string | null }> = [];
   try {
-    orgs = (await client.listOrganizations()).map((o) => ({ id: o.id }));
+    orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
   } catch (err) {
     log.warn({ err }, 'taskboard_list_orgs_failed');
     return { handled: 0, reason: 'list_orgs_failed' };
@@ -273,9 +278,9 @@ A task COMMENT is read by the coworker doing that task, NOT the user. Write ever
 
 NEW task → comment ONLY if you have real, specific context the creator may have missed (an email thread, prior research, a deadline, a person to involve). Otherwise skip — silence beats noise.
 
-INPUT_REQUIRED task → the coworker is blocked. sokosumi_get_task shows what they asked for.
- - Can you settle it from real context (the task's purpose, the user's instructions, your memory, prior results)? Then unblock the coworker: sokosumi_provide_job_input, or a comment telling them how to proceed. ${gatingNote}
- - Genuinely the user's call (spends credits, publishes, external commitment)? First handle every free/reversible part yourself (comment your approval where nothing is spent, direct the coworker), so all that's left is the actual decision. Then message the USER in chat (outbox-send) LEADING WITH YOUR RECOMMENDATION and one line of why — e.g. "I'd go with the 6-month plan (X) because Y; approve to proceed." A bare list of options with "what would you like to do?" is a failure — always recommend.
+INPUT_REQUIRED task → the coworker is blocked; sokosumi_get_task shows what they asked for. You MUST leave a comment on the task — never let an INPUT_REQUIRED task sit silent. Which comment depends on the case:
+ - Can you settle it from real context (the conversation, the task's purpose, the user's instructions, your memory, prior results)? Unblock the coworker: sokosumi_provide_job_input, and/or a comment with the answer / how to proceed. ${gatingNote}
+ - Genuinely the user's call (spends credits, publishes, external commitment)? Still comment on the task — tell the coworker you're getting the user's decision so they know it's handled — then message the USER in chat (outbox-send) LEADING WITH YOUR RECOMMENDATION and one line of why (e.g. "I'd go with the 6-month plan because Y; approve to proceed"). A bare "what would you like to do?" is a failure — always recommend.
 
 Tools: sokosumi_get_task / get_job / get_job_input_request / list_jobs, sokosumi_add_task_comment, sokosumi_provide_job_input, memory/mail/calendar. Don't create tasks, start jobs, or spend credits.
 
