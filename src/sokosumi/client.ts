@@ -159,13 +159,36 @@ export interface WorkspaceScope {
  * True when a request failed because it hit `/v1/users/{id}/*`, which
  * Sokosumi #3394 ("block coworker impersonation via user context") made
  * session-only: `requireAccessToTargetUserData` now calls
- * `requireUserAuthContext`, so our orchestrator service token is rejected
- * regardless of the context headers. Not our bug and not fixable from here —
- * org enumeration and credits are simply gone until Sokosumi reopens them.
+ * `requireUserAuthContext`. Sokosumi PR #3408 reopened these paths to the
+ * orchestrator service token + X-Context-User-Id, so this now fires only on an
+ * env where #3408 isn't deployed — there we degrade instead of throwing.
  */
 function isUserPathForbidden(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes('403') && msg.includes('User authentication required');
+}
+
+/** Run `fn` over `items` with bounded concurrency, results in input order.
+ *  Lets a fan-out cover ALL of a user's workspaces without unbounded
+ *  parallelism. Rejections propagate — callers wanting best-effort catch
+ *  inside `fn`. */
+export async function mapLimit<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length)) },
+    async () => {
+      for (let i = next++; i < items.length; i = next++) {
+        results[i] = await fn(items[i] as T, i);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 export class SokosumiClient {
@@ -233,6 +256,31 @@ export class SokosumiClient {
       `/jobs?${qs}`,
     );
     return body.items ?? body.jobs ?? body.data ?? [];
+  }
+
+  /** ALL tasks in this workspace, paginated (bounded). Use for completeness
+   *  (sweeps, board-wide views) — a single page can miss a blocked task that
+   *  never bumps its updatedAt to resurface. */
+  async listAllTasks(
+    opts: { scope?: 'workspace' | 'owned'; status?: string; limit?: number; maxItems?: number } = {},
+  ): Promise<{ items: unknown[]; total: number; truncated: boolean }> {
+    const qs = new URLSearchParams();
+    if (opts.scope) qs.set('scope', opts.scope);
+    if (opts.status) qs.set('status', opts.status);
+    qs.set('limit', String(opts.limit ?? 100));
+    return this.paginateAll(`/tasks?${qs}`, { maxItems: opts.maxItems ?? 1000 });
+  }
+
+  /** ALL jobs in this workspace, paginated (bounded). NOTE: the API ignores
+   *  ?status, so filter the returned items client-side by status. */
+  async listAllJobs(
+    opts: { status?: string; agentId?: string; limit?: number; maxItems?: number } = {},
+  ): Promise<{ items: unknown[]; total: number; truncated: boolean }> {
+    const qs = new URLSearchParams();
+    if (opts.status) qs.set('status', opts.status);
+    if (opts.agentId) qs.set('agentId', opts.agentId);
+    qs.set('limit', String(opts.limit ?? 100));
+    return this.paginateAll(`/jobs?${qs}`, { maxItems: opts.maxItems ?? 1000 });
   }
 
   async getJob(id: string): Promise<unknown> {
@@ -434,12 +482,14 @@ export class SokosumiClient {
     });
   }
 
-  /** The user's notifications (newest first). `data[]` of {id,kind,...}. */
-  async listNotifications(opts: { limit?: number } = {}): Promise<unknown[]> {
+  /** The user's notifications (newest first), one cursor page. */
+  async listNotifications(
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<{ items: unknown[]; nextCursor: string | null; total: number }> {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 20));
-    const body = await this.get<{ data?: unknown[]; items?: unknown[] }>(`/notifications?${qs}`);
-    return body.data ?? body.items ?? [];
+    if (opts.cursor) qs.set('cursor', opts.cursor);
+    return this.getListPage(`/notifications?${qs}`);
   }
 
   /** Count of unread notifications. */
@@ -450,12 +500,14 @@ export class SokosumiClient {
     return body.data?.count ?? body.count ?? 0;
   }
 
-  /** The user's recent activity history (tasks/jobs), newest first. */
-  async getHistory(opts: { limit?: number } = {}): Promise<unknown[]> {
+  /** The user's recent activity history (tasks/jobs), newest first, one page. */
+  async getHistory(
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<{ items: unknown[]; nextCursor: string | null; total: number }> {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 20));
-    const body = await this.get<{ data?: unknown[]; items?: unknown[] }>(`/history?${qs}`);
-    return body.data ?? body.items ?? [];
+    if (opts.cursor) qs.set('cursor', opts.cursor);
+    return this.getListPage(`/history?${qs}`);
   }
 
   async listAgents(opts: { limit?: number } = {}): Promise<unknown[]> {
@@ -495,10 +547,13 @@ export class SokosumiClient {
    */
   async listOrganizations(): Promise<Array<{ id: string; name?: string; slug?: string }>> {
     try {
-      const body = await this.get<{ data?: Array<{ id: string; name?: string; slug?: string }> }>(
+      // Page through ALL orgs — a many-org user would otherwise lose orgs past
+      // page 1, silently collapsing every downstream workspace fan-out.
+      const { items } = await this.paginateAll<{ id: string; name?: string; slug?: string }>(
         `/users/${encodeURIComponent(this.userId)}/organizations`,
+        { maxItems: 200 },
       );
-      return body.data ?? [];
+      return items;
     } catch (err) {
       // Readable again via orch+ctx since Sokosumi PR #3408. The 403 branch is
       // a safety net for any env where #3408 isn't deployed: degrade to "no
@@ -569,6 +624,67 @@ export class SokosumiClient {
     }
     return (await res.json()) as T;
   }
+
+  /** One page of a cursor-paginated Sokosumi list. Reads the items array
+   *  (under whichever key the endpoint uses) plus meta.pagination. */
+  private async getListPage<T>(
+    path: string,
+  ): Promise<{ items: T[]; nextCursor: string | null; total: number }> {
+    const body = await this.get<{
+      data?: T[];
+      items?: T[];
+      tasks?: T[];
+      jobs?: T[];
+      agents?: T[];
+      coworkers?: T[];
+      conversations?: T[];
+      messages?: T[];
+      files?: T[];
+      meta?: { pagination?: { nextCursor?: string | null; total?: number } };
+    }>(path);
+    const items =
+      body.data ??
+      body.items ??
+      body.tasks ??
+      body.jobs ??
+      body.agents ??
+      body.coworkers ??
+      body.conversations ??
+      body.messages ??
+      body.files ??
+      [];
+    const p = body.meta?.pagination;
+    return { items, nextCursor: p?.nextCursor ?? null, total: p?.total ?? items.length };
+  }
+
+  /** Follow `meta.pagination.nextCursor` until exhausted, bounded by maxItems /
+   *  maxPages so an unbounded feed can't run away. `basePath` may already carry
+   *  query params. Returns accumulated items, the API's reported total, and
+   *  whether the bound cut it short (truncated). */
+  protected async paginateAll<T>(
+    basePath: string,
+    opts: { maxItems?: number; maxPages?: number } = {},
+  ): Promise<{ items: T[]; total: number; truncated: boolean }> {
+    const maxItems = opts.maxItems ?? 500;
+    const maxPages = opts.maxPages ?? 25;
+    const sep = basePath.includes('?') ? '&' : '?';
+    const items: T[] = [];
+    let cursor: string | null = null;
+    let total = 0;
+    let pages = 0;
+    do {
+      const path: string = cursor
+        ? `${basePath}${sep}cursor=${encodeURIComponent(cursor)}`
+        : basePath;
+      const page: { items: T[]; nextCursor: string | null; total: number } =
+        await this.getListPage<T>(path);
+      items.push(...page.items);
+      total = page.total;
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < maxPages && items.length < maxItems);
+    return { items, total, truncated: Boolean(cursor) };
+  }
 }
 
 /**
@@ -620,24 +736,22 @@ export async function fetchWorkspaceSnapshot(
   }
   const baseClient = new SokosumiClient(userId, env);
 
-  // Every workspace we can read, personal first. Org enumeration 403s since
-  // Sokosumi #3394, so this is usually just the personal workspace — which is
-  // exactly where a per-user assistant's tasks live. Never let an empty org
-  // list collapse the sweep to nothing.
+  // Every workspace we can read, personal first. Org enumeration works again
+  // via orch+ctx (Sokosumi PR #3408), so this spans the personal workspace
+  // PLUS every org the user belongs to. Never let an empty org list collapse
+  // the sweep to nothing.
   const scopes = await baseClient.listWorkspaceScopes().catch((err) => {
     logger.warn({ err, userId }, 'sokosumi_list_orgs_failed');
     return [{ id: null, name: 'Personal' }] as WorkspaceScope[];
   });
 
-  // Per-workspace pulls — tasks, completed jobs, coworkers. Run in parallel
-  // (typically 1–3 per user). Cap so we don't fan out badly for users with
-  // many orgs. NOTE: marketplace conversations are NOT pulled — the
+  // Per-workspace pulls — tasks, completed jobs, coworkers. Fan out over ALL
+  // scopes with bounded concurrency (was capped at 5, silently dropping orgs
+  // for many-org users). NOTE: marketplace conversations are NOT pulled — the
   // first-party orchestrator actor always gets 403 on /conversations, so the
   // fetch was pure daily log noise; the snapshot's conversations field stays
   // empty by construction.
-  const orgsToFetch = scopes.slice(0, 5);
-  const orgWorkspaces = await Promise.all(
-    orgsToFetch.map(async (org) => {
+  const orgWorkspaces = await mapLimit(scopes, 5, async (org) => {
       const orgClient = baseClient.withOrganization(org.id);
       const [tasks, completedJobs, coworkers] = await Promise.all([
         orgClient.listTasks({ limit: 50, scope: 'workspace' }).catch((err) => {
@@ -680,8 +794,7 @@ export async function fetchWorkspaceSnapshot(
         conversations,
         coworkers,
       };
-    }),
-  );
+  });
 
   // User-level pulls.
   const [credits, agents] = await Promise.all([

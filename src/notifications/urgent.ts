@@ -60,9 +60,12 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   // doesn't expose a since filter on /jobs, so we list recent COMPLETED
   // jobs and filter client-side by completedAt.
   const client = new SokosumiClient(row.userId, env);
-  let orgs: Array<{ id: string }> = [];
+  // MUST be listWorkspaceScopes (not listOrganizations): the personal
+  // workspace (id:null) is where a per-user assistant's own jobs run — urgent
+  // completions/failures there were never surfaced before.
+  let orgs: Array<{ id: string | null }> = [];
   try {
-    orgs = (await client.listOrganizations()).map((o) => ({ id: o.id }));
+    orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
   } catch (err) {
     log.warn({ err }, 'urgent_check_list_orgs_failed');
     return { fired: false, reason: 'list_orgs_failed' };
@@ -80,49 +83,53 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     agentId: string;
     timestamp: string;
     resultSnippet: string;
-    orgId: string;
+    orgId: string | null;
     status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
     jobId: string;
   }> = [];
 
-  for (const org of orgs.slice(0, 5)) {
+  for (const org of orgs) {
     const orgClient = client.withOrganization(org.id);
-    // For each watched status, list recent jobs and filter by watermark.
-    for (const status of ['COMPLETED', 'AWAITING_INPUT', 'FAILED'] as const) {
-      try {
-        const jobs = (await orgClient.listJobs({ status, limit: 15 })) as Array<{
-          id?: string;
-          name?: string;
-          agentId?: string;
-          completedAt?: string;
-          updatedAt?: string;
-          createdAt?: string;
-          result?: string;
-        }>;
+    try {
+      // Page all jobs ONCE (the API ignores ?status), then bucket by the job's
+      // REAL status — the old code made a per-status call and trusted the
+      // ignored filter, mislabeling jobs by whichever iteration fetched them.
+      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
+        id?: string;
+        name?: string;
+        agentId?: string;
+        status?: string;
+        completedAt?: string;
+        updatedAt?: string;
+        createdAt?: string;
+        result?: string;
+      }>;
+      for (const j of jobs) {
+        const jobStatus = (j.status ?? '').toUpperCase();
+        if (jobStatus !== 'COMPLETED' && jobStatus !== 'AWAITING_INPUT' && jobStatus !== 'FAILED') {
+          continue;
+        }
+        const status = jobStatus as 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
         const watermark =
           status === 'COMPLETED' ? sinceCompleted : status === 'AWAITING_INPUT' ? sinceAwaiting : sinceFailed;
-        for (const j of jobs) {
-          // Use completedAt for COMPLETED, updatedAt for the others (which
-          // mark state transitions).
-          const stampStr =
-            status === 'COMPLETED' ? j.completedAt : j.updatedAt ?? j.createdAt;
-          if (!stampStr) continue;
-          const stamp = new Date(stampStr);
-          if (isNaN(stamp.getTime())) continue;
-          if (stamp.getTime() <= watermark.getTime()) continue;
-          candidates.push({
-            name: j.name ?? '(unnamed job)',
-            agentId: j.agentId ?? '?',
-            timestamp: stampStr,
-            resultSnippet: (j.result ?? '').slice(0, 800).replace(/\s+/g, ' '),
-            orgId: org.id,
-            status,
-            jobId: j.id ?? '?',
-          });
-        }
-      } catch (err) {
-        log.warn({ err, orgId: org.id, status }, 'urgent_check_list_jobs_failed');
+        // completedAt for COMPLETED, updatedAt for the others (state transitions).
+        const stampStr = status === 'COMPLETED' ? j.completedAt : j.updatedAt ?? j.createdAt;
+        if (!stampStr) continue;
+        const stamp = new Date(stampStr);
+        if (isNaN(stamp.getTime())) continue;
+        if (stamp.getTime() <= watermark.getTime()) continue;
+        candidates.push({
+          name: j.name ?? '(unnamed job)',
+          agentId: j.agentId ?? '?',
+          timestamp: stampStr,
+          resultSnippet: (j.result ?? '').slice(0, 800).replace(/\s+/g, ' '),
+          orgId: org.id,
+          status,
+          jobId: j.id ?? '?',
+        });
       }
+    } catch (err) {
+      log.warn({ err, orgId: org.id }, 'urgent_check_list_jobs_failed');
     }
   }
 

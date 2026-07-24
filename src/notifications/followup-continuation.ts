@@ -36,7 +36,7 @@ const AGENT_TURN_TIMEOUT_MS = 4 * 60_000;
 interface CompletedJob {
   jobId: string;
   name: string;
-  orgId: string;
+  orgId: string | null;
   timestamp: string;
 }
 
@@ -66,9 +66,12 @@ export async function continueFollowupsForInstance(
   const log = logger.child({ instanceId, userId: row.userId, fn: 'followup_continuation' });
   const client = new SokosumiClient(row.userId, env);
 
-  let orgs: Array<{ id: string }> = [];
+  // MUST be listWorkspaceScopes (not listOrganizations): the personal
+  // workspace (id:null) is where a per-user assistant's own jobs run, and it
+  // was never scanned before — completions there never triggered follow-ups.
+  let orgs: Array<{ id: string | null }> = [];
   try {
-    orgs = (await client.listOrganizations()).map((o) => ({ id: o.id }));
+    orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
   } catch (err) {
     log.warn({ err }, 'followup_list_orgs_failed');
     return { prompted: 0, reason: 'list_orgs_failed' };
@@ -80,10 +83,11 @@ export async function continueFollowupsForInstance(
   const completed: CompletedJob[] = [];
   let anyOrgFailed = false;
 
-  for (const org of orgs.slice(0, 5)) {
+  for (const org of orgs) {
     const orgClient = client.withOrganization(org.id);
     try {
-      const jobs = (await orgClient.listJobs({ status: 'COMPLETED', limit: 15 })) as Array<{
+      // API ignores ?status; page all jobs (bounded) + filter COMPLETED below.
+      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
         id?: string;
         name?: string;
         status?: string;

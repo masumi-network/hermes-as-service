@@ -5,7 +5,7 @@ import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
-import { SokosumiClient } from '../sokosumi/client.js';
+import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 
 /**
@@ -270,20 +270,26 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_notifications',
     description:
-      "List the user's Sokosumi notifications (newest first) — task updates, job completions, input requests, etc. — plus the current unread count. Use to see what needs the user's attention and to surface anything important in chat.",
+      "List the user's Sokosumi notifications (newest first) — task updates, job completions, input requests, etc. — plus the current unread count, a `total`, and a `nextCursor` for paging. Use to see what needs the user's attention and to surface anything important in chat.",
     inputSchema: {
       type: 'object',
-      properties: { limit: { type: 'number', description: 'Max results (default 20, max 50).' } },
+      properties: {
+        limit: { type: 'number', description: 'Max results per page (default 20, max 50).' },
+        cursor: { type: 'string', description: "Pass a prior response's nextCursor to fetch the next page." },
+      },
     },
   },
   {
     access: 'read',
     name: 'sokosumi_get_history',
     description:
-      "The user's recent Sokosumi activity history (tasks and jobs they've run, newest first). Use for quick context on what the user has been working on lately.",
+      "The user's recent Sokosumi activity history (tasks and jobs they've run, newest first). Returns `total` and a `nextCursor` for paging. Use for quick context on what the user has been working on lately.",
     inputSchema: {
       type: 'object',
-      properties: { limit: { type: 'number', description: 'Max results (default 20, max 50).' } },
+      properties: {
+        limit: { type: 'number', description: 'Max results per page (default 20, max 50).' },
+        cursor: { type: 'string', description: "Pass a prior response's nextCursor to fetch the next page." },
+      },
     },
   },
   {
@@ -708,35 +714,41 @@ export async function executeTool(
     }
 
     case 'sokosumi_list_tasks': {
-      // Aggregate across orgs in parallel — sequential per-org calls were
-      // adding ~500–800ms per extra org for users with multiple workspaces.
+      // Personal workspace + EVERY org the user belongs to (bounded
+      // concurrency), each paginated so a busy workspace can't hide tasks past
+      // page one. `total` is the API's count across workspaces; `truncated` is
+      // true if any scope hit the paging bound.
       const orgs = await client.listWorkspaceScopes();
       const status = typeof args['status'] === 'string' ? (args['status'] as string) : undefined;
       const q = typeof args['q'] === 'string' ? (args['q'] as string).toLowerCase() : undefined;
-      const limit = clampNumber(args['limit'], 50, 100);
-      const allTasks: Array<{ orgId: string | null; orgName?: string; task: unknown }> = [];
-      const settled = await Promise.allSettled(
-        orgs.slice(0, 5).map((org) =>
-          client.withOrganization(org.id).listTasks({ limit, scope: 'workspace' }).then((tasks) => ({ org, tasks })),
-        ),
+      const limit = clampNumber(args['limit'], 50, 200);
+      const perScope = await mapLimit(orgs, 5, (org) =>
+        client
+          .withOrganization(org.id)
+          .listAllTasks({ scope: 'workspace', status, maxItems: 300 })
+          .then((r) => ({ org, ...r }))
+          .catch(() => ({ org, items: [] as unknown[], total: 0, truncated: false })),
       );
-      for (const r of settled) {
-        if (r.status === 'fulfilled') {
-          for (const t of r.value.tasks) allTasks.push({ orgId: r.value.org.id, orgName: r.value.org.name, task: t });
-        }
-      }
-      let filtered = allTasks;
+      const totalAcrossWorkspaces = perScope.reduce((n, r) => n + r.total, 0);
+      const truncated = perScope.some((r) => r.truncated);
+      let all = perScope.flatMap((r) =>
+        r.items.map((task) => ({ orgId: r.org.id, orgName: r.org.name, task })),
+      );
       if (status) {
-        filtered = filtered.filter(
+        all = all.filter(
           (x) => (x.task as { status?: string })?.status?.toUpperCase() === status.toUpperCase(),
         );
       }
       if (q) {
-        filtered = filtered.filter((x) =>
+        all = all.filter((x) =>
           ((x.task as { name?: string })?.name ?? '').toLowerCase().includes(q),
         );
       }
-      return JSON.stringify({ count: filtered.length, tasks: filtered.slice(0, limit) }, null, 2);
+      return JSON.stringify(
+        { total: totalAcrossWorkspaces, count: Math.min(all.length, limit), truncated, tasks: all.slice(0, limit) },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_get_task': {
@@ -762,28 +774,31 @@ export async function executeTool(
     }
 
     case 'sokosumi_list_jobs': {
+      // Personal + every org, bounded concurrency, each paginated. The API
+      // ignores ?status, so we page all jobs and filter by status client-side.
       const orgs = await client.listWorkspaceScopes();
-      const status = typeof args['status'] === 'string' ? (args['status'] as string) : undefined;
+      const status =
+        typeof args['status'] === 'string' ? (args['status'] as string).toUpperCase() : undefined;
       const agentId = typeof args['agent_id'] === 'string' ? (args['agent_id'] as string) : undefined;
-      const limit = clampNumber(args['limit'], 30, 100);
-      const all: Array<unknown> = [];
-      const settled = await Promise.allSettled(
-        orgs.slice(0, 5).map((org) =>
-          client.withOrganization(org.id).listJobs({
-            status: status as Parameters<SokosumiClient['listJobs']>[0] extends infer P
-              ? P extends { status?: infer S }
-                ? S
-                : never
-              : never,
-            agentId,
-            limit,
-          }),
-        ),
+      const limit = clampNumber(args['limit'], 30, 200);
+      const perScope = await mapLimit(orgs, 5, (org) =>
+        client
+          .withOrganization(org.id)
+          .listAllJobs({ agentId, maxItems: 300 })
+          .then((r) => ({ org, ...r }))
+          .catch(() => ({ org, items: [] as unknown[], total: 0, truncated: false })),
       );
-      for (const r of settled) {
-        if (r.status === 'fulfilled') for (const j of r.value) all.push(j);
+      const totalAcrossWorkspaces = perScope.reduce((n, r) => n + r.total, 0);
+      const truncated = perScope.some((r) => r.truncated);
+      let all = perScope.flatMap((r) => r.items);
+      if (status) {
+        all = all.filter((j) => (j as { status?: string })?.status?.toUpperCase() === status);
       }
-      return JSON.stringify({ count: all.length, jobs: all.slice(0, limit) }, null, 2);
+      return JSON.stringify(
+        { total: totalAcrossWorkspaces, count: Math.min(all.length, limit), truncated, jobs: all.slice(0, limit) },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_get_job': {
@@ -866,17 +881,33 @@ export async function executeTool(
 
     case 'sokosumi_list_notifications': {
       const limit = clampNumber(args['limit'], 20, 50);
-      const [items, unread] = await Promise.all([
-        client.listNotifications({ limit }),
+      const cursor = typeof args['cursor'] === 'string' ? (args['cursor'] as string) : undefined;
+      const [page, unread] = await Promise.all([
+        client.listNotifications({ limit, cursor }),
         client.getUnreadNotificationCount().catch(() => null),
       ]);
-      return JSON.stringify({ unreadCount: unread, count: items.length, notifications: items }, null, 2);
+      return JSON.stringify(
+        {
+          unreadCount: unread,
+          total: page.total,
+          count: page.items.length,
+          nextCursor: page.nextCursor,
+          notifications: page.items,
+        },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_get_history': {
       const limit = clampNumber(args['limit'], 20, 50);
-      const items = await client.getHistory({ limit });
-      return JSON.stringify({ count: items.length, history: items }, null, 2);
+      const cursor = typeof args['cursor'] === 'string' ? (args['cursor'] as string) : undefined;
+      const page = await client.getHistory({ limit, cursor });
+      return JSON.stringify(
+        { total: page.total, count: page.items.length, nextCursor: page.nextCursor, history: page.items },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_list_agents': {
@@ -891,7 +922,7 @@ export async function executeTool(
       const orgs = await client.listWorkspaceScopes();
       const all: Array<{ orgId: string | null; orgName?: string; coworker: unknown }> = [];
       const settled = await Promise.allSettled(
-        orgs.slice(0, 5).map((org) =>
+        orgs.map((org) =>
           client
             .withOrganization(org.id)
             .listCoworkers({ scope: 'whitelisted', limit })
@@ -1066,11 +1097,12 @@ export async function executeTool(
           );
         }
       } else {
-        // No org named — sweep the workspaces we can see (personal, plus any
-        // org we managed to enumerate; usually just personal now) and take
-        // the first where the coworker is whitelisted.
+        // No org named — sweep ALL the user's workspaces (personal + every
+        // org) and take the first where the coworker is whitelisted. Must not
+        // cap: a valid coworker living in org #6 would otherwise read as "not
+        // found in any of the user's orgs".
         const orgs = await client.listWorkspaceScopes();
-        for (const org of orgs.slice(0, 5)) {
+        for (const org of orgs) {
           try {
             const list = (await client.withOrganization(org.id).listCoworkers({ scope: 'whitelisted', limit: 50 })) as Array<{
               id?: string;

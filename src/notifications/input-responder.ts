@@ -67,10 +67,9 @@ export async function respondToInputRequestsForInstance(
   const log = logger.child({ instanceId, userId: row.userId, fn: 'input_responder' });
   const client = new SokosumiClient(row.userId, env);
 
-  // Personal workspace first, then any org we can still reach. MUST be
-  // listWorkspaceScopes, not listOrganizations — org enumeration is 403 for
-  // the orchestrator now, so listOrganizations returns [] and the responder
-  // would scan NOTHING, never seeing a personal AWAITING_INPUT job.
+  // Personal workspace first, then every org. MUST be listWorkspaceScopes (not
+  // listOrganizations): it always includes the personal workspace (id:null),
+  // where a per-user assistant's own AWAITING_INPUT jobs live.
   let orgs: Array<{ id: string | null }> = [];
   try {
     orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
@@ -88,10 +87,13 @@ export async function respondToInputRequestsForInstance(
   const paused: PausedJob[] = [];
   let anyOrgFailed = false;
 
-  for (const org of orgs.slice(0, 5)) {
+  for (const org of orgs) {
     const orgClient = client.withOrganization(org.id);
     try {
-      const jobs = (await orgClient.listJobs({ status: 'AWAITING_INPUT', limit: 15 })) as Array<{
+      // The API ignores ?status, so page all jobs (bounded) and filter to
+      // AWAITING_INPUT client-side below — a single 15-item page could miss an
+      // aged paused job entirely.
+      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
         id?: string;
         name?: string;
         status?: string;

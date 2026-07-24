@@ -85,10 +85,9 @@ export async function assistTaskboardForInstance(
   const { userId: effectiveUserId } = resolveSokosumiTarget(row.userId, env);
   const ownerIds = new Set([row.userId, effectiveUserId]);
 
-  // Workspaces to scan, personal first. MUST be listWorkspaceScopes, not
-  // listOrganizations — org enumeration is 403 for the orchestrator now, so
-  // listOrganizations returns [] and the sweep would scan NOTHING, never
-  // seeing a personal INPUT_REQUIRED task (id:null = personal, always present).
+  // Workspaces to scan, personal first. MUST be listWorkspaceScopes (not
+  // listOrganizations): it always includes the personal workspace (id:null),
+  // where a per-user assistant's own INPUT_REQUIRED tasks live.
   let orgs: Array<{ id: string | null }> = [];
   try {
     orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
@@ -100,9 +99,14 @@ export async function assistTaskboardForInstance(
   const now = Date.now();
   const raw: BoardTask[] = [];
 
-  for (const org of orgs.slice(0, 5)) {
+  for (const org of orgs) {
     try {
-      const tasks = (await client.withOrganization(org.id).listTasks({ limit: 30, scope: 'workspace' })) as Array<{
+      // Paginate the whole workspace — a blocked INPUT_REQUIRED task below a
+      // single-page cut never bumps its updatedAt to resurface, so it would be
+      // missed forever.
+      const tasks = (
+        await client.withOrganization(org.id).listAllTasks({ scope: 'workspace', maxItems: 500 })
+      ).items as Array<{
         id?: string;
         name?: string;
         description?: string | null;
