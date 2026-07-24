@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * After Sokosumi #3394 the orchestrator can no longer enumerate a user's orgs.
- * The org-scoping USE path still works — Sokosumi validates membership
- * server-side — so an explicit organization_id (the user's workspace pick on a
- * confirmation card) must be TRUSTED, not rejected against a dead enumeration.
+ * Org enumeration is available again via orch+ctx (Sokosumi PR #3408), but the
+ * create paths must still TRUST an explicit organization_id (the user's
+ * workspace pick on a confirmation card) directly — Sokosumi validates
+ * membership server-side — rather than gating a write on an enumeration
+ * round-trip.
  *
  * These drive the real executeTool dispatcher through a fetch mock so we test
  * the actual header + endpoint behaviour, not a paraphrase of it.
@@ -25,6 +26,13 @@ function router(method: string, pathname: string): unknown {
   if (pathname === '/coworkers') return { data: [{ id: 'cow_1', slug: 'hannah', name: 'Hannah' }] };
   if (pathname === '/tasks' && method === 'POST') return { data: { id: 'tsk_new', status: 'READY' } };
   if (pathname === '/agents/agent_1/jobs' && method === 'POST') return { data: { id: 'job_new' } };
+  if (pathname.endsWith('/credits'))
+    return {
+      data: {
+        subscription: { plan: 'starter', status: 'active', credits: { total: 1500, remaining: 800, used: 700 } },
+        extra: { credits: { total: 100, remaining: 25, used: 75 } },
+      },
+    };
   return { data: [] };
 }
 
@@ -108,10 +116,12 @@ describe('org-scoped create paths trust an explicit organization_id', () => {
     expect(JSON.parse(out).orgId).toBeNull();
   });
 
-  it('get_credits reports balances are unavailable rather than faking a null number', async () => {
+  it('get_credits returns the real balance + plan (reopened by PR #3408)', async () => {
     const out = JSON.parse(await run('sokosumi_get_credits', {}));
-    expect(out.available).toBe(false);
-    // And it must not have hit the session-only /users/{id}/credits at all.
-    expect(calls.some((c) => c.path.includes('/credits'))).toBe(false);
+    expect(out.plan).toBe('starter');
+    expect(out.status).toBe('active');
+    expect(out.totalRemaining).toBe(825); // subscription 800 + extra 25
+    // It now DOES read /users/{id}/credits.
+    expect(calls.some((c) => c.path.includes('/credits'))).toBe(true);
   });
 });

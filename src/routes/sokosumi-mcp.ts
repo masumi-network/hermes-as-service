@@ -157,14 +157,14 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_organizations',
     description:
-      "Try to list the user's organizations — the teams they belong to. An organization is NOT a workspace: it's a team + wallet that OWNS one shared workspace (where its work lives). NOTE: this is usually NOT available to you — Sokosumi only lets the signed-in user enumerate their orgs, so it typically returns an empty list. You can't discover org ids yourself; you act in an org's workspace only when the user hands you its id (their workspace pick on a confirmation card). Default is the personal workspace.",
+      "List the organizations (teams) the user belongs to. An organization is a team + wallet that OWNS one shared workspace where its work lives. Returns id, name, slug for each. Use an org's id to work in its workspace (sokosumi_list_tasks, sokosumi_create_task, etc.). The personal workspace is always available with no id.",
     inputSchema: { type: 'object', properties: {} },
   },
   {
     access: 'read',
     name: 'sokosumi_list_tasks',
     description:
-      "List the user's Sokosumi tasks in their PERSONAL workspace by default (or a specific org's workspace when you pass that org's id). Returns id, name, status, createdAt. Filter by status (RUNNING, COMPLETED) or a name substring. Within a workspace this shows EVERY coworker's tasks there, not just yours — your board-wide view for THAT workspace. It does NOT span every org you belong to: you can't enumerate orgs, so an org's tasks are visible only when the user has scoped you to that org.",
+      "List the user's Sokosumi tasks. By default spans their PERSONAL workspace AND every org workspace they belong to (each task is tagged with its orgId). Returns id, name, status, createdAt. Filter by status (RUNNING, COMPLETED) or a name substring. Within a workspace this shows EVERY coworker's tasks there, not just yours — your board-wide view.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -194,7 +194,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_jobs',
     description:
-      "List the user's Sokosumi agent jobs in their personal workspace (or an org's workspace when you pass that org's id). Returns id, name, agentId, status, completedAt, short result snippet. Filter by status (COMPLETED for finished work) or agentId. It does not span every org you belong to — you can't enumerate orgs.",
+      "List the user's Sokosumi agent jobs across their personal workspace and every org workspace they belong to. Returns id, name, agentId, status, completedAt, short result snippet. Filter by status (COMPLETED for finished work) or agentId.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -263,16 +263,27 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_get_credits',
     description:
-      "Check whether Sokosumi credit balances are visible to you. They usually are NOT — balances are only shown to the signed-in user, not the assistant. Use sokosumi_get_agent_input_schema for a job's price instead; if a workspace is short, the job fails when it runs and the user tops up. Don't block on 'checking the balance first'.",
+      "Read the user's Sokosumi credit balance + plan for their PERSONAL workspace: subscription plan/status and remaining credits (subscription credits plus any extra buckets). Check this for affordability before a spend — pair it with sokosumi_get_agent_input_schema for the job's price. Note: a job run in an ORG workspace spends that org's wallet, which is separate and not shown here.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    access: 'read',
+    name: 'sokosumi_list_notifications',
+    description:
+      "List the user's Sokosumi notifications (newest first) — task updates, job completions, input requests, etc. — plus the current unread count. Use to see what needs the user's attention and to surface anything important in chat.",
     inputSchema: {
       type: 'object',
-      properties: {
-        organization_id: {
-          type: 'string',
-          description:
-            "Optional workspace selector (an org id). NOTE: balances aren't actually readable by you — this returns available:false either way — and there is no 'all orgs at once' (you can't enumerate orgs). Prefer sokosumi_get_agent_input_schema for a job's price.",
-        },
-      },
+      properties: { limit: { type: 'number', description: 'Max results (default 20, max 50).' } },
+    },
+  },
+  {
+    access: 'read',
+    name: 'sokosumi_get_history',
+    description:
+      "The user's recent Sokosumi activity history (tasks and jobs they've run, newest first). Use for quick context on what the user has been working on lately.",
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: 'Max results (default 20, max 50).' } },
     },
   },
   {
@@ -385,7 +396,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'spend',
     name: 'sokosumi_create_job',
     description:
-      "Kick off a Sokosumi agent job. SPENDS CREDITS owned by the workspace owner (you for personal, the org for an org workspace) — and unlike tasks the price IS known up front. Before calling: (1) fetch the per-job price with sokosumi_get_agent_input_schema, (2) apply your autonomy's cost rules to that price. Don't call sokosumi_get_credits to 'check the balance' — balances aren't visible to you; if a workspace is short, the job fails at run time and the user tops up. At MEDIUM the orchestrator surfaces a confirmation box — state the price in chat too. At HIGH, weigh the price against your cost rules; if a job later fails out-of-credits, relay that to the user.",
+      "Kick off a Sokosumi agent job. SPENDS CREDITS from the workspace owner's wallet (you for personal, the org for an org workspace) — and unlike tasks the price IS known up front. Before calling: (1) fetch the per-job price with sokosumi_get_agent_input_schema, (2) check the balance with sokosumi_get_credits (personal workspace), (3) apply your autonomy's cost rules. At MEDIUM the orchestrator surfaces a confirmation box — state the price in chat too. At HIGH, weigh the price against the balance and your cost rules; if a job later fails out-of-credits, relay that to the user.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -685,16 +696,10 @@ export async function executeTool(
 
   switch (name) {
     case 'sokosumi_list_organizations': {
-      // Org enumeration is session-only since Sokosumi #3394 and returns []
-      // for us. Say so explicitly rather than implying the user has no orgs.
       const orgs = await client.listOrganizations();
       if (orgs.length === 0) {
         return JSON.stringify(
-          {
-            count: 0,
-            organizations: [],
-            note: 'Organization enumeration is not available to the assistant. Working in the personal workspace.',
-          },
+          { count: 0, organizations: [], note: 'The user belongs to no organizations — only their personal workspace.' },
           null,
           2,
         );
@@ -830,22 +835,48 @@ export async function executeTool(
     }
 
     case 'sokosumi_get_credits': {
-      // Credit BALANCES are no longer readable by the assistant: every
-      // balance endpoint lives under /users/{id}/* which Sokosumi #3394 made
-      // session-only (403 for the orchestrator), for personal AND org scope.
-      // Don't fake a number — tell the truth so the model stops trying to
-      // "check the balance first". Affordability now comes from the job price
-      // (sokosumi_get_agent_input_schema) and, at run time, an out-of-credits
-      // failure the user resolves by topping up in Sokosumi.
+      // Readable again since Sokosumi PR #3408 (orch+ctx on /users/{id}/*).
+      const raw = await client.getCredits();
+      if (!raw) {
+        return JSON.stringify(
+          { available: false, reason: 'Credits endpoint not reachable in this environment.' },
+          null,
+          2,
+        );
+      }
+      const d = ((raw as { data?: unknown }).data ?? raw) as {
+        subscription?: { plan?: string; status?: string; credits?: { total?: number; remaining?: number; used?: number } };
+        extra?: { credits?: { total?: number; remaining?: number; used?: number } };
+      };
+      const subRem = d.subscription?.credits?.remaining ?? 0;
+      const extraRem = d.extra?.credits?.remaining ?? 0;
       return JSON.stringify(
         {
-          available: false,
-          reason:
-            'Credit balances are only visible to the signed-in user in Sokosumi, not to the assistant. Get a job\'s price from sokosumi_get_agent_input_schema; if a workspace is short on credits the job fails when it runs and the user tops up in Sokosumi.',
+          plan: d.subscription?.plan ?? null,
+          status: d.subscription?.status ?? null,
+          totalRemaining: Math.round((subRem + extraRem) * 100) / 100,
+          subscriptionCredits: d.subscription?.credits ?? null,
+          extraCredits: d.extra?.credits ?? null,
+          note: "Personal-workspace balance. A job run in an ORG workspace spends that org's wallet, not this.",
         },
         null,
         2,
       );
+    }
+
+    case 'sokosumi_list_notifications': {
+      const limit = clampNumber(args['limit'], 20, 50);
+      const [items, unread] = await Promise.all([
+        client.listNotifications({ limit }),
+        client.getUnreadNotificationCount().catch(() => null),
+      ]);
+      return JSON.stringify({ unreadCount: unread, count: items.length, notifications: items }, null, 2);
+    }
+
+    case 'sokosumi_get_history': {
+      const limit = clampNumber(args['limit'], 20, 50);
+      const items = await client.getHistory({ limit });
+      return JSON.stringify({ count: items.length, history: items }, null, 2);
     }
 
     case 'sokosumi_list_agents': {

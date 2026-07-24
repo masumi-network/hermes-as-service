@@ -417,10 +417,12 @@ export class SokosumiClient {
   // ---------- credits + meta ----------
 
   /**
-   * Credits. UNAVAILABLE to the orchestrator actor since Sokosumi #3394 —
-   * `/users/{id}/*` is session-only (`requireUserAuthContext`), so we get a
-   * 403 no matter what context we send. Returns null rather than throwing so
-   * a snapshot/tool doesn't die over a field we simply can't read anymore.
+   * Personal-workspace credits: subscription plan + balance (subscription
+   * `credits` {total,remaining,used} plus `extra` credit buckets). Readable
+   * again via orch+ctx since Sokosumi PR #3408, which reopened `/users/{id}/*`
+   * to the service token + X-Context-User-Id. The 403 branch is kept as a
+   * safety net for any env where #3408 isn't deployed yet — there we return
+   * null so a snapshot/tool degrades instead of throwing.
    */
   async getCredits(): Promise<unknown> {
     return this.get(`/users/${encodeURIComponent(this.userId)}/credits`).catch((err) => {
@@ -430,6 +432,30 @@ export class SokosumiClient {
       }
       throw err;
     });
+  }
+
+  /** The user's notifications (newest first). `data[]` of {id,kind,...}. */
+  async listNotifications(opts: { limit?: number } = {}): Promise<unknown[]> {
+    const qs = new URLSearchParams();
+    qs.set('limit', String(opts.limit ?? 20));
+    const body = await this.get<{ data?: unknown[]; items?: unknown[] }>(`/notifications?${qs}`);
+    return body.data ?? body.items ?? [];
+  }
+
+  /** Count of unread notifications. */
+  async getUnreadNotificationCount(): Promise<number> {
+    const body = await this.get<{ data?: { count?: number }; count?: number }>(
+      '/notifications/unread-count',
+    );
+    return body.data?.count ?? body.count ?? 0;
+  }
+
+  /** The user's recent activity history (tasks/jobs), newest first. */
+  async getHistory(opts: { limit?: number } = {}): Promise<unknown[]> {
+    const qs = new URLSearchParams();
+    qs.set('limit', String(opts.limit ?? 20));
+    const body = await this.get<{ data?: unknown[]; items?: unknown[] }>(`/history?${qs}`);
+    return body.data ?? body.items ?? [];
   }
 
   async listAgents(opts: { limit?: number } = {}): Promise<unknown[]> {
@@ -474,10 +500,10 @@ export class SokosumiClient {
       );
       return body.data ?? [];
     } catch (err) {
-      // Sokosumi #3394 made `/users/{id}/*` session-only, so the orchestrator
-      // can no longer enumerate orgs. Degrade to "no orgs" instead of
-      // throwing — callers sweep the personal workspace via
-      // listWorkspaceScopes(), which is always reachable.
+      // Readable again via orch+ctx since Sokosumi PR #3408. The 403 branch is
+      // a safety net for any env where #3408 isn't deployed: degrade to "no
+      // orgs" instead of throwing — callers still sweep the personal workspace
+      // via listWorkspaceScopes(), which is always reachable.
       if (isUserPathForbidden(err)) {
         logger.debug({ userId: this.userId }, 'sokosumi_org_enumeration_unavailable');
         return [];
