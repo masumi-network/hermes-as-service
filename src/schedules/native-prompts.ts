@@ -31,7 +31,7 @@ const AUTONOMY_RANK: Record<Autonomy, number> = { low: 0, medium: 1, high: 2 };
  * the hourly reconciler cron — that's how spec changes roll out fleet-wide
  * without manual resyncs, and how onboarding-time sync failures self-heal.
  */
-export const NATIVE_PROMPTS_VERSION = 2;
+export const NATIVE_PROMPTS_VERSION = 3;
 
 interface NativePromptSpec {
   /** Cronjob name on the machine AND mirror-row name — stable identifier. */
@@ -72,7 +72,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'medium',
     summary: 'Daily 9am — heads-up when a workspace credit balance drops below 25.',
     prompt:
-      'Call sokosumi_get_credits (no org filter — check every workspace balance). If any workspace balance is below 25 credits, send a one-sentence heads-up naming the workspace, the balance, and the 1–2 most recent jobs that drove the spend. If all balances are 25 or above — OR you cannot read the balances — reply with EXACTLY `[SILENT]` and nothing else (do not explain that you could not check).',
+      'Call sokosumi_get_credits for the personal workspace balance. If it is below 25 credits, send a one-sentence heads-up with the balance and the 1–2 most recent jobs that drove the spend. If it is 25+ — OR you cannot read it (balances are usually not visible to you) — reply with EXACTLY `[SILENT]` and nothing else (do not explain that you could not check).',
   },
   {
     name: 'followup-task-generator',

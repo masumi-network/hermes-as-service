@@ -156,14 +156,14 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_organizations',
     description:
-      "Try to list the user's organizations (shared team workspaces). NOTE: this is usually NOT available to you — Sokosumi only lets the signed-in user enumerate their orgs, so this typically returns an empty list with a note. You still work in any org the user directs you to: when they pick a workspace (e.g. on a confirmation card) you get its id and can create/read there. Don't rely on this to discover workspaces.",
+      "Try to list the user's organizations — the teams they belong to. An organization is NOT a workspace: it's a team + wallet that OWNS one shared workspace (where its work lives). NOTE: this is usually NOT available to you — Sokosumi only lets the signed-in user enumerate their orgs, so it typically returns an empty list. You can't discover org ids yourself; you act in an org's workspace only when the user hands you its id (their workspace pick on a confirmation card). Default is the personal workspace.",
     inputSchema: { type: 'object', properties: {} },
   },
   {
     access: 'read',
     name: 'sokosumi_list_tasks',
     description:
-      "List the user's Sokosumi tasks across all orgs they belong to. Returns id, name, status, createdAt for each. Use this to discover what work the user has in flight. Filter by status (e.g. RUNNING, COMPLETED) or search by name substring. With the user's granted workspace access this returns EVERY coworker's tasks in the workspace (not just yours), so it's your board-wide view for coordinating across coworkers — if it comes back access-limited, you're only seeing your own until the user approves your workspace access.",
+      "List the user's Sokosumi tasks in their PERSONAL workspace by default (or a specific org's workspace when you pass that org's id). Returns id, name, status, createdAt. Filter by status (RUNNING, COMPLETED) or a name substring. Within a workspace this shows EVERY coworker's tasks there, not just yours — your board-wide view for THAT workspace. It does NOT span every org you belong to: you can't enumerate orgs, so an org's tasks are visible only when the user has scoped you to that org.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -193,7 +193,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_list_jobs',
     description:
-      "List the user's Sokosumi agent jobs across all orgs. Returns id, name, agentId, status, completedAt, short result snippet. Filter by status (COMPLETED for finished work) or agentId.",
+      "List the user's Sokosumi agent jobs in their personal workspace (or an org's workspace when you pass that org's id). Returns id, name, agentId, status, completedAt, short result snippet. Filter by status (COMPLETED for finished work) or agentId. It does not span every org you belong to — you can't enumerate orgs.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -269,7 +269,7 @@ const TOOLS_ALL: ToolDef[] = [
         organization_id: {
           type: 'string',
           description:
-            'Optional. If set, returns credits for that organization only. Omit to get personal + all orgs at once.',
+            "Optional workspace selector (an org id). NOTE: balances aren't actually readable by you — this returns available:false either way — and there is no 'all orgs at once' (you can't enumerate orgs). Prefer sokosumi_get_agent_input_schema for a job's price.",
         },
       },
     },
@@ -358,7 +358,7 @@ const TOOLS_ALL: ToolDef[] = [
         },
         organization_id: {
           type: ['string', 'null'],
-          description: 'Workspace where the task lives. Pass an org id string to file in a shared organization (utxo AG, Serviceplan Group, etc.). Pass `null` (literal JSON null, not the string "null") for the user\'s personal workspace — useful when the work is private. REQUIRED whenever the user names a workspace, and whenever the chosen coworker exists in more than one org (almost always true for Hannah, Elena, Pheme, Alex). Match against orgId from sokosumi_list_coworkers or sokosumi_list_organizations. Omitting this entirely falls back to the first org that has the coworker, which is rarely what the user wants.',
+          description: 'The workspace to file the task in. OMIT (or pass literal JSON null) for the user\'s PERSONAL workspace — this is the default and where the task goes when omitted. Pass an org id string ONLY to file in that org\'s shared workspace, and ONLY when you actually have that org\'s id — from the user\'s workspace pick on the confirmation card, or an org task/workspace they explicitly named. You canNOT look an org id up (org enumeration is unavailable), so never invent or guess one.',
         },
         status: {
           type: 'string',
@@ -384,7 +384,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'spend',
     name: 'sokosumi_create_job',
     description:
-      "Kick off a Sokosumi agent job. SPENDS CREDITS — and unlike tasks, the price IS known up front via sokosumi_get_agent_input_schema (which returns the per-job credit cost). Always before calling: (1) fetch sokosumi_get_credits for the current balance, (2) fetch sokosumi_get_agent_input_schema for the required inputs AND the credit price, (3) apply your autonomy's cost rules. At MEDIUM, the orchestrator intercepts the call and surfaces a confirmation box — surface the price to the user in chat too. At HIGH, fire autonomously if balance allows AND cost ≤ 25% of balance; refuse if balance would drop below 10 credits; ask first if cost > 25% of balance.",
+      "Kick off a Sokosumi agent job. SPENDS CREDITS owned by the workspace owner (you for personal, the org for an org workspace) — and unlike tasks the price IS known up front. Before calling: (1) fetch the per-job price with sokosumi_get_agent_input_schema, (2) apply your autonomy's cost rules to that price. Don't call sokosumi_get_credits to 'check the balance' — balances aren't visible to you; if a workspace is short, the job fails at run time and the user tops up. At MEDIUM the orchestrator surfaces a confirmation box — state the price in chat too. At HIGH, weigh the price against your cost rules; if a job later fails out-of-credits, relay that to the user.",
     inputSchema: {
       type: 'object',
       properties: {

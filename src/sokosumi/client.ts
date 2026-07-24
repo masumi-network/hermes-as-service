@@ -574,7 +574,10 @@ export interface WorkspaceSnapshot {
   /** One entry per org the user belongs to. May be empty for users with
    *  no org memberships. */
   organizations: OrgWorkspace[];
-  /** Credits are user-level, not org-scoped. */
+  /** Credits live on the workspace's OWNER — the user for the personal
+   *  workspace, the owning org for an org workspace. getCredits() reads only
+   *  the personal balance (all the orchestrator can reach; org credits need
+   *  org context we can't enumerate). */
   credits: unknown | null;
   /** Global agent catalog — same for every user. */
   agents: unknown[];

@@ -35,7 +35,8 @@ const AGENT_TURN_TIMEOUT_MS = 4 * 60_000;
 interface PausedJob {
   jobId: string;
   name: string;
-  orgId: string;
+  /** null = the user's personal workspace. */
+  orgId: string | null;
   timestamp: string;
 }
 
@@ -66,9 +67,13 @@ export async function respondToInputRequestsForInstance(
   const log = logger.child({ instanceId, userId: row.userId, fn: 'input_responder' });
   const client = new SokosumiClient(row.userId, env);
 
-  let orgs: Array<{ id: string }> = [];
+  // Personal workspace first, then any org we can still reach. MUST be
+  // listWorkspaceScopes, not listOrganizations — org enumeration is 403 for
+  // the orchestrator now, so listOrganizations returns [] and the responder
+  // would scan NOTHING, never seeing a personal AWAITING_INPUT job.
+  let orgs: Array<{ id: string | null }> = [];
   try {
-    orgs = (await client.listOrganizations()).map((o) => ({ id: o.id }));
+    orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
   } catch (err) {
     log.warn({ err }, 'input_responder_list_orgs_failed');
     return { prompted: 0, reason: 'list_orgs_failed' };
