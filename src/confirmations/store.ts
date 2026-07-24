@@ -331,35 +331,65 @@ export async function approveConfirmation(
     { key: `conf-done:${row.id}` },
   );
 
-  // Push to the outbox. This lands in the user's chat — often a minute+
-  // after approval, once they've scrolled on — so it MUST stand on its own:
-  // lead with the task title + status, not read as a reply to whatever they
-  // just typed. Sokosumi renders the trailing JSON as the /tasks/:id card.
-  try {
-    const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
-    const ref = extractTaskRef(row.toolName, resultText);
-    const argName = (row.toolArgs as Record<string, unknown>)?.['name'];
-    const title = ref.taskTitle ?? (typeof argName === 'string' ? argName : undefined);
-    let head: string;
-    if (errored) {
-      head = title
-        ? `Heads-up — the task you approved earlier, "${title}", couldn't be created: ${errorMessage}.`
-        : `Heads-up — your approved ${row.toolName} request couldn't be completed: ${errorMessage}.`;
-    } else if (row.toolName === 'sokosumi_create_task' && title) {
-      const status = ref.taskStatus ? ` (${ref.taskStatus})` : '';
-      const who = ref.coworker ? ` for ${ref.coworker}` : '';
-      head = `Here's the task you set up earlier${who} — "${title}"${status}. It's ready to view.`;
-    } else {
-      head = `Done — your earlier ${row.toolName} request was approved and completed.`;
+  // Announce the resolution in chat AND, on success, RESUME the agent so it can
+  // finish any follow-up it had planned when it stopped for the card (e.g.
+  // "create the task, then comment on it" — approving only ran the create).
+  //
+  // The message MUST stand on its own — it lands a minute+ after approval, once
+  // the user has scrolled on — so it leads with the task, not a reply. Sokosumi
+  // renders the trailing JSON as the /tasks/:id card, so we always append it.
+  const ref = extractTaskRef(row.toolName, resultText);
+  const argNameRaw = (row.toolArgs as Record<string, unknown>)?.['name'];
+  const title = ref.taskTitle ?? (typeof argNameRaw === 'string' ? argNameRaw : undefined);
+  const cannedHead = errored
+    ? title
+      ? `Heads-up — the task you approved earlier, "${title}", couldn't be created: ${errorMessage}.`
+      : `Heads-up — your approved ${row.toolName} request couldn't be completed: ${errorMessage}.`
+    : row.toolName === 'sokosumi_create_task' && title
+      ? `Here's the task you set up earlier${ref.coworker ? ` for ${ref.coworker}` : ''} — "${title}"${ref.taskStatus ? ` (${ref.taskStatus})` : ''}. It's ready to view.`
+      : `Done — your earlier ${row.toolName} request was approved and completed.`;
+
+  const pushAnnouncement = async (head: string): Promise<void> => {
+    try {
+      const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
+      await enqueueOutboxMessage({
+        instanceId: instance.id,
+        userId: instance.userId,
+        kind: 'confirmation_resolved',
+        content: `${head}\n\n${resultText.slice(0, 4000)}`,
+      });
+    } catch (err) {
+      logger.warn({ err, confirmationId }, 'confirmation_outbox_enqueue_failed');
     }
-    await enqueueOutboxMessage({
-      instanceId: instance.id,
-      userId: instance.userId,
-      kind: 'confirmation_resolved',
-      content: `${head}\n\n${resultText.slice(0, 4000)}`,
-    });
-  } catch (err) {
-    logger.warn({ err, confirmationId }, 'confirmation_outbox_enqueue_failed');
+  };
+
+  if (errored) {
+    // Nothing to continue — the action failed. Announce the failure now.
+    await pushAnnouncement(cannedHead);
+  } else {
+    // Fire-and-forget so the approve response (which resolves the card) returns
+    // immediately. The agent finishes its plan in the background; we announce
+    // with its end-to-end summary, or the canned head if it had nothing to add.
+    void (async () => {
+      let summary: string | null = null;
+      try {
+        const { runApprovalContinuation } = await import('./continuation.js');
+        summary = await runApprovalContinuation({
+          instance: {
+            id: instance.id,
+            userId: instance.userId,
+            endpointUrl: instance.endpointUrl,
+            apiServerKey: instance.apiServerKey,
+            autonomyLevel: instance.autonomyLevel,
+          },
+          toolName: row.toolName,
+          resultText,
+        });
+      } catch (err) {
+        logger.warn({ err, confirmationId }, 'approval_continuation_threw');
+      }
+      await pushAnnouncement(summary ?? cannedHead);
+    })();
   }
 
   return {
