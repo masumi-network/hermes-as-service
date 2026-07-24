@@ -72,9 +72,9 @@ Patrick's machine.
 
 ## Tier 3 — Sokosumi-side asks (deliverable: prompts Patrick can send)
 
-- [ ] **3.1 Dev prompt: legal INPUT_REQUIRED→READY transition** (or a
+- [x] **3.1 Dev prompt: legal INPUT_REQUIRED→READY transition** (or a
       "resume" event) once input is provided — root cause of the jammed board.
-- [ ] **3.2 Dev prompt: token-cap replay context** on Sokosumi's side
+- [x] **3.2 Dev prompt: token-cap replay context** on Sokosumi's side
       (complements 2.1). Both prompts → `docs/sokosumi-dev-prompts.md`.
 
 ## Tier 4 — code health (audit's deferred items)
