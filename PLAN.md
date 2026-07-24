@@ -82,7 +82,7 @@ Patrick's machine.
 - [x] **4.1 Instance bearer-auth unification** (`src/routes/instance-auth.ts`;
       outbox, schedules, llm-proxy, mcp-proxy, sokosumi-mcp) — preserve exact
       per-variant response messages + log tags.
-- [ ] **4.2 Split `admin/routes.ts`** (~2,700 lines): extract trailing helpers
+- [x] **4.2 Split `admin/routes.ts`** (~2,700 lines): extract trailing helpers
       → `src/admin/helpers.ts`; images section → `src/admin/images-routes.ts`;
       tests section → `src/admin/tests-routes.ts`. Pure moves; registration
       order preserved (images/compare before images/:tag).
