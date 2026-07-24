@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { prisma } from '../db.js';
+import { authenticateInstanceBearer } from './instance-auth.js';
 import { logger } from '../logger.js';
-import { decryptSecret, timingSafeEqualString as timingSafeEqual } from '../crypto.js';
+
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
@@ -83,36 +84,21 @@ async function authenticate(
   instanceId: string,
   authHeader: string | undefined,
 ): Promise<AuthOk | AuthErr> {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return { ok: false, status: 401, message: 'missing bearer' };
-  }
-  const bearer = authHeader.slice(7).trim();
-  if (!bearer) return { ok: false, status: 401, message: 'empty bearer' };
-  const row = await prisma.hermesInstance.findUnique({
-    where: { id: instanceId },
-    select: { id: true, userId: true, llmProxyToken: true, sokosumiEnv: true, autonomyLevel: true },
+  const res = await authenticateInstanceBearer(instanceId, authHeader, {
+    decryptFailMessage: 'token decrypt failed',
   });
-  if (!row || !row.llmProxyToken) {
-    return { ok: false, status: 404, message: 'instance not found' };
-  }
-  let expected: string;
-  try {
-    expected = await decryptSecret(row.llmProxyToken);
-  } catch {
-    return { ok: false, status: 500, message: 'token decrypt failed' };
-  }
-  if (!timingSafeEqual(bearer, expected)) {
-    return { ok: false, status: 401, message: 'bad bearer' };
-  }
-  const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
-  const autonomyLevel =
-    normalizeAutonomy(row.autonomyLevel);
+  if (!res.ok) return res;
+  const env: SokosumiEnv | null = isValidSokosumiEnv(res.row.sokosumiEnv) ? res.row.sokosumiEnv : null;
   return {
     ok: true,
-    ctx: { instanceId: row.id, userId: row.userId, env, autonomyLevel },
+    ctx: {
+      instanceId: res.row.id,
+      userId: res.row.userId,
+      env,
+      autonomyLevel: normalizeAutonomy(res.row.autonomyLevel),
+    },
   };
 }
-
 
 // ---------- MCP tool catalog ----------
 // Each tool tagged with the minimum autonomy required:

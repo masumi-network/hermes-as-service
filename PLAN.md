@@ -79,7 +79,7 @@ Patrick's machine.
 
 ## Tier 4 — code health (audit's deferred items)
 
-- [ ] **4.1 Instance bearer-auth unification** (`src/routes/instance-auth.ts`;
+- [x] **4.1 Instance bearer-auth unification** (`src/routes/instance-auth.ts`;
       outbox, schedules, llm-proxy, mcp-proxy, sokosumi-mcp) — preserve exact
       per-variant response messages + log tags.
 - [ ] **4.2 Split `admin/routes.ts`** (~2,700 lines): extract trailing helpers

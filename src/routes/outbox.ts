@@ -2,7 +2,8 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
-import { decryptSecret } from '../crypto.js';
+import { authenticateInstanceBearer } from './instance-auth.js';
+
 import { logger } from '../logger.js';
 import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
@@ -261,26 +262,10 @@ interface AuthErr {
 }
 
 async function authenticateSprite(c: Context): Promise<AuthOk | AuthErr> {
-  const instanceId = c.req.param('instanceId') ?? '';
-  if (!instanceId) return { ok: false, status: 401, message: 'missing instanceId' };
-  const header = c.req.header('Authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return { ok: false, status: 401, message: 'missing bearer' };
-  const bearer = header.slice(7).trim();
-  if (!bearer) return { ok: false, status: 401, message: 'empty bearer' };
-  const row = await prisma.hermesInstance.findUnique({
-    where: { id: instanceId },
-    select: { id: true, userId: true, llmProxyToken: true },
+  return authenticateInstanceBearer(c.req.param('instanceId'), c.req.header('Authorization'), {
+    decryptFailMessage: 'decrypt failed',
+    decryptFailLogTag: 'outbox_auth_decrypt_failed',
   });
-  if (!row || !row.llmProxyToken) return { ok: false, status: 404, message: 'instance not found' };
-  let expected: string;
-  try {
-    expected = await decryptSecret(row.llmProxyToken);
-  } catch (err) {
-    logger.error({ err }, 'outbox_auth_decrypt_failed');
-    return { ok: false, status: 500, message: 'decrypt failed' };
-  }
-  if (bearer !== expected) return { ok: false, status: 401, message: 'bad bearer' };
-  return { ok: true, row: { id: row.id, userId: row.userId } };
 }
 
 export { sokosumi as outboxSokosumiRouter, sprite as outboxSpriteRouter };

@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { prisma } from '../db.js';
+import { authenticateInstanceBearer } from './instance-auth.js';
 import { logger } from '../logger.js';
 import { loadConfig } from '../config.js';
-import { decryptSecret, timingSafeEqualString as timingSafeEqual } from '../crypto.js';
+import { decryptSecret } from '../crypto.js';
 
 /**
  * Per-user MCP proxy.
@@ -35,28 +36,9 @@ async function authenticate(
   instanceId: string,
   authHeader: string | undefined,
 ): Promise<AuthOk | AuthErr> {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return { ok: false, status: 401, message: 'missing bearer' };
-  }
-  const bearer = authHeader.slice(7).trim();
-  if (!bearer) return { ok: false, status: 401, message: 'empty bearer' };
-  const row = await prisma.hermesInstance.findUnique({
-    where: { id: instanceId },
-    select: { id: true, userId: true, llmProxyToken: true },
+  return authenticateInstanceBearer(instanceId, authHeader, {
+    decryptFailMessage: 'token decrypt failed',
   });
-  if (!row || !row.llmProxyToken) {
-    return { ok: false, status: 404, message: 'instance not found' };
-  }
-  let expected: string;
-  try {
-    expected = await decryptSecret(row.llmProxyToken);
-  } catch {
-    return { ok: false, status: 500, message: 'token decrypt failed' };
-  }
-  if (!timingSafeEqual(bearer, expected)) {
-    return { ok: false, status: 401, message: 'bad bearer' };
-  }
-  return { ok: true, row: { id: row.id, userId: row.userId } };
 }
 
 
