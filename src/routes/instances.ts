@@ -258,7 +258,14 @@ async function notifyPersonaChanged(instanceId: string): Promise<void> {
   const prompt = directive
     ? `Internal — your reply is discarded. The user updated your persona settings. ${directive}\n\nReply only "ok".`
     : `Internal — your reply is discarded. The user cleared your custom persona settings. Remove the memory key user.persona and revert to your default name and default voice (balanced length, friendly-professional tone). Reply only "ok".`;
-  await fetch(`${row.endpointUrl}/v1/chat/completions`, {
+  await postNudge(row.endpointUrl, apiKey, prompt);
+}
+
+/** Single-turn internal nudge to the machine. Deliberately NO res.ok check —
+ *  these are best-effort memory updates and a non-2xx must keep passing
+ *  silently (callers fire-and-forget with their own catch). */
+async function postNudge(endpointUrl: string, apiKey: string, prompt: string): Promise<void> {
+  await fetch(`${endpointUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -276,16 +283,7 @@ async function notifyAutonomyChanged(instanceId: string, newLevel: string): Prom
   const { decryptSecret } = await import('../crypto.js');
   const apiKey = await decryptSecret(row.apiServerKey);
   const prompt = `Internal — your reply is discarded. Your autonomy level has changed to "${newLevel}". Update your memory with this fact. At low you may only read; at medium your write/spend tool calls are intercepted by the orchestrator and require user approval before executing; at high you may act autonomously while respecting the cost rules in your SOUL. Reply only "ok".`;
-  await fetch(`${row.endpointUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'hermes-agent',
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(60_000),
-  });
+  await postNudge(row.endpointUrl, apiKey, prompt);
 }
 
 router.get('/v1/instances/:userId', async (c) => {

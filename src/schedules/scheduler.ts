@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db.js';
+import { parseChatCompletion } from '../llm/hermes-chat.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { safeNextRun } from './cron.js';
@@ -171,31 +172,9 @@ async function runOne(task: Task): Promise<void> {
     return;
   }
 
-  let content = '';
-  let model: string | null = null;
-  let promptTokens: number | null = null;
-  let completionTokens: number | null = null;
-  let totalTokens: number | null = null;
-  let finishReason: string | null = null;
-  let errorMessage: string | null = null;
-  try {
-    const json = JSON.parse(respText) as {
-      choices?: { message?: { content?: string }; finish_reason?: string }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-      model?: string;
-      error?: { message?: string };
-    };
-    if (json.error?.message) errorMessage = json.error.message;
-    content = json.choices?.[0]?.message?.content ?? '';
-    finishReason = json.choices?.[0]?.finish_reason ?? null;
-    model = json.model ?? null;
-    promptTokens = json.usage?.prompt_tokens ?? null;
-    completionTokens = json.usage?.completion_tokens ?? null;
-    totalTokens = json.usage?.total_tokens ?? null;
-  } catch {
-    content = respText.slice(0, 4000);
-    errorMessage = 'unparseable_response';
-  }
+  const parsed = parseChatCompletion(respText);
+  const { content, model, promptTokens, completionTokens, totalTokens, finishReason } = parsed;
+  let errorMessage = parsed.errorMessage;
   if (response && response.status >= 400 && !errorMessage) {
     errorMessage = `upstream_${response.status}`;
   }

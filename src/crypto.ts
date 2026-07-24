@@ -40,3 +40,13 @@ export async function decryptSecret(blobB64: string): Promise<string> {
 export async function generateApiServerKey(): Promise<string> {
   return randomBytes(32).toString('base64url');
 }
+
+/** Constant-time string comparison for bearer checks. Early-false on length
+ *  mismatch, XOR over char codes otherwise — the exact semantics every route
+ *  hand-rolled before this was shared. */
+export function timingSafeEqualString(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}

@@ -1,6 +1,7 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
+import { normalizeAutonomy } from '../config.js';
 
 /**
  * Recurring agent prompts installed as NATIVE cronjobs on each user's
@@ -165,7 +166,7 @@ export async function syncNativePromptCrons(instanceId: string): Promise<boolean
 
   const log = logger.child({ instanceId, userId: row.userId, fn: 'sync_native_prompts' });
   const autonomy: Autonomy =
-    row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+    normalizeAutonomy(row.autonomyLevel);
   const tz = row.timezone ?? 'UTC';
 
   // The mirror rows carry the user's intent: a native cron whose mirror the

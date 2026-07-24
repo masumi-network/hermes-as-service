@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db.js';
+import { parseChatCompletion } from '../llm/hermes-chat.js';
 import { logger } from '../logger.js';
 
 /**
@@ -78,24 +79,14 @@ export async function runCronAgentTurn(opts: {
     if (!res.ok) {
       errorMessage = `upstream_${res.status}: ${text.slice(0, 200)}`;
     } else {
-      try {
-        const json = JSON.parse(text) as {
-          choices?: { message?: { content?: string }; finish_reason?: string }[];
-          usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-          model?: string;
-          error?: { message?: string };
-        };
-        if (json.error?.message) errorMessage = json.error.message;
-        reply = json.choices?.[0]?.message?.content ?? '';
-        finishReason = json.choices?.[0]?.finish_reason ?? null;
-        model = json.model ?? null;
-        promptTokens = json.usage?.prompt_tokens ?? null;
-        completionTokens = json.usage?.completion_tokens ?? null;
-        totalTokens = json.usage?.total_tokens ?? null;
-      } catch {
-        reply = text.slice(0, 4000);
-        errorMessage = 'unparseable_response';
-      }
+      const parsed = parseChatCompletion(text);
+      reply = parsed.content;
+      errorMessage = parsed.errorMessage;
+      finishReason = parsed.finishReason;
+      model = parsed.model;
+      promptTokens = parsed.promptTokens;
+      completionTokens = parsed.completionTokens;
+      totalTokens = parsed.totalTokens;
     }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);

@@ -144,6 +144,15 @@ export function loadConfig(): Config {
   return cached;
 }
 
+export type Autonomy = 'low' | 'medium' | 'high';
+
+/** Normalize a stored autonomyLevel string. ONLY exact 'low'/'high' pass
+ *  through; everything else (legacy junk, '', casing) maps to 'medium' —
+ *  the fallback every call site hand-rolled before this was shared. */
+export function normalizeAutonomy(s: string): Autonomy {
+  return s === 'low' || s === 'high' ? s : 'medium';
+}
+
 export type SokosumiEnv = 'development' | 'preprod' | 'mainnet';
 
 export function isValidSokosumiEnv(v: unknown): v is SokosumiEnv {

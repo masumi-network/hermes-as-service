@@ -4,7 +4,7 @@ import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
-import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { buildPersonaDirective, type Personality } from './profile.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
@@ -297,7 +297,7 @@ export async function runOnboarding(
       integrationProviders.has('google_calendar') ||
       integrationProviders.has('outlook_calendar');
     const autonomy =
-      row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+      normalizeAutonomy(row.autonomyLevel);
     await syncSystemSchedules({
       instanceId: row.id,
       userId: row.userId,

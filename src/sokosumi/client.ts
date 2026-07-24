@@ -232,10 +232,7 @@ export class SokosumiClient {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 100));
     if (opts.scope) qs.set('scope', opts.scope);
-    const body = await this.get<{ items?: unknown[]; tasks?: unknown[]; data?: unknown[] }>(
-      `/tasks?${qs}`,
-    );
-    return body.items ?? body.tasks ?? body.data ?? [];
+    return this.listArray(`/tasks?${qs}`, 'tasks');
   }
 
   // ---------- jobs ----------
@@ -251,10 +248,7 @@ export class SokosumiClient {
     if (opts.agentId) qs.set('agentId', opts.agentId);
     qs.set('limit', String(opts.limit ?? 50));
     if (opts.scope) qs.set('scope', opts.scope);
-    const body = await this.get<{ items?: unknown[]; jobs?: unknown[]; data?: unknown[] }>(
-      `/jobs?${qs}`,
-    );
-    return body.items ?? body.jobs ?? body.data ?? [];
+    return this.listArray(`/jobs?${qs}`, 'jobs');
   }
 
   /** ALL tasks in this workspace, paginated (bounded). Use for completeness
@@ -283,41 +277,22 @@ export class SokosumiClient {
   }
 
   async getJob(id: string): Promise<unknown> {
-    const body = await this.get<{ data?: unknown } | unknown>(
-      `/jobs/${encodeURIComponent(id)}`,
-    );
     // Sokosumi wraps single-resource responses in {data: ...}.
-    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
-      return (body as { data: unknown }).data;
-    }
-    return body;
+    return unwrapData(await this.get<unknown>(`/jobs/${encodeURIComponent(id)}`));
   }
 
   async getTask(id: string): Promise<unknown> {
-    const body = await this.get<{ data?: unknown } | unknown>(
-      `/tasks/${encodeURIComponent(id)}`,
-    );
-    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
-      return (body as { data: unknown }).data;
-    }
-    return body;
+    return unwrapData(await this.get<unknown>(`/tasks/${encodeURIComponent(id)}`));
   }
 
   async getJobFiles(id: string): Promise<unknown[]> {
-    const body = await this.get<{ items?: unknown[]; files?: unknown[]; data?: unknown[] }>(
-      `/jobs/${encodeURIComponent(id)}/files`,
-    );
-    return body.items ?? body.files ?? body.data ?? [];
+    return this.listArray(`/jobs/${encodeURIComponent(id)}/files`, 'files');
   }
 
   async getAgentInputSchema(agentId: string): Promise<unknown> {
-    const body = await this.get<{ data?: unknown } | unknown>(
-      `/agents/${encodeURIComponent(agentId)}/input-schema`,
+    return unwrapData(
+      await this.get<unknown>(`/agents/${encodeURIComponent(agentId)}/input-schema`),
     );
-    if (body && typeof body === 'object' && 'data' in (body as Record<string, unknown>)) {
-      return (body as { data: unknown }).data;
-    }
-    return body;
   }
 
   // ---------- writes ----------
@@ -446,10 +421,7 @@ export class SokosumiClient {
   async listConversations(opts: { limit?: number } = {}): Promise<unknown[]> {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set('limit', String(opts.limit));
-    const body = await this.get<{ items?: unknown[]; conversations?: unknown[]; data?: unknown[] }>(
-      `/conversations?${qs}`,
-    );
-    return body.items ?? body.conversations ?? body.data ?? [];
+    return this.listArray(`/conversations?${qs}`, 'conversations');
   }
 
   // ---------- credits + meta ----------
@@ -503,10 +475,7 @@ export class SokosumiClient {
   async listAgents(opts: { limit?: number } = {}): Promise<unknown[]> {
     const qs = new URLSearchParams();
     qs.set('limit', String(opts.limit ?? 50));
-    const body = await this.get<{ items?: unknown[]; agents?: unknown[]; data?: unknown[] }>(
-      `/agents?${qs}`,
-    );
-    return body.items ?? body.agents ?? body.data ?? [];
+    return this.listArray(`/agents?${qs}`, 'agents');
   }
 
   /**
@@ -521,10 +490,7 @@ export class SokosumiClient {
     const qs = new URLSearchParams();
     if (opts.scope) qs.set('scope', opts.scope);
     if (opts.limit) qs.set('limit', String(opts.limit));
-    const body = await this.get<{ items?: unknown[]; coworkers?: unknown[]; data?: unknown[] }>(
-      `/coworkers?${qs}`,
-    );
-    return body.items ?? body.coworkers ?? body.data ?? [];
+    return this.listArray(`/coworkers?${qs}`, 'coworkers');
   }
 
   // ---------- organizations ----------
@@ -613,6 +579,17 @@ export class SokosumiClient {
       throw new Error(`sokosumi GET ${path} → ${res.status}: ${body.slice(0, 200)}`);
     }
     return (await res.json()) as T;
+  }
+
+  /** Single-page list unwrap shared by the plain list methods. Precedence is
+   *  items → endpoint key → data (deliberately different from getListPage's
+   *  data-first order — these methods pre-date it and callers depend on it). */
+  private async listArray(
+    path: string,
+    key: 'tasks' | 'jobs' | 'files' | 'conversations' | 'agents' | 'coworkers',
+  ): Promise<unknown[]> {
+    const body = await this.get<Record<string, unknown[] | undefined>>(path);
+    return body['items'] ?? body[key] ?? body['data'] ?? [];
   }
 
   /** One page of a cursor-paginated Sokosumi list. Reads the items array

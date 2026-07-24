@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { callHermesChat } from '../llm/hermes-chat.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
@@ -224,24 +225,3 @@ function formatSnapshotForMemory(snapshot: {
   return lines.join('\n');
 }
 
-async function callHermesChat(
-  endpointUrl: string,
-  apiKey: string,
-  userMessage: string,
-  timeoutMs: number,
-): Promise<void> {
-  const res = await fetch(`${endpointUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'hermes-agent',
-      messages: [{ role: 'user', content: userMessage }],
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`callHermesChat ${res.status}: ${body.slice(0, 200)}`);
-  }
-}

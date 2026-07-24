@@ -1,10 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 import { logger } from '../logger.js';
 
-export interface CronInfo {
-  nextRunAt: Date;
-}
-
 export function isValidCron(expr: string, timezone: string = 'UTC'): boolean {
   try {
     CronExpressionParser.parse(expr, { tz: timezone });

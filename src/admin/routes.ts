@@ -4,10 +4,10 @@ import type { Prisma } from '@prisma/client';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { prisma } from '../db.js';
-import { MCP_TOOLS_VERSION } from '../routes/sokosumi-mcp.js';
+import { MCP_TOOLS_VERSION, callTool } from '../routes/sokosumi-mcp.js';
 import { esc, layout, relTime, statCard, statusPill } from './html.js';
 import { logger } from '../logger.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, normalizeAutonomy, isValidSokosumiEnv } from '../config.js';
 import { userMonthlySpend } from '../llm/spend.js';
 import { describe as describeCron } from '../schedules/cron.js';
 import { runDueOnce } from '../schedules/scheduler.js';
@@ -979,7 +979,6 @@ router.post('/admin/instances/:userId/destroy', async (c) => {
  */
 const hardReset = async (c: Context) => {
   const userId = c.req.param('userId');
-  const { prisma } = await import('../db.js');
   const { FlyClient } = await import('../fly/client.js');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.json({ ok: true, userId, note: 'no row to delete' });
@@ -1075,9 +1074,7 @@ router.post('/admin/instances/:userId/test/mcp-call', async (c) => {
   const args = body.args ?? {};
   if (!toolName) return c.json({ error: 'toolName required' }, 400);
 
-  const { callTool } = await import('../routes/sokosumi-mcp.js');
-  const { isValidSokosumiEnv } = await import('../config.js');
-  const autonomy = row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+  const autonomy = normalizeAutonomy(row.autonomyLevel);
   const ctx = {
     instanceId: row.id,
     userId: row.userId,
@@ -1116,7 +1113,6 @@ router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
 
   const { decryptSecret } = await import('../crypto.js');
   const { isComposioUpstream, handleToolsListResponse } = await import('../routes/mcp-proxy.js');
-  const { loadConfig } = await import('../config.js');
   const mcpUrl = await decryptSecret(integ.mcpUrl);
   const cfg = loadConfig();
   const upstreamHeaders: Record<string, string> = {
@@ -1234,7 +1230,7 @@ router.post('/admin/maintenance/resync-system-schedules', async (c) => {
         providers.has('google_calendar') ||
         providers.has('outlook_calendar');
       const autonomy =
-        row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+        normalizeAutonomy(row.autonomyLevel);
       await syncSystemSchedules({
         instanceId: row.id,
         userId: row.userId,

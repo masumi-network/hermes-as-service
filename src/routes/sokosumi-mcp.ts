@@ -3,10 +3,10 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { decryptSecret } from '../crypto.js';
+import { decryptSecret, timingSafeEqualString as timingSafeEqual } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
-import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 
 /**
  * Per-instance Sokosumi MCP server.
@@ -106,19 +106,13 @@ async function authenticate(
   }
   const env: SokosumiEnv | null = isValidSokosumiEnv(row.sokosumiEnv) ? row.sokosumiEnv : null;
   const autonomyLevel =
-    row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+    normalizeAutonomy(row.autonomyLevel);
   return {
     ok: true,
     ctx: { instanceId: row.id, userId: row.userId, env, autonomyLevel },
   };
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
 
 // ---------- MCP tool catalog ----------
 // Each tool tagged with the minimum autonomy required:

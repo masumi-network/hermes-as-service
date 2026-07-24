@@ -2,7 +2,12 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
-import { approveConfirmation, rejectConfirmation, type ApprovalOverrides } from '../confirmations/store.js';
+import {
+  approveConfirmation,
+  listPendingConfirmations,
+  rejectConfirmation,
+  type ApprovalOverrides,
+} from '../confirmations/store.js';
 
 const router = new Hono();
 
@@ -136,7 +141,6 @@ router.get('/v1/instances/:userId/confirmations', async (c) => {
   if (!instance || instance.destroyedAt) {
     return c.json({ error: { message: 'instance not found' } }, 404);
   }
-  const { listPendingConfirmations } = await import('../confirmations/store.js');
   const pending = await listPendingConfirmations(userId);
 
   // Resolve the proposed-workspace NAME so the UI can show + pre-select it on

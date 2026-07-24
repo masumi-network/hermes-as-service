@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, resolveSokosumiTarget } from '../sokosumi/client.js';
-import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
 
@@ -69,7 +69,7 @@ export async function assistTaskboardForInstance(
     return { handled: 0, reason: `status=${row.status}` };
   }
   const autonomy =
-    row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+    normalizeAutonomy(row.autonomyLevel);
   if (autonomy === 'low') return { handled: 0, reason: 'low_autonomy' };
   if (!(await isSystemSweepEnabled(row.id, 'taskboard-assistant'))) {
     return { handled: 0, reason: 'sweep_disabled' };

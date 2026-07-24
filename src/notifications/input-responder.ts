@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
-import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
+import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
 
@@ -54,7 +54,7 @@ export async function respondToInputRequestsForInstance(
   // Auto-answer is a medium/high feature. At low autonomy the write tools are
   // stripped anyway, and the urgent-interrupt sweep already notifies the user.
   const autonomy =
-    row.autonomyLevel === 'low' || row.autonomyLevel === 'high' ? row.autonomyLevel : 'medium';
+    normalizeAutonomy(row.autonomyLevel);
   if (autonomy === 'low') return { prompted: 0, reason: 'low_autonomy' };
 
   if (!(await isSystemSweepEnabled(row.id, 'input-responder'))) {
