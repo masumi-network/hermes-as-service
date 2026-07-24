@@ -923,11 +923,16 @@ export async function executeTool(
     case 'sokosumi_create_task': {
       const name = String(args['name'] ?? '');
       const coworkerId = String(args['coworker_id'] ?? '');
-      // Three-way: string = a specific org, null = personal scope (no org),
-      // undefined = neither specified, fall back to legacy iterate-orgs.
+      // The tool tells the agent to OMIT organization_id for the personal
+      // workspace, so both `null` (explicit "Personal" pick) and `undefined`
+      // (omitted) mean personal. Only a non-empty STRING is a specific org.
+      // (Previously `undefined` fell into a legacy iterate-orgs branch that,
+      // with org enumeration now gone, failed to find even a valid personal
+      // coworker — "not found in any of the user's orgs" — so a plain
+      // "create a task for Hannah" errored.)
       const rawOrgArg = args['organization_id'];
-      const isPersonalScope = rawOrgArg === null;
-      const organizationIdArg = typeof rawOrgArg === 'string' ? rawOrgArg : undefined;
+      const organizationIdArg = typeof rawOrgArg === 'string' && rawOrgArg ? rawOrgArg : undefined;
+      const isPersonalScope = !organizationIdArg;
       const description = typeof args['description'] === 'string' ? (args['description'] as string) : undefined;
       // Default to READY so the task is visible + startable. DRAFT tasks are
       // invisible to coworkers (Hermes included) after creation, so only use

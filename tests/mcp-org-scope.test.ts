@@ -58,6 +58,18 @@ describe('org-scoped create paths trust an explicit organization_id', () => {
     expect(calls.some((c) => c.path.includes('/organizations'))).toBe(false);
   });
 
+  it('create_task with organization_id OMITTED files in personal (not the broken iterate branch)', async () => {
+    // The tool tells the agent to omit org for personal; "create a task for
+    // Hannah" (no org) must route to the personal path, not the legacy
+    // iterate-orgs branch that errored "not found in any of the user's orgs".
+    const out = await run('sokosumi_create_task', { name: 'T', coworker_id: 'cow_1' });
+    const coworkerCall = calls.find((c) => c.path === '/coworkers');
+    const taskCall = calls.find((c) => c.path === '/tasks' && c.method === 'POST');
+    expect(coworkerCall?.org).toBeUndefined(); // personal — no org header
+    expect(taskCall?.org).toBeUndefined();
+    expect(JSON.parse(out).scope).toBe('personal');
+  });
+
   it('create_task scopes both the coworker check and the write to the given org', async () => {
     const out = await run('sokosumi_create_task', {
       name: 'T',
