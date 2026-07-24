@@ -97,35 +97,48 @@ Reply with just "ok".`;
  * null, meaning never synced) and syncs them. Called from the hourly
  * cron. Limits per-tick concurrency so we don't hammer Sokosumi.
  */
-export async function runSokosumiDailySweep(): Promise<{ scanned: number; synced: number }> {
-  // No global "is configured" gate anymore — each env is independent.
-  // syncSokosumiWorkspaceForInstance per-instance skips if its env's key
-  // isn't set, so a fully unconfigured orchestrator just no-ops.
-  const cutoff = new Date(Date.now() - 23 * 60 * 60 * 1000);
-  const due = await prisma.hermesInstance.findMany({
-    where: {
-      destroyedAt: null,
-      onboardedAt: { not: null },
-      status: { in: ['ready', 'running', 'suspended'] },
-      OR: [{ lastSokosumiSyncAt: null }, { lastSokosumiSyncAt: { lt: cutoff } }],
-    },
-    select: { id: true, userId: true },
-    take: 100, // cap per tick
-  });
+/** Re-entrancy guard — a slow sweep (many instances × snapshot + agent turn)
+ *  must not overlap the next hourly tick, or the same instance gets duplicate
+ *  snapshot fetches and memory-write turns. Guards the SWEEP only — the inner
+ *  syncSokosumiWorkspaceForInstance is also called inline from onboarding and
+ *  must stay callable concurrently. */
+let sweepInFlight = false;
 
-  let synced = 0;
-  for (const instance of due) {
-    try {
-      const ok = await syncSokosumiWorkspaceForInstance(instance.id);
-      if (ok) synced++;
-    } catch (err) {
-      logger.error({ err, instanceId: instance.id }, 'sokosumi_daily_sync_failed');
+export async function runSokosumiDailySweep(): Promise<{ scanned: number; synced: number }> {
+  if (sweepInFlight) return { scanned: 0, synced: 0 };
+  sweepInFlight = true;
+  try {
+    // No global "is configured" gate anymore — each env is independent.
+    // syncSokosumiWorkspaceForInstance per-instance skips if its env's key
+    // isn't set, so a fully unconfigured orchestrator just no-ops.
+    const cutoff = new Date(Date.now() - 23 * 60 * 60 * 1000);
+    const due = await prisma.hermesInstance.findMany({
+      where: {
+        destroyedAt: null,
+        onboardedAt: { not: null },
+        status: { in: ['ready', 'running', 'suspended'] },
+        OR: [{ lastSokosumiSyncAt: null }, { lastSokosumiSyncAt: { lt: cutoff } }],
+      },
+      select: { id: true, userId: true },
+      take: 100, // cap per tick
+    });
+
+    let synced = 0;
+    for (const instance of due) {
+      try {
+        const ok = await syncSokosumiWorkspaceForInstance(instance.id);
+        if (ok) synced++;
+      } catch (err) {
+        logger.error({ err, instanceId: instance.id }, 'sokosumi_daily_sync_failed');
+      }
     }
+    if (due.length > 0) {
+      logger.info({ scanned: due.length, synced }, 'sokosumi_daily_sweep_done');
+    }
+    return { scanned: due.length, synced };
+  } finally {
+    sweepInFlight = false;
   }
-  if (due.length > 0) {
-    logger.info({ scanned: due.length, synced }, 'sokosumi_daily_sweep_done');
-  }
-  return { scanned: due.length, synced };
 }
 
 // ---------- helpers ----------

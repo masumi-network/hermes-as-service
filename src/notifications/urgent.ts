@@ -87,6 +87,7 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
     jobId: string;
   }> = [];
+  let anyOrgFailed = false;
 
   for (const org of orgs) {
     const orgClient = client.withOrganization(org.id);
@@ -129,11 +130,17 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
         });
       }
     } catch (err) {
+      anyOrgFailed = true;
       log.warn({ err, orgId: org.id }, 'urgent_check_list_jobs_failed');
     }
   }
 
   if (candidates.length === 0) {
+    // A failed listing means the empty window may be a lie — don't advance
+    // the watermarks over events we never saw; retry the same window next
+    // tick. (Non-empty partial views still proceed below: their per-status
+    // watermarks only advance to events actually considered.)
+    if (anyOrgFailed) return { fired: false, reason: 'list_failed_retry' };
     // Advance all three watermarks so we don't keep re-scanning the
     // same empty window.
     const now = new Date();
@@ -165,6 +172,10 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     log.warn({ err }, 'urgent_gating_call_failed');
     return null;
   });
+  // A FAILED gating call (null) must not advance the watermarks — the events
+  // were never judged and would be dropped forever. Retry the batch next tick.
+  // Parsed YES/NO verdicts DO advance below (a NO batch must not re-gate).
+  if (!decision) return { fired: false, reason: 'gating_failed_retry' };
 
   // Advance per-status watermarks to the newest event we considered.
   const newest = (status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED'): Date | undefined => {
@@ -181,7 +192,7 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     },
   });
 
-  if (!decision || decision.verdict === 'NO') {
+  if (decision.verdict === 'NO') {
     return { fired: false, reason: 'gated_NO' };
   }
 
@@ -206,29 +217,39 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   return { fired: true, reason: decision.reason };
 }
 
+/** Re-entrancy guard — a slow sweep must not overlap the next tick (duplicate
+ *  interrupts to the same user). Same pattern as the sibling sweeps. */
+let sweepInFlight = false;
+
 export async function runUrgentInterruptSweep(): Promise<{ scanned: number; fired: number }> {
-  const due = await prisma.hermesInstance.findMany({
-    where: {
-      destroyedAt: null,
-      onboardedAt: { not: null },
-      status: { in: ['ready', 'running', 'suspended'] },
-    },
-    select: { id: true },
-    take: 100,
-  });
-  let fired = 0;
-  for (const instance of due) {
-    try {
-      const res = await checkUrgentInterruptsForInstance(instance.id);
-      if (res.fired) fired++;
-    } catch (err) {
-      logger.error({ err, instanceId: instance.id }, 'urgent_sweep_item_failed');
+  if (sweepInFlight) return { scanned: 0, fired: 0 };
+  sweepInFlight = true;
+  try {
+    const due = await prisma.hermesInstance.findMany({
+      where: {
+        destroyedAt: null,
+        onboardedAt: { not: null },
+        status: { in: ['ready', 'running', 'suspended'] },
+      },
+      select: { id: true },
+      take: 100,
+    });
+    let fired = 0;
+    for (const instance of due) {
+      try {
+        const res = await checkUrgentInterruptsForInstance(instance.id);
+        if (res.fired) fired++;
+      } catch (err) {
+        logger.error({ err, instanceId: instance.id }, 'urgent_sweep_item_failed');
+      }
     }
+    if (due.length > 0) {
+      logger.info({ scanned: due.length, fired }, 'urgent_sweep_done');
+    }
+    return { scanned: due.length, fired };
+  } finally {
+    sweepInFlight = false;
   }
-  if (due.length > 0) {
-    logger.info({ scanned: due.length, fired }, 'urgent_sweep_done');
-  }
-  return { scanned: due.length, fired };
 }
 
 // ---------- gating prompt + parser ----------

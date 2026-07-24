@@ -20,6 +20,9 @@ async function refresh(): Promise<void> {
   try {
     const res = await fetch('https://openrouter.ai/api/v1/models', {
       headers: { Accept: 'application/json' },
+      // Bounded: a hung fetch here would stall ensurePricingLoaded on the
+      // llm-proxy hot path. Timeout is caught below; stale prices keep serving.
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       logger.warn({ status: res.status }, 'openrouter_pricing_fetch_failed');

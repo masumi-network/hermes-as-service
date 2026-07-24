@@ -1133,6 +1133,7 @@ router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
       method: 'POST',
       headers: upstreamHeaders,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      signal: AbortSignal.timeout(20_000),
     });
   } catch (err) {
     return c.json({ error: 'upstream fetch failed', detail: String(err) }, 502);

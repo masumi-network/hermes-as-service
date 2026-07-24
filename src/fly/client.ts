@@ -129,6 +129,8 @@ export class FlyClient {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ query, variables }),
+        // Match raw()'s 60s bound — an unbounded hang here wedges provisioning.
+        signal: AbortSignal.timeout(60_000),
       });
       if (!res.ok) {
         throw upstream(undefined, `Fly GraphQL ${res.status}`, {
