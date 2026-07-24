@@ -110,6 +110,19 @@ const schema = z.object({
   LLM_UPSTREAM_BASE_URL: z.string().url().default('https://openrouter.ai/api/v1'),
   // API key for LLM_UPSTREAM_BASE_URL. Empty = fall back to OPENROUTER_API_KEY.
   LLM_UPSTREAM_API_KEY: z.string().optional().default(''),
+  // Pin OpenRouter provider routing for TEXT requests to specific provider
+  // slug(s), comma-separated (e.g. "venice"). Empty = throughput routing.
+  // Vision requests ignore this (the vision model may not be hosted there).
+  LLM_PROVIDER_ORDER: z.string().optional().default(''),
+  // When "false", the LLM_PROVIDER_ORDER providers are used EXCLUSIVELY (no
+  // fallback to any other provider). Only the literal "false" disables
+  // fallbacks; anything else (incl. unset) keeps them on. Pairs with
+  // LLM_PROVIDER_ORDER — e.g. ORDER=venice + this=false → Venice only.
+  LLM_PROVIDER_ALLOW_FALLBACKS: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v.trim().toLowerCase() !== 'false'),
 });
 
 export type Config = z.infer<typeof schema>;

@@ -143,23 +143,35 @@ async function forwardChatCompletions(c: Context): Promise<Response> {
     parsed['stream_options'] = so;
   }
   const isOpenRouter = cfg.LLM_UPSTREAM_BASE_URL.includes('openrouter.ai');
-  // Latency: let OpenRouter pick the fastest provider for this model unless
-  // the caller already pinned routing. Additive — doesn't change the model.
-  // OpenRouter-only field; other OpenAI-compatible upstreams reject it.
-  if (isOpenRouter && parsed['provider'] === undefined) {
-    parsed['provider'] = { sort: 'throughput' };
-  }
-  // If the request contains image_url parts, swap the model to a
-  // vision-capable one. MiMo (our default text model) returns
-  // "No endpoints found that support image input" otherwise.
-  if (hasImageContent(parsed)) {
+  // Model selection FIRST — provider routing depends on it. Vision requests
+  // need a vision-capable model; MiMo (a text model) returns "No endpoints
+  // found that support image input" otherwise. Non-vision requests honor the
+  // TEXT_MODEL_OVERRIDE A/B (forces a specific text model for the whole agent
+  // loop, tool decisions included). .trim() so a blank/whitespace value is
+  // "off", not an invalid model id that would 400 every call.
+  const isVision = hasImageContent(parsed);
+  if (isVision) {
     parsed['model'] = cfg.VISION_MODEL;
   } else if (cfg.TEXT_MODEL_OVERRIDE.trim()) {
-    // A/B: force a specific text model for the whole agent loop (tool
-    // decisions included). Set via the TEXT_MODEL_OVERRIDE env var.
-    // .trim() so a blank/whitespace value is treated as "off", not as an
-    // invalid model id that would 400 every call.
     parsed['model'] = cfg.TEXT_MODEL_OVERRIDE.trim();
+  }
+  // Provider routing (OpenRouter-only field; other OpenAI-compatible upstreams
+  // reject it) — only when the caller hasn't already pinned. LLM_PROVIDER_ORDER
+  // pins TEXT requests to specific provider slug(s) (e.g. "venice"); with
+  // LLM_PROVIDER_ALLOW_FALLBACKS=false that provider is used exclusively.
+  // Vision requests must NOT inherit the pin (the vision model may not be
+  // hosted there), so they always route by throughput. Empty ORDER = the
+  // prior behaviour: let OpenRouter pick the fastest provider.
+  if (isOpenRouter && parsed['provider'] === undefined) {
+    const providerOrder = cfg.LLM_PROVIDER_ORDER.trim();
+    if (!isVision && providerOrder) {
+      parsed['provider'] = {
+        order: providerOrder.split(',').map((s) => s.trim()).filter(Boolean),
+        allow_fallbacks: cfg.LLM_PROVIDER_ALLOW_FALLBACKS,
+      };
+    } else {
+      parsed['provider'] = { sort: 'throughput' };
+    }
   }
   // If we couldn't parse the body, forward it verbatim rather than sending a
   // synthesized object with no model/messages (which OpenRouter would reject
