@@ -94,7 +94,7 @@ Patrick's machine.
       row/toggle/job-listing between the input pass and followup pass;
       watermark writes clamped to the snapshot capture time (the subtlety
       that deferred this).
-- [ ] **4.5 Admin Group D pagination**: `/admin/events` (before-cursor),
+- [x] **4.5 Admin Group D pagination**: `/admin/events` (before-cursor),
       `/admin/images/:tag` (true count in header), `/admin/chats`
       (before-cursor link), confirmations "showing X of N", instance-detail
       outbox "latest 50 of N".

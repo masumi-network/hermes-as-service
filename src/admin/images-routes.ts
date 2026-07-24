@@ -172,6 +172,9 @@ router.get('/admin/images/:tag', async (c) => {
   const liveTag = currentImageTag(cfg.FLY_MACHINE_IMAGE);
   const isLive = tag === liveTag;
 
+  const instancesTotal = await prisma.hermesInstance.count({
+    where: { AND: [{ destroyedAt: null }, imageTagWhere(tag)] },
+  });
   const instances = await prisma.hermesInstance.findMany({
     where: { AND: [{ destroyedAt: null }, imageTagWhere(tag)] },
     orderBy: { lastActivityAt: 'desc' },
@@ -250,7 +253,7 @@ router.get('/admin/images/:tag', async (c) => {
 
   const instancesCard = `<div class="card flex-1" style="padding:0;overflow:hidden">
     <table>
-      <thead><tr><th>Instance (${esc(instances.length)})</th><th>Status</th><th>Env</th><th>Rolled</th><th>Activity</th></tr></thead>
+      <thead><tr><th>Instance (${instancesTotal > instances.length ? `showing ${esc(instances.length)} of ${esc(instancesTotal)}` : esc(instancesTotal)})</th><th>Status</th><th>Env</th><th>Rolled</th><th>Activity</th></tr></thead>
       <tbody>
         ${instances.length === 0 ? '<tr><td colspan="5" class="empty">No active instances on this image.</td></tr>' : instances.map((r) => `
           <tr>

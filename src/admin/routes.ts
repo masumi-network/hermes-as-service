@@ -695,11 +695,14 @@ router.get('/admin/instances/:userId', async (c) => {
       _count: { _all: true },
     }),
   ]);
-  const outboxPending = await prisma.outboxMessage.findMany({
-    where: { instanceId: row.id },
-    orderBy: { createdAt: 'asc' },
-    take: 50,
-  });
+  const [outboxPending, outboxTotal] = await Promise.all([
+    prisma.outboxMessage.findMany({
+      where: { instanceId: row.id },
+      orderBy: { createdAt: 'asc' },
+      take: 50,
+    }),
+    prisma.outboxMessage.count({ where: { instanceId: row.id } }),
+  ]);
   // This user's cron-driven activity: sweep agent turns, memory refreshes,
   // and native cronjob deliveries (durable outbox_pushed previews).
   const cronActivity = (
@@ -861,7 +864,7 @@ router.get('/admin/instances/:userId', async (c) => {
       </table>
     </div>`}
 
-    <h2>Outbox <span style="color:var(--muted);font-weight:400;font-size:13px">(unacked messages waiting for Sokosumi to pull)</span></h2>
+    <h2>Outbox <span style="color:var(--muted);font-weight:400;font-size:13px">(unacked messages waiting for Sokosumi to pull${outboxTotal > outboxPending.length ? ` — showing oldest ${outboxPending.length} of ${outboxTotal}` : ''})</span></h2>
     <div class="card" style="padding:0;overflow:hidden">
       ${outboxPending.length === 0 ? '<div class="empty">Outbox empty.</div>' : `
         <table>
@@ -1306,19 +1309,34 @@ router.post('/admin/instances/:userId/outbox/:messageId/delete', async (c) => {
 router.get('/admin/chats', async (c) => {
   const userFilter = c.req.query('user') ?? '';
   const kindFilter = c.req.query('kind') ?? '';
+  const before = c.req.query('before') ?? '';
   const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 80), 10), 500);
 
-  const where: { userId?: string; kind?: string } = {};
+  const where: { userId?: string; kind?: string; createdAt?: { lt: Date } } = {};
   if (userFilter) where.userId = userFilter;
   if (kindFilter && (kindFilter === 'chat' || kindFilter === 'scheduled' || kindFilter === 'cron')) {
     where.kind = kindFilter;
   }
+  if (before) {
+    const d = new Date(before);
+    if (!Number.isNaN(d.getTime())) where.createdAt = { lt: d };
+  }
 
-  const msgs = await prisma.chatMessage.findMany({
+  const msgsPlus = await prisma.chatMessage.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    take: limit * 2, // user + assistant pair per requestId
+    take: limit * 2 + 1, // user + assistant pair per requestId; +1 = hasOlder probe
   });
+  const hasOlder = msgsPlus.length > limit * 2;
+  const msgs = hasOlder ? msgsPlus.slice(0, limit * 2) : msgsPlus;
+  const olderHref = hasOlder
+    ? `/admin/chats?${new URLSearchParams({
+        ...(userFilter ? { user: userFilter } : {}),
+        ...(kindFilter ? { kind: kindFilter } : {}),
+        limit: String(limit),
+        before: msgs[msgs.length - 1]!.createdAt.toISOString(),
+      }).toString()}`
+    : null;
 
   // Pair user+assistant by requestId. Newest pair first.
   type Pair = {
@@ -1406,7 +1424,8 @@ router.get('/admin/chats', async (c) => {
               <tbody>${pairs.map(renderPair).join('')}</tbody>
             </table>`
       }
-    </div>`;
+    </div>
+    ${olderHref ? `<p style="margin-top:12px"><a class="btn" href="${olderHref}">older →</a></p>` : ''}`;
   return c.html(layout({ title: 'Chats', body, active: '/admin/chats' }));
 });
 
@@ -1498,11 +1517,14 @@ router.get('/admin/confirmations', async (c) => {
   if (statusFilter) where.status = statusFilter;
   if (userFilter) where.userId = userFilter;
 
-  const rows = await prisma.pendingConfirmation.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  });
+  const [rows, totalMatching] = await Promise.all([
+    prisma.pendingConfirmation.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    }),
+    prisma.pendingConfirmation.count({ where }),
+  ]);
   const userIds = Array.from(new Set(rows.map((r) => r.userId)));
   const users = await prisma.hermesInstance.findMany({
     where: { userId: { in: userIds } },
@@ -1573,7 +1595,7 @@ router.get('/admin/confirmations', async (c) => {
           <tbody>${rows.map(renderRow).join('')}</tbody>
         </table>`}
     </div>
-    <p class="dim" style="font-size:12px;margin-top:12px">Showing ${rows.length} of up to ${limit}.</p>`;
+    <p class="dim" style="font-size:12px;margin-top:12px">Showing ${rows.length} of ${esc(totalMatching)} matching (page cap ${limit}).</p>`;
   return c.html(layout({ title: 'Confirmations', body, active: '/admin/confirmations' }));
 });
 
@@ -1609,14 +1631,21 @@ router.get('/admin/events', async (c) => {
   const filter = c.req.query('filter') ?? '';
   const eventName = c.req.query('event') ?? '';
   const user = c.req.query('user') ?? '';
+  // Cursor: `before` = createdAt ISO of the last row on the previous page.
+  const before = c.req.query('before') ?? '';
 
   const where: Prisma.ProvisionEventWhereInput = {};
   if (filter === 'failures') where.event = { in: ['provision_failed', 'chat_failed', 'hermes_task_failed', 'integration_failed'] };
   else if (eventName) where.event = eventName;
   if (user) where.userId = user;
+  if (before) {
+    const d = new Date(before);
+    if (!Number.isNaN(d.getTime())) where.createdAt = { lt: d };
+  }
 
-  const [events, eventNames] = await Promise.all([
-    prisma.provisionEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200 }),
+  const PAGE = 200;
+  const [eventsPlus, eventNames] = await Promise.all([
+    prisma.provisionEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: PAGE + 1 }),
     prisma.provisionEvent.groupBy({
       by: ['event'],
       where: { createdAt: { gt: hoursAgo(24 * 7) } },
@@ -1624,6 +1653,16 @@ router.get('/admin/events', async (c) => {
       orderBy: { _count: { event: 'desc' } },
     }),
   ]);
+  const hasOlder = eventsPlus.length > PAGE;
+  const events = hasOlder ? eventsPlus.slice(0, PAGE) : eventsPlus;
+  const olderHref = hasOlder
+    ? `/admin/events?${new URLSearchParams({
+        ...(filter ? { filter } : {}),
+        ...(eventName ? { event: eventName } : {}),
+        ...(user ? { user } : {}),
+        before: events[events.length - 1]!.createdAt.toISOString(),
+      }).toString()}`
+    : null;
 
   const filterForm = `
     <form method="get" action="/admin/events" class="actions">
@@ -1642,6 +1681,7 @@ router.get('/admin/events', async (c) => {
     <p class="dim">Append-only audit trail. Showing the latest ${esc(events.length)}${filter === 'failures' ? ' failure' : eventName ? ` <span class="mono">${esc(eventName)}</span>` : ''} event(s)${user ? ` for <span class="mono">${esc(user)}</span>` : ''}. Event counts in the dropdown are 7-day totals.</p>
     ${filterForm}
     <div class="card">${events.length === 0 ? '<div class="empty">No events match.</div>' : events.map(renderEventRow).join('')}</div>
+    ${olderHref ? `<p style="margin-top:12px"><a class="btn" href="${olderHref}">older →</a></p>` : ''}
   `;
   return c.html(layout({ title: 'Events', body, active: '/admin/events' }));
 });
