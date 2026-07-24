@@ -101,8 +101,14 @@ Patrick's machine.
 
 ## Deploy checklist (when tiers land)
 
-- [ ] `railway up` (Patrick) — Tier 1.2/1.3 + Tier 2 + Tier 4 code; the
-      OutboxMessage.source schema col applies automatically via boot db push.
-- [ ] v24 image build+push (Patrick) — SOUL 1.1 + config.yaml 0.1 baked.
-- [ ] Bump FLY_MACHINE_IMAGE → v24, roll Patrick's instance, add manifest
-      entry, verify self-reported model = mimo-v2.5-pro.
+- [x] `railway up` (Patrick) — deployed 21:31Z; OutboxMessage.source applied
+      via boot db push; schedules API serves last_result fields (verified).
+- [x] v24 image build+push — Patrick's push silently failed (expired Fly
+      registry auth; MANIFEST_UNKNOWN churned the warm pool until caught);
+      re-authed via the Railway FLY_API_TOKEN and pushed from here
+      (digest 38a8df48…). Lesson: always verify a push landed before bumping
+      FLY_MACHINE_IMAGE.
+- [x] FLY_MACHINE_IMAGE → v24, instance rolled ("Image v24 rolled"),
+      manifest entry committed. LIVE-VERIFIED: agent self-reports
+      xiaomi/mimo-v2.5-pro and quotes the new SOUL failure-honesty rule
+      verbatim.
