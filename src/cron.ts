@@ -84,7 +84,8 @@ function register(
         // scans every instance and finds nothing) stay out of the table —
         // liveness lives in the in-memory registry.
         const { scanned, acted } = tickCounts(result);
-        if (!ok || acted > 0) {
+        const acting = !ok || acted > 0;
+        if (acting) {
           await prisma.sweepRun
             .create({
               data: {
@@ -100,6 +101,35 @@ function register(
             })
             .catch((err) => logger.warn({ err, name }, 'sweep_run_log_failed'));
         }
+        // Durable heartbeat: ONE upserted row per cron, every tick. Survives
+        // deploys, so the admin shows an honest "last ticked" instead of
+        // "not ticked yet" after every restart. lastActedAt/lastRequestId only
+        // move on ticks that did work, so the output link points at real work.
+        // A sweep may surface its agent turn's requestId as `.requestId` on its
+        // result for the "view what it did" link.
+        const reqId =
+          result && typeof result === 'object' && typeof (result as Record<string, unknown>)['requestId'] === 'string'
+            ? ((result as Record<string, unknown>)['requestId'] as string)
+            : undefined;
+        await prisma.cronState
+          .upsert({
+            where: { name },
+            create: {
+              name, expr, lastTickAt: info.lastTickAt, lastOk: ok,
+              lastResult: (info.lastResult ?? undefined) as object | undefined,
+              lastError: errMsg,
+              lastActedAt: acting ? info.lastTickAt : null,
+              lastRequestId: reqId ?? null,
+            },
+            update: {
+              expr, lastTickAt: info.lastTickAt, lastOk: ok,
+              lastResult: (info.lastResult ?? undefined) as object | undefined,
+              lastError: errMsg,
+              ...(acting ? { lastActedAt: info.lastTickAt } : {}),
+              ...(reqId ? { lastRequestId: reqId } : {}),
+            },
+          })
+          .catch((err) => logger.warn({ err, name }, 'cron_state_upsert_failed'));
         // Freshen mirrors only after a tick that actually ran — a crashed
         // sweep must not stamp a successful-looking "last run".
         if (ok && mirrorSlug) {

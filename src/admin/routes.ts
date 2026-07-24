@@ -1750,22 +1750,40 @@ router.get('/admin/crons', async (c) => {
     ).map((g) => [g.sweep, g._max.startedAt]),
   );
 
+  // Durable heartbeat — survives deploys, so "last tick" doesn't reset to
+  // "not ticked yet" every restart. Merge over the in-memory registry (which
+  // still supplies the live expr for freshly-added crons not yet upserted).
+  const durable = new Map((await prisma.cronState.findMany()).map((s) => [s.name, s]));
+
   const registryRows = registry
     .map((r) => {
-      const status = r.lastTickAt === null
+      const d = durable.get(r.name);
+      // Prefer the durable timestamp; the in-memory one only exists for ticks
+      // since THIS boot and reads "not ticked yet" right after a deploy.
+      const lastTick = d?.lastTickAt ?? r.lastTickAt;
+      const lastOk = d?.lastOk ?? r.lastOk;
+      const lastError = d?.lastError ?? r.lastError;
+      const lastResult = d?.lastResult ?? r.lastResult;
+      const worked = d?.lastActedAt ?? lastWork.get(r.name) ?? null;
+      const status = lastTick === null
         ? '<span class="pill muted">not ticked yet</span>'
-        : r.lastOk
+        : lastOk
           ? '<span class="pill ok">ok</span>'
-          : `<span class="pill err" title="${esc(r.lastError ?? '')}">error</span>`;
-      const worked = lastWork.get(r.name);
-      const result = r.lastResult ? esc(JSON.stringify(r.lastResult)) : '<span class="dim">—</span>';
+          : `<span class="pill err" title="${esc(lastError ?? '')}">error</span>`;
+      const result = lastResult ? esc(JSON.stringify(lastResult)) : '<span class="dim">—</span>';
+      // "View output" — the agent turn's prompt+response for the last acting
+      // tick, when the sweep surfaced a requestId.
+      const output = d?.lastRequestId
+        ? `<a href="/admin/chats/${encodeURIComponent(d.lastRequestId)}">view →</a>`
+        : '<span class="dim">—</span>';
       return `<tr>
         <td class="mono">${esc(r.name)}</td>
         <td class="mono">${esc(cadenceLabel(r.expr))}</td>
-        <td class="mono" title="Every scheduled wake-up, including ones that found nothing to do">${r.lastTickAt ? esc(relTime(r.lastTickAt)) : '—'}</td>
+        <td class="mono" title="Every scheduled wake-up, including ones that found nothing to do">${lastTick ? esc(relTime(lastTick)) : '—'}</td>
         <td>${status}</td>
         <td class="mono" title="Last tick that actually did work (prompted an agent, delivered something, warmed a machine, …)">${worked ? `<a href="/admin/crons?sweep=${encodeURIComponent(r.name)}">${esc(relTime(worked))}</a>` : '<span class="dim">never</span>'}</td>
         <td class="mono" style="font-size:11px">${result}</td>
+        <td class="mono" style="font-size:11px" title="Prompt + response of the last agent turn this cron drove">${output}</td>
       </tr>`;
     })
     .join('');
@@ -1798,8 +1816,8 @@ router.get('/admin/crons', async (c) => {
 
     <div class="card" style="padding:0;overflow:hidden">
       <table>
-        <thead><tr><th>Job</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last did work</th><th>Last tick result</th></tr></thead>
-        <tbody>${registryRows || '<tr><td colspan="6" class="empty">No crons registered.</td></tr>'}</tbody>
+        <thead><tr><th>Job</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last did work</th><th>Last tick result</th><th>Output</th></tr></thead>
+        <tbody>${registryRows || '<tr><td colspan="7" class="empty">No crons registered.</td></tr>'}</tbody>
       </table>
     </div>
 

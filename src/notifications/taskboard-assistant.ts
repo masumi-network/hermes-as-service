@@ -60,7 +60,7 @@ interface BoardTask {
 
 export async function assistTaskboardForInstance(
   instanceId: string,
-): Promise<{ handled: number; reason?: string }> {
+): Promise<{ handled: number; reason?: string; requestId?: string }> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row) return { handled: 0, reason: 'no_row' };
   if (row.destroyedAt) return { handled: 0, reason: 'destroyed' };
@@ -208,12 +208,12 @@ export async function assistTaskboardForInstance(
     },
   });
   log.info({ tasks: batch.length, newTasks, inputTasks, autonomy }, 'taskboard_assistant_handled');
-  return { handled: batch.length };
+  return { handled: batch.length, requestId };
 }
 
 let sweepInFlight = false;
 
-export async function runTaskboardAssistantSweep(): Promise<{ scanned: number; handled: number }> {
+export async function runTaskboardAssistantSweep(): Promise<{ scanned: number; handled: number; requestId?: string }> {
   // Re-entrancy guard (same as the sibling sweeps): each instance holds a
   // 4-min agent turn, so a busy tick can exceed the 5-min cadence — an
   // overlapping sweep would double-run the candidate→createMany window.
@@ -226,7 +226,7 @@ export async function runTaskboardAssistantSweep(): Promise<{ scanned: number; h
   }
 }
 
-async function runTaskboardAssistantSweepInner(): Promise<{ scanned: number; handled: number }> {
+async function runTaskboardAssistantSweepInner(): Promise<{ scanned: number; handled: number; requestId?: string }> {
   // Cheap prune of stale dedup rows so the table can't grow unbounded.
   await prisma.hermesTaskAssist
     .deleteMany({ where: { assistedAt: { lt: new Date(Date.now() - DEDUP_TTL_MS) } } })
@@ -243,10 +243,14 @@ async function runTaskboardAssistantSweepInner(): Promise<{ scanned: number; han
     take: 100,
   });
   let handled = 0;
+  let requestId: string | undefined;
   for (const instance of due) {
     try {
       const res = await assistTaskboardForInstance(instance.id);
       if (res.handled > 0) handled++;
+      // Surface the most recent agent turn so the admin Crons "Output" link
+      // opens a real prompt+response for this sweep.
+      if (res.requestId) requestId = res.requestId;
     } catch (err) {
       logger.error({ err, instanceId: instance.id }, 'taskboard_assistant_sweep_item_failed');
     }
@@ -254,7 +258,7 @@ async function runTaskboardAssistantSweepInner(): Promise<{ scanned: number; han
   if (due.length > 0) {
     logger.info({ scanned: due.length, handled }, 'taskboard_assistant_sweep_done');
   }
-  return { scanned: due.length, handled };
+  return { scanned: due.length, handled, requestId };
 }
 
 function buildTaskboardPrompt(tasks: BoardTask[], autonomy: 'medium' | 'high'): string {

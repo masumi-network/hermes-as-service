@@ -514,6 +514,25 @@ model TestTurn {
 /// One row per NON-IDLE orchestrator sweep tick (idle ticks are skipped to
 /// keep volume tiny; liveness comes from the in-memory registry on the
 /// admin Crons page). Durable history of what the background crons did.
+/// Durable per-cron heartbeat — ONE row per registered cron, upserted every
+/// tick (including idle ones). Unlike the in-memory registry (which resets to
+/// "not ticked yet" on every deploy) and unlike SweepRun (which only records
+/// ticks that DID work), this survives restarts, so the admin Crons page can
+/// show an honest "last ticked at" even right after a deploy. lastRequestId
+/// links to the agent turn's prompt+response (/admin/chats/:id) when the last
+/// acting tick drove one, so operators can read what the cron actually did.
+model CronState {
+  name          String   @id
+  expr          String
+  lastTickAt    DateTime
+  lastOk        Boolean
+  lastResult    Json?
+  lastError     String?
+  lastActedAt   DateTime?
+  lastRequestId String?
+  updatedAt     DateTime @updatedAt
+}
+
 model SweepRun {
   id         String   @id @default(uuid())
   sweep      String
