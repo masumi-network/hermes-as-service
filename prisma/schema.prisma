@@ -358,6 +358,10 @@ model OutboxMessage {
   userId     String
   content    String
   kind       String   @default("text")
+  /// Which native cron / sweep produced this (job name from the machine's
+  /// cron-outbox bridge). Null for ordinary agent-initiated messages. Lets
+  /// the schedules API surface each cron's latest result.
+  source     String?
   createdAt  DateTime @default(now())
 
   instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
@@ -365,6 +369,7 @@ model OutboxMessage {
   @@index([userId, createdAt])
   @@index([instanceId, createdAt])
   @@index([createdAt])
+  @@index([instanceId, source, createdAt])
 }
 
 model ScheduledTask {

@@ -47,23 +47,26 @@ Patrick's machine.
 
 ## Tier 2 — turn economics + trust plumbing
 
-- [ ] **2.1 Clamp oversized replay messages in the chat proxy**
+- [x] **2.1 Clamp oversized replay messages in the chat proxy**
       (`src/routes/proxy.ts`): Sokosumi replays last 100 messages with no
       token cap; trim any NON-FINAL message to ~8k chars (marker appended).
       Final user message never trimmed. Cuts 300–600k-token turns.
-- [ ] **2.2 Cron results API for Sokosumi sidepanel**
+- [x] **2.2 Cron results API for Sokosumi sidepanel**
       (`src/routes/schedules.ts` + schema): add `source` column to
       OutboxMessage (db push, additive); enqueue stamps it; GET
       `/v1/instances/:userId/schedules` returns per-item `lastResultSnippet`
       (orch tasks: latest ChatMessage by scheduledTaskId; native mirrors:
       latest OutboxMessage by source) alongside existing lastRunAt/lastError.
-- [ ] **2.3 Native-cron disable propagation for `system_prompt` kind**
+- [x] **2.3 Native-cron disable propagation for `system_prompt` kind**
       (`src/routes/schedules.ts`): PATCH toggle currently propagates to the
       machine only for kind='user'; extend to system_prompt mirrors so
       disabling in Sokosumi disables the native cron immediately (reconciler
       remains the eventual-consistency backstop; verify it skips disabled
-      rows).
-- [ ] **2.4 `rollExpiresAt` on GET /v1/instances/:userId**
+      rows). VERIFIED live: native mirrors are actually kind='user' (toggle
+      propagation already worked); the REAL bug was outbox.ts stamping
+      lastRunAt on kind='system_prompt' — matched ZERO rows, "last ran"
+      never stamped. Fixed to kind in [user, system_prompt].
+- [x] **2.4 `rollExpiresAt` on GET /v1/instances/:userId**
       (`src/routes/instances.ts`): rollingAt + 4min window, null when not
       rolling — lets Sokosumi hard-clear the "applying your change" banner.
 

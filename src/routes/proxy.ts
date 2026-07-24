@@ -40,6 +40,31 @@ interface OpenAIRequest {
   stream?: boolean;
 }
 
+/** Sokosumi replays the last 100 messages with no size cap, so one giant
+ *  reply (a pasted 14-page report) rides along in EVERY later turn and blows
+ *  turns up to 300-600k tokens. Trim any NON-FINAL string message to this
+ *  many chars before forwarding. The FINAL message (the live user turn) is
+ *  never touched, and multimodal array contents pass through untouched. */
+const REPLAY_MESSAGE_CLAMP_CHARS = 8_000;
+
+/** Returns true if anything was trimmed (caller re-serializes then). */
+export function clampReplayMessages(messages: OpenAIMessage[] | undefined): boolean {
+  if (!Array.isArray(messages) || messages.length < 2) return false;
+  let changed = false;
+  for (let i = 0; i < messages.length - 1; i++) {
+    const m = messages[i];
+    // System messages are live INSTRUCTIONS, not replayed history — never trim.
+    if (m?.role === 'system') continue;
+    if (m && typeof m.content === 'string' && m.content.length > REPLAY_MESSAGE_CLAMP_CHARS) {
+      m.content =
+        m.content.slice(0, REPLAY_MESSAGE_CLAMP_CHARS) +
+        '\n…[earlier message trimmed for context size — full text is in the task/report it came from]';
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
   const userId = c.req.param('userId');
   const t0 = Date.now();
@@ -70,6 +95,11 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
     } catch {
       // forward as-is even if not parseable; Hermes will reject it
     }
+    // Clamp oversized replayed history BEFORE forwarding (never the final
+    // message). Persisted transcripts below are unaffected: only the final
+    // user/system messages get stored and those are never trimmed.
+    const clamped = clampReplayMessages(parsed.messages);
+    const upstreamBody = clamped ? JSON.stringify(parsed) : bodyText;
 
     const isStreaming = parsed.stream === true;
     const requestId = randomUUID();
@@ -122,7 +152,7 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         'Content-Type': 'application/json',
         Accept: isStreaming ? 'text/event-stream' : 'application/json',
       },
-      body: bodyText,
+      body: upstreamBody,
       // @ts-expect-error — undici dispatcher is valid on Node's fetch impl
       dispatcher: CHAT_PROXY_AGENT,
     });

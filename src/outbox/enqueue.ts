@@ -10,6 +10,9 @@ export interface EnqueueArgs {
   userId: string;
   content: string;
   kind?: string;
+  /** Native cron / sweep name that produced this message (for the schedules
+   *  API's per-cron last-result). Omit for ordinary messages. */
+  source?: string;
 }
 
 export interface EnqueueResult {
@@ -69,6 +72,7 @@ export async function enqueueOutboxMessage(args: EnqueueArgs): Promise<EnqueueRe
         userId: args.userId,
         kind,
         content,
+        source: args.source && args.source.length <= 120 ? args.source : null,
       },
     });
   });

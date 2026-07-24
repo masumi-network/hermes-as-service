@@ -49,6 +49,62 @@ sokosumi.get('/v1/instances/:userId/schedules', async (c) => {
     orderBy: { createdAt: 'desc' },
   });
 
+  // Per-cron LAST RESULT for the Sokosumi sidepanel. Two durable sources:
+  //  - orchestrator-dispatched runs land as ChatMessage kind='scheduled'
+  //    keyed by scheduledTaskId;
+  //  - native machine crons deliver via the outbox, whose rows are DELETED
+  //    on ack — the lasting record is the outbox_pushed audit event
+  //    (detail.source = the native job name, detail.preview = content).
+  const [scheduledReplies, recentPushes] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: {
+        scheduledTaskId: { in: orchTasks.map((t) => t.id) },
+        role: 'assistant',
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      select: { scheduledTaskId: true, content: true, createdAt: true, errorMessage: true },
+    }),
+    prisma.provisionEvent.findMany({
+      where: { instanceId: row.id, event: 'outbox_pushed' },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      select: { detail: true, createdAt: true },
+    }),
+  ]);
+  const latestByTaskId = new Map<string, (typeof scheduledReplies)[number]>();
+  for (const m of scheduledReplies) {
+    if (m.scheduledTaskId && !latestByTaskId.has(m.scheduledTaskId)) {
+      latestByTaskId.set(m.scheduledTaskId, m);
+    }
+  }
+  const latestBySource = new Map<string, { preview: string; createdAt: Date }>();
+  for (const e of recentPushes) {
+    const d = e.detail as { source?: string | null; preview?: string } | null;
+    if (d?.source && !latestBySource.has(d.source)) {
+      latestBySource.set(d.source, { preview: d.preview ?? '', createdAt: e.createdAt });
+    }
+  }
+  const lastResultFor = (t: (typeof orchTasks)[number]) => {
+    const chat = latestByTaskId.get(t.id);
+    if (chat) {
+      return {
+        last_result_snippet: chat.errorMessage
+          ? `[error] ${chat.errorMessage}`
+          : chat.content.replace(/\s+/g, ' ').slice(0, 500),
+        last_result_at: chat.createdAt.toISOString(),
+      };
+    }
+    const push = latestBySource.get(t.name);
+    if (push) {
+      return {
+        last_result_snippet: push.preview.slice(0, 500),
+        last_result_at: push.createdAt.toISOString(),
+      };
+    }
+    return { last_result_snippet: null, last_result_at: null };
+  };
+
   // Hermes-managed tasks (created via Hermes' built-in cronjob tool, e.g.
   // daily-suggestions and anything the user has asked the agent to
   // schedule mid-conversation). Best-effort — if Hermes' API doesn't
@@ -71,7 +127,11 @@ sokosumi.get('/v1/instances/:userId/schedules', async (c) => {
 
   return c.json({
     schedules: [
-      ...orchTasks.map((t) => ({ ...toApiShape(t), source: 'orchestrator' as const })),
+      ...orchTasks.map((t) => ({
+        ...toApiShape(t),
+        ...lastResultFor(t),
+        source: 'orchestrator' as const,
+      })),
       ...hermesTasks,
     ],
   });
@@ -113,11 +173,18 @@ sokosumi.patch('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
     where: { id: scheduleId, instanceId: row.id },
   });
   if (!task) return c.json({ error: { message: 'schedule not found' } }, 404);
-  // Propagate enabled-flag flips on kind='user' rows to the MACHINE's
-  // native cronjob (the mirror row alone gates nothing — native cron is
-  // the real scheduler). system_sweep rows need no propagation: the
-  // orchestrator sweeps read their enabled flag directly.
-  if (task.kind === 'user' && parsed.data.enabled !== undefined && parsed.data.enabled !== task.enabled) {
+  // Propagate enabled-flag flips on kind='user' AND kind='system_prompt'
+  // rows to the MACHINE's native cronjob (the mirror row alone gates
+  // nothing — native cron is the real scheduler). system_prompt was
+  // previously eventual-only via the hourly reconciler, so a disable from
+  // Sokosumi could keep firing for up to an hour. system_sweep rows need
+  // no propagation: the orchestrator sweeps read their enabled flag
+  // directly.
+  if (
+    (task.kind === 'user' || task.kind === 'system_prompt') &&
+    parsed.data.enabled !== undefined &&
+    parsed.data.enabled !== task.enabled
+  ) {
     const { propagateCronToggleToMachine } = await import('../schedules/native-prompts.js');
     void propagateCronToggleToMachine(row.id, {
       name: task.name,

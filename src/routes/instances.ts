@@ -324,6 +324,13 @@ router.get('/v1/instances/:userId', async (c) => {
       null;
     return c.json({
       instanceId: view.instanceId,
+      // Server-side hard bound for the "applying your change" banner: when a
+      // capability roll is in flight this is the instant the roll window ends
+      // (rollingAt + 4min). Sokosumi can auto-clear the banner at this time
+      // even if its polling stalls. Null when no roll is in flight.
+      rollExpiresAt: rolling
+        ? new Date(view.rollingAt!.getTime() + 4 * 60_000).toISOString()
+        : null,
       model: servedModel,
       modelProvider: cfg.LLM_UPSTREAM_BASE_URL.includes('openrouter.ai')
         ? 'OpenRouter (managed)'

@@ -163,11 +163,17 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
   }
   // A native cron fired — stamp its mirror's lastRunAt so the admin shows a
   // real "last ran", regardless of whether it delivered or suppressed a no-op.
-  // Fire-and-forget; matched by (userId, name) on the system_prompt mirror.
+  // Fire-and-forget; matched by (userId, name). Mirrors registered from the
+  // machine land as kind='user' (createScheduleResponse) — the previous
+  // kind='system_prompt' filter matched ZERO rows, so this stamp never fired.
   if (parsed.data.source) {
     void prisma.scheduledTask
       .updateMany({
-        where: { userId: auth.row.userId, name: parsed.data.source, kind: 'system_prompt' },
+        where: {
+          userId: auth.row.userId,
+          name: parsed.data.source,
+          kind: { in: ['user', 'system_prompt'] },
+        },
         data: { lastRunAt: new Date() },
       })
       .catch((err) => logger.warn({ err, source: parsed.data.source }, 'native_cron_mirror_stamp_failed'));
@@ -193,6 +199,7 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
       userId: auth.row.userId,
       content: parsed.data.content,
       kind: parsed.data.kind,
+      source: parsed.data.source,
     });
     // Durable trace: outbox rows are DELETED when Sokosumi acks them, so
     // this event is the only lasting record of what native cronjobs (and
