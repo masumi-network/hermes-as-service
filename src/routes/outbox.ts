@@ -260,7 +260,10 @@ async function authenticateSprite(c: Context): Promise<AuthOk | AuthErr> {
   if (!header.startsWith('Bearer ')) return { ok: false, status: 401, message: 'missing bearer' };
   const bearer = header.slice(7).trim();
   if (!bearer) return { ok: false, status: 401, message: 'empty bearer' };
-  const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
+  const row = await prisma.hermesInstance.findUnique({
+    where: { id: instanceId },
+    select: { id: true, userId: true, llmProxyToken: true },
+  });
   if (!row || !row.llmProxyToken) return { ok: false, status: 404, message: 'instance not found' };
   let expected: string;
   try {

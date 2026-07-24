@@ -2,7 +2,7 @@ import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
-import { SokosumiClient } from '../sokosumi/client.js';
+import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
@@ -83,8 +83,11 @@ export async function continueFollowupsForInstance(
   const completed: CompletedJob[] = [];
   let anyOrgFailed = false;
 
-  for (const org of orgs) {
+  // Bounded parallel fan-out; catch stays inside the mapped fn and results
+  // flatten in org order — semantics identical to the old sequential loop.
+  const perOrg = await mapLimit(orgs, 5, async (org): Promise<CompletedJob[]> => {
     const orgClient = client.withOrganization(org.id);
+    const found: CompletedJob[] = [];
     try {
       // API ignores ?status; page all jobs (bounded) + filter COMPLETED below.
       const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
@@ -106,13 +109,15 @@ export async function continueFollowupsForInstance(
         if (!stampStr || !j.id) continue;
         const stamp = new Date(stampStr);
         if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
-        completed.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
+        found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
       }
     } catch (err) {
       anyOrgFailed = true;
       log.warn({ err, orgId: org.id }, 'followup_list_jobs_failed');
     }
-  }
+    return found;
+  });
+  completed.push(...perOrg.flat());
 
   const now = new Date();
   // Any org listing failure = skip the whole tick and retry in 5 min.

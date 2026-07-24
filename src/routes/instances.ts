@@ -291,10 +291,15 @@ async function notifyAutonomyChanged(instanceId: string, newLevel: string): Prom
 router.get('/v1/instances/:userId', async (c) => {
   const userId = c.req.param('userId');
   try {
-    const view = await getInstance(userId);
-    const integrations = await listIntegrations(userId);
+    // Sokosumi polls this every 30s per user — run the three independent
+    // queries in parallel. getInstance's notFound rejection still surfaces
+    // through Promise.all into the same catch below.
     const { listPendingConfirmations } = await import('../confirmations/store.js');
-    const pendingConfirmations = await listPendingConfirmations(userId);
+    const [view, integrations, pendingConfirmations] = await Promise.all([
+      getInstance(userId),
+      listIntegrations(userId),
+      listPendingConfirmations(userId),
+    ]);
     // `transitioning: true` when any integration is mid-apply, a capability
     // roll (MCP-tool refresh restart) is in flight, OR the instance lifecycle
     // is itself unsettled. Sokosumi gates the "Hermes is applying your

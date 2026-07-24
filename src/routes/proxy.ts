@@ -45,7 +45,10 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
   const t0 = Date.now();
 
   try {
-    const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+    const row = await prisma.hermesInstance.findUnique({
+      where: { userId },
+      select: { id: true, userId: true, endpointUrl: true, apiServerKey: true },
+    });
     if (!row) return problemJson(c, notFound(userId));
     if (!row.endpointUrl) {
       return problemJson(
@@ -54,8 +57,12 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
       );
     }
 
-    const apiServerKey = await decryptSecret(row.apiServerKey);
-    const bodyText = await c.req.text();
+    // Independent: decrypt + body read in parallel (both must finish before
+    // anything below).
+    const [apiServerKey, bodyText] = await Promise.all([
+      decryptSecret(row.apiServerKey),
+      c.req.text(),
+    ]);
 
     let parsed: OpenAIRequest = {};
     try {
@@ -70,36 +77,43 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
     const lastSystem = findLastByRole(parsed.messages, 'system');
 
     // Persist the user message now so it's visible even if upstream hangs.
-    if (lastUser) {
-      await prisma.chatMessage.create({
-        data: {
-          instanceId: row.id,
-          userId: row.userId,
-          requestId,
-          role: 'user',
-          content: contentToText(lastUser.content),
-          model: parsed.model,
-        },
-      });
-    }
-    if (lastSystem) {
-      await prisma.chatMessage.create({
-        data: {
-          instanceId: row.id,
-          userId: row.userId,
-          requestId,
-          role: 'system',
-          content: contentToText(lastSystem.content),
-          model: parsed.model,
-        },
-      });
-    }
-
-    // Bump activity + flip to running so suspend bookkeeping stays accurate.
-    await prisma.hermesInstance.update({
-      where: { id: row.id },
-      data: { lastActivityAt: new Date(), status: 'running' },
-    });
+    // The two message inserts stay SEQUENTIAL (admin chat detail orders by
+    // createdAt asc and expects user before system); the activity bump is
+    // independent and runs alongside. All three complete before the upstream
+    // fetch — the persistence guarantee is unchanged.
+    await Promise.all([
+      (async () => {
+        if (lastUser) {
+          await prisma.chatMessage.create({
+            data: {
+              instanceId: row.id,
+              userId: row.userId,
+              requestId,
+              role: 'user',
+              content: contentToText(lastUser.content),
+              model: parsed.model,
+            },
+          });
+        }
+        if (lastSystem) {
+          await prisma.chatMessage.create({
+            data: {
+              instanceId: row.id,
+              userId: row.userId,
+              requestId,
+              role: 'system',
+              content: contentToText(lastSystem.content),
+              model: parsed.model,
+            },
+          });
+        }
+      })(),
+      // Bump activity + flip to running so suspend bookkeeping stays accurate.
+      prisma.hermesInstance.update({
+        where: { id: row.id },
+        data: { lastActivityAt: new Date(), status: 'running' },
+      }),
+    ]);
 
     const upstreamRes = await fetch(`${row.endpointUrl}/v1/chat/completions`, {
       method: 'POST',

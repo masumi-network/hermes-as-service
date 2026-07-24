@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
-import { SokosumiClient } from '../sokosumi/client.js';
+import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
@@ -78,7 +78,7 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   const sinceAwaiting = row.lastAwaitingInputNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
   const sinceFailed = row.lastFailedJobNoticeAt ?? new Date(Date.now() - 24 * 60 * 60_000);
 
-  const candidates: Array<{
+  type Candidate = {
     name: string;
     agentId: string;
     timestamp: string;
@@ -86,11 +86,15 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
     orgId: string | null;
     status: 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
     jobId: string;
-  }> = [];
+  };
   let anyOrgFailed = false;
 
-  for (const org of orgs) {
+  // Bounded parallel fan-out over the workspaces; catch stays INSIDE the
+  // mapped fn (one org failing must not reject the sweep), and results are
+  // flattened in org order so downstream ordering matches the old loop.
+  const perOrg = await mapLimit(orgs, 5, async (org): Promise<Candidate[]> => {
     const orgClient = client.withOrganization(org.id);
+    const found: Candidate[] = [];
     try {
       // Page all jobs ONCE (the API ignores ?status), then bucket by the job's
       // REAL status — the old code made a per-status call and trusted the
@@ -119,7 +123,7 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
         const stamp = new Date(stampStr);
         if (isNaN(stamp.getTime())) continue;
         if (stamp.getTime() <= watermark.getTime()) continue;
-        candidates.push({
+        found.push({
           name: j.name ?? '(unnamed job)',
           agentId: j.agentId ?? '?',
           timestamp: stampStr,
@@ -133,7 +137,9 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
       anyOrgFailed = true;
       log.warn({ err, orgId: org.id }, 'urgent_check_list_jobs_failed');
     }
-  }
+    return found;
+  });
+  const candidates: Candidate[] = perOrg.flat();
 
   if (candidates.length === 0) {
     // A failed listing means the empty window may be a lie — don't advance

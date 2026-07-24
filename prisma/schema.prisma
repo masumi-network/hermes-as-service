@@ -348,6 +348,8 @@ model ChatMessage {
   @@index([requestId])
   @@index([createdAt])
   @@index([scheduledTaskId])
+  // Cron-turn history prefix: WHERE userId+kind ORDER BY createdAt desc.
+  @@index([userId, kind, createdAt])
 }
 
 model OutboxMessage {
@@ -457,6 +459,9 @@ model ProvisionEvent {
   @@index([userId, createdAt])
   @@index([event, createdAt])
   @@index([createdAt])
+  // Ground-truth guard count (per chat turn): WHERE instanceId+event+createdAt.
+  // Also gives the FK SetNull lookup an instanceId prefix.
+  @@index([instanceId, event, createdAt])
 }
 
 /// One execution of a standard-chat suite against one instance, run from the
