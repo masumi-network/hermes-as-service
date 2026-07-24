@@ -22,6 +22,8 @@ import {
 } from '../integrations/manager.js';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { loadConfig } from '../config.js';
+import { findImageVersion, tagFromRef } from '../images/manifest.js';
 
 const router = new Hono();
 
@@ -308,8 +310,21 @@ router.get('/v1/instances/:userId', async (c) => {
       integrations.some((i) => i.status === 'connecting' || i.status === 'pending') ||
       view.status === 'provisioning' ||
       view.status === 'onboarding';
+    // The model the llm-proxy actually serves: TEXT_MODEL_OVERRIDE wins when
+    // set, otherwise the gateway's baked default for the fleet's current image
+    // (from the image manifest). Reported so Sokosumi can show the LIVE model
+    // instead of a hardcoded label.
+    const cfg = loadConfig();
+    const servedModel =
+      cfg.TEXT_MODEL_OVERRIDE.trim() ||
+      findImageVersion(tagFromRef(cfg.FLY_MACHINE_IMAGE) ?? '')?.defaultModel ||
+      null;
     return c.json({
       instanceId: view.instanceId,
+      model: servedModel,
+      modelProvider: cfg.LLM_UPSTREAM_BASE_URL.includes('openrouter.ai')
+        ? 'OpenRouter (managed)'
+        : 'custom (managed)',
       userId: view.userId,
       status: view.status,
       endpointUrl: view.endpointUrl,
