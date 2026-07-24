@@ -90,7 +90,7 @@ Patrick's machine.
       NEVER hoist `confirmations/store ↔ routes/sokosumi-mcp` (real cycle).
       Post-listen recovery blocks in index.ts keep their call sites; leave
       intentional lazy-loads the audit documented.
-- [ ] **4.4 Input-responder prefetch dedup** — share the per-instance
+- [x] **4.4 Input-responder prefetch dedup** — share the per-instance
       row/toggle/job-listing between the input pass and followup pass;
       watermark writes clamped to the snapshot capture time (the subtlety
       that deferred this).

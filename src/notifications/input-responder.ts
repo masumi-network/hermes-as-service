@@ -6,7 +6,11 @@ import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
-import { continueFollowupsForInstance } from './followup-continuation.js';
+import {
+  continueFollowupsForInstance,
+  type RawSweepJob,
+  type SweepJobsPrefetch,
+} from './followup-continuation.js';
 
 /**
  * INPUT_REQUIRED auto-responder.
@@ -43,7 +47,7 @@ interface PausedJob {
 
 export async function respondToInputRequestsForInstance(
   instanceId: string,
-): Promise<{ prompted: number; reason?: string }> {
+): Promise<{ prompted: number; reason?: string; prefetch?: SweepJobsPrefetch }> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row) return { prompted: 0, reason: 'no_row' };
   if (row.destroyedAt) return { prompted: 0, reason: 'destroyed' };
@@ -87,42 +91,49 @@ export async function respondToInputRequestsForInstance(
   const since = row.lastInputResponderAt ?? new Date(Date.now() - 6 * 60 * 60_000);
   const paused: PausedJob[] = [];
   let anyOrgFailed = false;
+  const captureAt = new Date();
 
   // Bounded parallel fan-out; catch stays inside the mapped fn and results
   // flatten in org order — semantics identical to the old sequential loop.
-  const perOrg = await mapLimit(orgs, 5, async (org): Promise<PausedJob[]> => {
-    const orgClient = client.withOrganization(org.id);
-    const found: PausedJob[] = [];
-    try {
-      // The API ignores ?status, so page all jobs (bounded) and filter to
-      // AWAITING_INPUT client-side below — a single 15-item page could miss an
-      // aged paused job entirely.
-      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
-        id?: string;
-        name?: string;
-        status?: string;
-        updatedAt?: string;
-        createdAt?: string;
-      }>;
-      for (const j of jobs) {
-        // Sokosumi's /jobs endpoint ignores the status query filter and
-        // returns all statuses (lowercase), so re-check client-side —
-        // otherwise a recently-touched COMPLETED job would be treated as
-        // awaiting input and waste an agent turn.
-        if (j.status && j.status.toLowerCase() !== 'awaiting_input') continue;
-        const stampStr = j.updatedAt ?? j.createdAt;
-        if (!stampStr || !j.id) continue;
-        const stamp = new Date(stampStr);
-        if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
-        found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
+  // The FULL per-org listing is kept and handed to the followup pass on the
+  // same tick (SweepJobsPrefetch) so it doesn't re-fetch every workspace.
+  const perOrg = await mapLimit(
+    orgs,
+    5,
+    async (org): Promise<{ found: PausedJob[]; orgId: string | null; jobs: RawSweepJob[] }> => {
+      const orgClient = client.withOrganization(org.id);
+      const found: PausedJob[] = [];
+      let jobs: RawSweepJob[] = [];
+      try {
+        // The API ignores ?status, so page all jobs (bounded) and filter to
+        // AWAITING_INPUT client-side below — a single 15-item page could miss
+        // an aged paused job entirely.
+        jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as RawSweepJob[];
+        for (const j of jobs) {
+          // Sokosumi's /jobs endpoint ignores the status query filter and
+          // returns all statuses (lowercase), so re-check client-side —
+          // otherwise a recently-touched COMPLETED job would be treated as
+          // awaiting input and waste an agent turn.
+          if (j.status && j.status.toLowerCase() !== 'awaiting_input') continue;
+          const stampStr = j.updatedAt ?? j.createdAt;
+          if (!stampStr || !j.id) continue;
+          const stamp = new Date(stampStr);
+          if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
+          found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
+        }
+      } catch (err) {
+        anyOrgFailed = true;
+        log.warn({ err, orgId: org.id }, 'input_responder_list_jobs_failed');
       }
-    } catch (err) {
-      anyOrgFailed = true;
-      log.warn({ err, orgId: org.id }, 'input_responder_list_jobs_failed');
-    }
-    return found;
-  });
-  paused.push(...perOrg.flat());
+      return { found, orgId: org.id, jobs };
+    },
+  );
+  paused.push(...perOrg.flatMap((r) => r.found));
+  const prefetch: SweepJobsPrefetch = {
+    captureAt,
+    jobsByOrg: perOrg.map((r) => ({ orgId: r.orgId, jobs: r.jobs })),
+    anyOrgFailed,
+  };
 
   const now = new Date();
   if (paused.length === 0) {
@@ -130,9 +141,14 @@ export async function respondToInputRequestsForInstance(
     // failed, leave it untouched so a job hidden by the transient error is
     // reconsidered next tick instead of being stranded behind the watermark.
     if (!anyOrgFailed) {
-      await prisma.hermesInstance.update({ where: { id: instanceId }, data: { lastInputResponderAt: now } });
+      // Clamp to when the listing was TAKEN, not written — same rule as the
+      // followup pass's prefetch consumption.
+      await prisma.hermesInstance.update({
+        where: { id: instanceId },
+        data: { lastInputResponderAt: captureAt },
+      });
     }
-    return { prompted: 0, reason: anyOrgFailed ? 'list_failed_retry' : 'no_paused_jobs' };
+    return { prompted: 0, reason: anyOrgFailed ? 'list_failed_retry' : 'no_paused_jobs', prefetch };
   }
 
   // Process OLDEST first, and advance the watermark only to the newest job we
@@ -164,7 +180,7 @@ export async function respondToInputRequestsForInstance(
     // would strand it. Leaving it means we retry the same batch next tick (at
     // most once per 5 min, so no tight storm).
     log.warn({ err }, 'input_responder_agent_turn_failed');
-    return { prompted: 0, reason: 'agent_turn_failed_retry' };
+    return { prompted: 0, reason: 'agent_turn_failed_retry', prefetch };
   }
 
   // Advance to the newest timestamp we handled, clamped to now (guards against a
@@ -183,7 +199,7 @@ export async function respondToInputRequestsForInstance(
     detail: { source: 'input_responder', jobs: batch.length, autonomy, requestId },
   });
   log.info({ jobs: batch.length, autonomy }, 'input_responder_prompted');
-  return { prompted: batch.length };
+  return { prompted: batch.length, prefetch };
 }
 
 let sweepInFlight = false;
@@ -215,8 +231,9 @@ async function runInputResponderSweepInner(): Promise<{ scanned: number; prompte
   });
   let prompted = 0;
   for (const instance of due) {
+    let res: Awaited<ReturnType<typeof respondToInputRequestsForInstance>> | undefined;
     try {
-      const res = await respondToInputRequestsForInstance(instance.id);
+      res = await respondToInputRequestsForInstance(instance.id);
       if (res.prompted > 0) prompted++;
     } catch (err) {
       logger.error({ err, instanceId: instance.id }, 'input_responder_sweep_item_failed');
@@ -224,7 +241,7 @@ async function runInputResponderSweepInner(): Promise<{ scanned: number; prompte
     // Plan continuation rides the same tick: newly-COMPLETED jobs get a
     // "was there an agreed next step?" pass (see followup-continuation.ts).
     try {
-      await continueFollowupsForInstance(instance.id);
+      await continueFollowupsForInstance(instance.id, res?.prefetch);
     } catch (err) {
       logger.error({ err, instanceId: instance.id }, 'followup_continuation_item_failed');
     }

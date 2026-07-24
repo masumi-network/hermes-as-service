@@ -40,8 +40,32 @@ interface CompletedJob {
   timestamp: string;
 }
 
+/** Raw job shape shared by the input-responder and followup passes. */
+export interface RawSweepJob {
+  id?: string;
+  name?: string;
+  status?: string;
+  completedAt?: string;
+  updatedAt?: string;
+  createdAt?: string;
+}
+
+/**
+ * Job listing captured by the input-responder pass and handed to the followup
+ * pass so the same tick doesn't fetch every workspace's jobs twice.
+ * captureAt is when the listing was taken — all watermark writes made from
+ * this data must clamp to it (the input pass's agent turns can take minutes;
+ * completions landing in that gap must not be buried behind a `now` write).
+ */
+export interface SweepJobsPrefetch {
+  captureAt: Date;
+  jobsByOrg: Array<{ orgId: string | null; jobs: RawSweepJob[] }>;
+  anyOrgFailed: boolean;
+}
+
 export async function continueFollowupsForInstance(
   instanceId: string,
+  prefetch?: SweepJobsPrefetch,
 ): Promise<{ prompted: number; reason?: string }> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row) return { prompted: 0, reason: 'no_row' };
@@ -66,60 +90,68 @@ export async function continueFollowupsForInstance(
   const log = logger.child({ instanceId, userId: row.userId, fn: 'followup_continuation' });
   const client = new SokosumiClient(row.userId, env);
 
-  // MUST be listWorkspaceScopes (not listOrganizations): the personal
-  // workspace (id:null) is where a per-user assistant's own jobs run, and it
-  // was never scanned before — completions there never triggered follow-ups.
-  let orgs: Array<{ id: string | null }> = [];
-  try {
-    orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
-  } catch (err) {
-    log.warn({ err }, 'followup_list_orgs_failed');
-    return { prompted: 0, reason: 'list_orgs_failed' };
-  }
-
   // First run looks back 1h only — activating the feature must not replay
   // days of historical completions as "fresh".
   const since = row.lastFollowupSweepAt ?? new Date(Date.now() - 60 * 60_000);
   const completed: CompletedJob[] = [];
   let anyOrgFailed = false;
-
-  // Bounded parallel fan-out; catch stays inside the mapped fn and results
-  // flatten in org order — semantics identical to the old sequential loop.
-  const perOrg = await mapLimit(orgs, 5, async (org): Promise<CompletedJob[]> => {
-    const orgClient = client.withOrganization(org.id);
+  const filterCompleted = (orgId: string | null, jobs: RawSweepJob[]): CompletedJob[] => {
     const found: CompletedJob[] = [];
-    try {
-      // API ignores ?status; page all jobs (bounded) + filter COMPLETED below.
-      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
-        id?: string;
-        name?: string;
-        status?: string;
-        completedAt?: string;
-        updatedAt?: string;
-        createdAt?: string;
-      }>;
-      for (const j of jobs) {
-        // Sokosumi's /jobs endpoint ignores the status filter (returns all
-        // statuses, lowercase) — re-check client-side so we only continue
-        // plans off genuinely completed jobs.
-        if (j.status && j.status.toLowerCase() !== 'completed') continue;
-        // completedAt preferred (same as urgent.ts): updatedAt moves on any
-        // post-completion touch (rating, refund) and would replay old jobs.
-        const stampStr = j.completedAt ?? j.updatedAt ?? j.createdAt;
-        if (!stampStr || !j.id) continue;
-        const stamp = new Date(stampStr);
-        if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
-        found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
-      }
-    } catch (err) {
-      anyOrgFailed = true;
-      log.warn({ err, orgId: org.id }, 'followup_list_jobs_failed');
+    for (const j of jobs) {
+      // Sokosumi's /jobs endpoint ignores the status filter (returns all
+      // statuses, lowercase) — re-check client-side so we only continue
+      // plans off genuinely completed jobs.
+      if (j.status && j.status.toLowerCase() !== 'completed') continue;
+      // completedAt preferred (same as urgent.ts): updatedAt moves on any
+      // post-completion touch (rating, refund) and would replay old jobs.
+      const stampStr = j.completedAt ?? j.updatedAt ?? j.createdAt;
+      if (!stampStr || !j.id) continue;
+      const stamp = new Date(stampStr);
+      if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
+      found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId, timestamp: stampStr });
     }
     return found;
-  });
-  completed.push(...perOrg.flat());
+  };
 
-  const now = new Date();
+  if (prefetch) {
+    // Reuse the input-responder pass's listing (same tick) — no second full
+    // fan-out. Watermark writes below clamp to prefetch.captureAt.
+    anyOrgFailed = prefetch.anyOrgFailed;
+    for (const { orgId, jobs } of prefetch.jobsByOrg) {
+      completed.push(...filterCompleted(orgId, jobs));
+    }
+  } else {
+    // Standalone call — fetch ourselves. MUST be listWorkspaceScopes (not
+    // listOrganizations): the personal workspace (id:null) is where a
+    // per-user assistant's own jobs run.
+    let orgs: Array<{ id: string | null }> = [];
+    try {
+      orgs = (await client.listWorkspaceScopes()).map((o) => ({ id: o.id }));
+    } catch (err) {
+      log.warn({ err }, 'followup_list_orgs_failed');
+      return { prompted: 0, reason: 'list_orgs_failed' };
+    }
+    // Bounded parallel fan-out; catch stays inside the mapped fn and results
+    // flatten in org order — semantics identical to the old sequential loop.
+    const perOrg = await mapLimit(orgs, 5, async (org): Promise<CompletedJob[]> => {
+      const orgClient = client.withOrganization(org.id);
+      try {
+        // API ignores ?status; page all jobs (bounded) + filter COMPLETED.
+        const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as RawSweepJob[];
+        return filterCompleted(org.id, jobs);
+      } catch (err) {
+        anyOrgFailed = true;
+        log.warn({ err, orgId: org.id }, 'followup_list_jobs_failed');
+        return [];
+      }
+    });
+    completed.push(...perOrg.flat());
+  }
+
+  // Watermark writes clamp to when the job listing was actually TAKEN. With
+  // prefetched data that can be minutes ago (the input pass runs agent turns
+  // in between) — writing `now` would bury completions landing in that gap.
+  const now = prefetch ? prefetch.captureAt : new Date();
   // Any org listing failure = skip the whole tick and retry in 5 min.
   // Processing a partial view here would advance the watermark past the
   // failed org's unseen completions and bury them forever.
