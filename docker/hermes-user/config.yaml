@@ -3,7 +3,7 @@
 # Machine env vars at start time, not from this file.
 
 model:
-  default: deepseek/deepseek-v4-flash
+  default: xiaomi/mimo-v2.5
 
 # Force tool-use enforcement for ALL models. Default "auto" only injects the
 # anti-narration steering for name-matched models, so some models (and older
