@@ -233,6 +233,36 @@ export class FlyClient {
    *   stopping   → wait for stopped → start
    *   created    → start (machine was never started; rare race)
    */
+  /**
+   * Start a machine, tolerating the 412 Fly returns while it's still settling
+   * an async transition — most commonly the brief window right after a stop,
+   * or mid config-update. Polls for a startable state and retries the start
+   * until it takes or a 90s deadline passes. Mirrors the resilient-start loop
+   * in provision.ensureMachineStarted, but as a client primitive so
+   * restartMachine (and anyone else) is 412-safe too. Returns once the machine
+   * is started or confirmed on its way (state `starting`).
+   */
+  async startMachineSettling(appName: string, machineId: string): Promise<void> {
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      const m = await this.getMachine(appName, machineId);
+      if (!m) throw upstream(undefined, `startMachineSettling: machine ${machineId} vanished`);
+      if (m.state === 'started' || m.state === 'starting') return;
+      if (m.state === 'stopped' || m.state === 'suspended' || m.state === 'created') {
+        try {
+          await this.startMachine(appName, machineId);
+          return;
+        } catch (err) {
+          // 412 / transient reject while Fly settles — poll + retry below.
+          if (Date.now() > deadline) throw err;
+        }
+      } else if (Date.now() > deadline) {
+        throw upstream(undefined, `startMachineSettling: machine ${machineId} stuck in '${m.state}'`);
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
   async restartMachine(appName: string, machineId: string): Promise<void> {
     const m = await this.getMachine(appName, machineId);
     if (!m) {
@@ -242,18 +272,18 @@ export class FlyClient {
     if (state === 'started') {
       await this.stopMachine(appName, machineId);
       await this.waitForState(appName, machineId, 'stopped', 30);
-      await this.startMachine(appName, machineId);
+      await this.startMachineSettling(appName, machineId);
       await this.waitForState(appName, machineId, 'started', 60);
       return;
     }
     if (state === 'stopped' || state === 'suspended' || state === 'created') {
-      await this.startMachine(appName, machineId);
+      await this.startMachineSettling(appName, machineId);
       await this.waitForState(appName, machineId, 'started', 60);
       return;
     }
     if (state === 'stopping') {
       await this.waitForState(appName, machineId, 'stopped', 30);
-      await this.startMachine(appName, machineId);
+      await this.startMachineSettling(appName, machineId);
       await this.waitForState(appName, machineId, 'started', 60);
       return;
     }
@@ -262,7 +292,7 @@ export class FlyClient {
       // Already started — caller wanted a restart, so bounce it.
       await this.stopMachine(appName, machineId);
       await this.waitForState(appName, machineId, 'stopped', 30);
-      await this.startMachine(appName, machineId);
+      await this.startMachineSettling(appName, machineId);
       await this.waitForState(appName, machineId, 'started', 60);
       return;
     }
