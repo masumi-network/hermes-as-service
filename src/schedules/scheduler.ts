@@ -1,4 +1,3 @@
-import cron from 'node-cron';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
@@ -6,22 +5,6 @@ import { decryptSecret } from '../crypto.js';
 import { safeNextRun } from './cron.js';
 import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
-
-let scheduled: cron.ScheduledTask | null = null;
-
-/** Wires the orchestrator-level scheduled-task runner. Runs every minute. */
-export function startScheduler(): void {
-  if (scheduled) return;
-  scheduled = cron.schedule('* * * * *', () => {
-    void runDueOnce().catch((err) => logger.error({ err }, 'scheduler_tick_failed'));
-  });
-  logger.info('scheduler_started');
-}
-
-export function stopScheduler(): void {
-  scheduled?.stop();
-  scheduled = null;
-}
 
 /** Public so tests / admin endpoints can trigger a tick on demand. */
 export async function runDueOnce(): Promise<number> {

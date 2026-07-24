@@ -256,29 +256,3 @@ export async function runPoolReplenishSweep(): Promise<void> {
 export function schedulePoolReplenishSoon(): void {
   void runPoolReplenishSweep().catch((err) => logger.error({ err }, 'pool_replenish_soon_threw'));
 }
-
-export interface PoolStats {
-  ready: number;
-  warming: number;
-  claiming: number;
-  failed: number;
-  target: number;
-  currentImage: string;
-}
-
-export async function poolStats(): Promise<PoolStats> {
-  const cfg = loadConfig();
-  const rows = await prisma.hermesPoolMachine.groupBy({
-    by: ['status'],
-    _count: { _all: true },
-  });
-  const by = (s: string) => rows.find((r) => r.status === s)?._count._all ?? 0;
-  return {
-    ready: by('ready'),
-    warming: by('warming'),
-    claiming: by('claiming'),
-    failed: by('failed'),
-    target: cfg.WARM_POOL_TARGET,
-    currentImage: cfg.FLY_MACHINE_IMAGE,
-  };
-}

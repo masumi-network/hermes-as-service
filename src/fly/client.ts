@@ -62,10 +62,6 @@ export class FlyClient {
     );
   }
 
-  async listVolumes(appName: string): Promise<FlyVolume[]> {
-    return this.json<FlyVolume[]>('GET', `/v1/apps/${encodeURIComponent(appName)}/volumes`);
-  }
-
   // ---------- machines ----------
 
   async createMachine(appName: string, req: CreateMachineRequest): Promise<FlyMachine> {
@@ -83,10 +79,6 @@ export class FlyClient {
     );
     if (res.status === 404) return null;
     return this.expectJson<FlyMachine>(res, 'getMachine');
-  }
-
-  async listMachines(appName: string): Promise<FlyMachine[]> {
-    return this.json<FlyMachine[]>('GET', `/v1/apps/${encodeURIComponent(appName)}/machines`);
   }
 
   /**
@@ -323,17 +315,6 @@ export class FlyClient {
     );
     if (!res.ok && res.status !== 404) {
       throw upstream(undefined, `startMachine failed: ${res.status}`);
-    }
-  }
-
-  async destroyMachine(appName: string, machineId: string, force: boolean = true): Promise<void> {
-    const qs = force ? '?force=true' : '';
-    const res = await this.raw(
-      'DELETE',
-      `/v1/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}${qs}`,
-    );
-    if (!res.ok && res.status !== 404) {
-      throw upstream(undefined, `destroyMachine failed: ${res.status}`);
     }
   }
 

@@ -1,6 +1,6 @@
 # Hermes Orchestrator — runs on Railway. NOT the user-facing Hermes image.
-# Each user's Hermes runs inside a separate Sprites.dev microVM (bootstrapped
-# by scripts/bootstrap-hermes-sprite.sh), not in this container.
+# Each user's Hermes runs as an always-on Fly Machine built from
+# Dockerfile.hermes-user (see its header for build/push), not in this container.
 
 # ---------- build stage ----------
 FROM node:20-bookworm-slim AS build
@@ -12,7 +12,6 @@ RUN npm install --no-audit --no-fund
 COPY tsconfig.json ./
 COPY prisma ./prisma
 COPY src ./src
-COPY scripts ./scripts
 
 RUN npx prisma generate \
  && npm run build
@@ -38,7 +37,6 @@ RUN npm install -g @masumi_network/masumi-agent-messenger@0.0.32 \
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
-COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/package.json ./package.json
 # Hermes user-image artifacts (SOUL.md, config.yaml, denylist, skills) so the
 # admin Images page can display the live image's actual contents at runtime.

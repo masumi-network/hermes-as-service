@@ -44,9 +44,6 @@ import {
   startNativePromptReconcilerCron,
   startMcpToolsRollCron,
 } from './cron.js';
-// On Fly always-on hosts, Hermes' own gateway daemon ticks its built-in
-// cron every 60s. We no longer need the orchestrator-side scheduler.
-// import { startScheduler } from './schedules/scheduler.js';
 
 const cfg = loadConfig();
 
@@ -148,7 +145,6 @@ void (async () => {
     logger.error({ err }, 'sokosumi_env_migration_threw');
   }
 })();
-// startScheduler();  // see import above
 
 const shutdown = (signal: string) => {
   logger.info({ signal }, 'shutdown');

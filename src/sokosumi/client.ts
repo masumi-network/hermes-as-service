@@ -453,15 +453,6 @@ export class SokosumiClient {
     return body.items ?? body.conversations ?? body.data ?? [];
   }
 
-  async getConversationMessages(id: string, opts: { limit?: number } = {}): Promise<unknown[]> {
-    const qs = new URLSearchParams();
-    if (opts.limit) qs.set('limit', String(opts.limit));
-    const body = await this.get<{ items?: unknown[]; messages?: unknown[]; data?: unknown[] }>(
-      `/conversations/${encodeURIComponent(id)}/messages?${qs}`,
-    );
-    return body.items ?? body.messages ?? body.data ?? [];
-  }
-
   // ---------- credits + meta ----------
 
   /**

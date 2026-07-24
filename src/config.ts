@@ -27,13 +27,7 @@ const schema = z.object({
   // one full cold image pull, so keep this modest to avoid Fly rate limits).
   WARM_POOL_WARM_CONCURRENCY: z.coerce.number().int().positive().default(2),
 
-  // Legacy Sprites support kept for migration window. Will be removed.
-  SPRITES_API_TOKEN: z.string().optional().default(''),
-  SPRITES_API_BASE: z.string().url().default('https://api.sprites.dev'),
-  SPRITES_DEFAULT_REGION: z.string().optional().default(''),
-
   DEFAULT_IDLE_SUSPEND_MINUTES: z.coerce.number().int().positive().default(30),
-  PER_USER_INSTANCE_CAP: z.coerce.number().int().positive().default(1),
 
   // Capability roll: when a deploy changes the MCP tool catalog, running
   // machines keep their stale tool set until their gateway restarts (the
@@ -151,8 +145,6 @@ export function loadConfig(): Config {
 }
 
 export type SokosumiEnv = 'development' | 'preprod' | 'mainnet';
-
-export const SOKOSUMI_ENVS: SokosumiEnv[] = ['development', 'preprod', 'mainnet'];
 
 export function isValidSokosumiEnv(v: unknown): v is SokosumiEnv {
   return v === 'development' || v === 'preprod' || v === 'mainnet';

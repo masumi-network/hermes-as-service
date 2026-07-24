@@ -15,7 +15,8 @@ import { notFound, conflict } from '../errors.js';
  * comes back with the image's SOUL.md, config.yaml, and skills.
  *
  * To roll out a profile change: edit docker/hermes-user/*, rebuild the
- * image (scripts/build-hermes-image.sh), bump FLY_MACHINE_IMAGE, then
+ * image (build/push instructions in Dockerfile.hermes-user's header), bump
+ * FLY_MACHINE_IMAGE, then
  * run this per instance. Running it without an image bump is still a
  * clean way to restore drifted /opt/data files.
  *
