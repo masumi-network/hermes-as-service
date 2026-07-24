@@ -64,6 +64,27 @@ const DENYLIST_V21 = [
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v22',
+    releasedAt: '2026-07-24',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'Default model → xiaomi/mimo-v2.5 (clean, un-confounded MiMo swap).',
+    changes: [
+      'Baked config.yaml model.default = xiaomi/mimo-v2.5 so the gateway self-reports the right model and keys its tool-enforcement / reasoning-echo handling to MiMo — the orchestrator TEXT_MODEL_OVERRIDE swap is invisible to the gateway, which made it a confounded A/B.',
+      'Same base, tool-use enforcement, denylist, and skill packs as v21.',
+    ],
+    commit: '12257fb',
+    skillPacks: [
+      'coreyhaines31/marketingskills',
+      'conorbronsdon/avoid-ai-writing',
+      'Romanescu11/hermes-skill-factory',
+      'AgriciDaniel/claude-ads',
+      'nowork-studio/toprank (seo, google-ads, meta-ads, gemini)',
+    ],
+  },
+  {
     tag: 'v21',
     releasedAt: '2026-06-24',
     baseImage: 'nousresearch/hermes-agent:v2026.5.16',
