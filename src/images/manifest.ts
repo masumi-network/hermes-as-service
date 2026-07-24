@@ -64,6 +64,27 @@ const DENYLIST_V21 = [
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v23',
+    releasedAt: '2026-07-24',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'SOUL refresh — orgs enumerable + personal credits readable (Sokosumi #3408).',
+    changes: [
+      'Rewrote the SOUL org/credits sections for Sokosumi PR #3408: orgs ARE enumerable (sokosumi_list_organizations), list_tasks/list_jobs span all workspaces, and the personal credit balance is readable via sokosumi_get_credits (org balances still judged by price). Cleared the stale "can\'t enumerate orgs / balances not visible" claims (some contradicted the cost rules that already said to check the balance).',
+      'Same base, model, tool-use enforcement, denylist, and skill packs as v22.',
+    ],
+    commit: 'b1bfce8',
+    skillPacks: [
+      'coreyhaines31/marketingskills',
+      'conorbronsdon/avoid-ai-writing',
+      'Romanescu11/hermes-skill-factory',
+      'AgriciDaniel/claude-ads',
+      'nowork-studio/toprank (seo, google-ads, meta-ads, gemini)',
+    ],
+  },
+  {
     tag: 'v22',
     releasedAt: '2026-07-24',
     baseImage: 'nousresearch/hermes-agent:v2026.5.16',
