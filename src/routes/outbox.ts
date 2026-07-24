@@ -10,6 +10,45 @@ import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+// Digest crons are ALWAYS surfaced — a daily brief / suggestions / research
+// intro is the whole point, never a no-op. The no-op filter below skips them.
+const ALWAYS_SURFACE_KINDS = new Set(['daily_brief', 'daily_suggestions', 'research_intro']);
+
+// A line that means "this cron tick had nothing for the user". Matched against
+// both the whole message and its LAST non-empty line, because the agent tends
+// to narrate its check ("No jobs stuck…") and then sign off with the sentinel
+// ("…\n\nok") — which the machine bridge's exact-match misses, leaking the
+// whole thing into chat. Bracketed tokens are also matched anywhere (they
+// never occur in genuine user-facing content).
+const SILENT_LINE_RE =
+  /^(\[(?:silent|noreply|noop|none)\]|ok|okay|done|none|n\/?a|nothing(?: (?:to (?:report|do)|stuck|found))?|no(?:thing)? action(?: (?:taken|needed|required))?|all (?:good|clear)|no updates?)\.?$/i;
+const BRACKET_MARKER_RE = /\[(?:silent|noreply|noop|none)\]/i;
+// Unambiguous no-op phrases that, when a message ENDS with them (even inside a
+// sentence), mark the whole thing as housekeeping — e.g. the credits watcher's
+// "I couldn't read balances — no action taken." Genuine notifications end on
+// the actionable thing, not on these.
+const NOOP_ENDING_RE =
+  /(no(?:thing)? action(?: (?:taken|needed|required))?|nothing (?:to (?:report|do)|stuck|found))\.?$/i;
+
+/**
+ * True when an outbox push is a background-cron no-op that must not reach the
+ * user's chat. Content-based (the passive bridge and the explicit outbox-send
+ * skill share `kind`, so kind alone can't distinguish them) but conservative:
+ * a genuine user message is never a bare "ok" / "[SILENT]" sentinel, and
+ * digest kinds are exempt outright.
+ */
+export function isCronNoOp(content: string, kind: string | undefined): boolean {
+  if (kind && ALWAYS_SURFACE_KINDS.has(kind)) return false;
+  const text = content.trim();
+  if (!text) return true;
+  if (BRACKET_MARKER_RE.test(text)) return true;
+  if (SILENT_LINE_RE.test(text)) return true;
+  if (NOOP_ENDING_RE.test(text)) return true;
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] ?? '';
+  return SILENT_LINE_RE.test(last);
+}
+
 // ============================================================================
 // Sokosumi-callable: GET /v1/instances/:userId/inbox  and  POST .../inbox/ack
 // ============================================================================
@@ -117,6 +156,21 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
   const parsed = enqueueBody.safeParse(raw);
   if (!parsed.success) {
     return c.json({ error: { message: parsed.error.issues[0]?.message ?? 'invalid body' } }, 400);
+  }
+  // Suppress background-cron no-ops ("Nothing stuck. ok", "[SILENT]", …) so a
+  // tick that found nothing never lands in the user's chat. The machine bridge
+  // already drops clean sentinel replies; this is the robust net for the
+  // common case where the agent narrates its check and then appends "ok".
+  if (isCronNoOp(parsed.data.content, parsed.data.kind)) {
+    logger.info(
+      {
+        userId: auth.row.userId,
+        kind: parsed.data.kind ?? null,
+        preview: parsed.data.content.replace(/\s+/g, ' ').slice(0, 120),
+      },
+      'outbox_suppressed_noop',
+    );
+    return c.json({ suppressed: true }, 200);
   }
   try {
     const result = await enqueueOutboxMessage({

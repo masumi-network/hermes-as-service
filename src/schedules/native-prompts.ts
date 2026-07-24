@@ -8,9 +8,13 @@ import { decryptSecret } from '../crypto.js';
  * THE scheduler; the orchestrator only holds visibility mirrors (which the
  * agent registers itself, exactly like its daily-brief at onboarding).
  *
- * The native path also gets quiet acknowledgements for free: the machine's
- * cron-outbox-bridge discards "ok"/"done"/"[silent]" replies, so a tick
- * with nothing to say never reaches the user's chat.
+ * The native path also gets quiet acknowledgements for free: a tick with
+ * nothing to say replies with the sentinel `[SILENT]`, which both the
+ * machine's cron-outbox-bridge and the orchestrator's outbox endpoint drop
+ * (the endpoint also catches narrated no-ops like "…nothing stuck.\n\nok"), so
+ * it never reaches the user's chat. Every no-report prompt below MUST tell the
+ * agent to reply with EXACTLY `[SILENT]` and nothing else — narrating the
+ * check ("I looked and found nothing") is what leaks.
  *
  * syncNativePromptCrons() reconciles a machine to the desired set for its
  * autonomy level: one idempotent agent turn that creates/updates the
@@ -27,7 +31,7 @@ const AUTONOMY_RANK: Record<Autonomy, number> = { low: 0, medium: 1, high: 2 };
  * the hourly reconciler cron — that's how spec changes roll out fleet-wide
  * without manual resyncs, and how onboarding-time sync failures self-heal.
  */
-export const NATIVE_PROMPTS_VERSION = 1;
+export const NATIVE_PROMPTS_VERSION = 2;
 
 interface NativePromptSpec {
   /** Cronjob name on the machine AND mirror-row name — stable identifier. */
@@ -59,7 +63,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'medium',
     summary: 'Every 4h — nudge about jobs waiting on your input for >24h.',
     prompt:
-      'Scan for Sokosumi jobs in AWAITING_INPUT status that have been stuck for >24h. If any exist, send a short reminder naming the job and what input it needs. If none are stuck, reply with the literal string "ok" and nothing else.',
+      'Scan for Sokosumi jobs in AWAITING_INPUT status that have been stuck for >24h. If any exist, send a short reminder naming the job and what input it needs. If none are stuck, reply with EXACTLY `[SILENT]` and nothing else — do not narrate what you checked.',
   },
   {
     name: 'low-credits-watcher',
@@ -68,7 +72,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'medium',
     summary: 'Daily 9am — heads-up when a workspace credit balance drops below 25.',
     prompt:
-      'Call sokosumi_get_credits (no org filter — check every workspace balance). If any workspace balance is below 25 credits, send a one-sentence heads-up naming the workspace, the balance, and the 1–2 most recent jobs that drove the spend. If all balances are 25 or above, reply only with "ok".',
+      'Call sokosumi_get_credits (no org filter — check every workspace balance). If any workspace balance is below 25 credits, send a one-sentence heads-up naming the workspace, the balance, and the 1–2 most recent jobs that drove the spend. If all balances are 25 or above — OR you cannot read the balances — reply with EXACTLY `[SILENT]` and nothing else (do not explain that you could not check).',
   },
   {
     name: 'followup-task-generator',
@@ -77,7 +81,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'high',
     summary: 'Daily 6am — create follow-up tasks from yesterday’s completed jobs.',
     prompt:
-      'For each Sokosumi job that completed in the last 24h, read the result and decide whether it implies a clearly defined next task. FIRST check sokosumi_list_tasks for an existing follow-up already covering it (the 5-minute continuation pass may have created one) — skip those. For each qualifying job: pick the right coworker via sokosumi_list_coworkers, create the follow-up task via sokosumi_create_task, and add a brief comment linking back to the source job. Skip jobs where the next step is ambiguous — do not invent work. End with a one-paragraph summary of what you created, or reply only "ok" if no follow-ups were warranted.',
+      'For each Sokosumi job that completed in the last 24h, read the result and decide whether it implies a clearly defined next task. FIRST check sokosumi_list_tasks for an existing follow-up already covering it (the 5-minute continuation pass may have created one) — skip those. For each qualifying job: pick the right coworker via sokosumi_list_coworkers, create the follow-up task via sokosumi_create_task, and add a brief comment linking back to the source job. Skip jobs where the next step is ambiguous — do not invent work. End with a one-paragraph summary of what you created, or reply with EXACTLY `[SILENT]` and nothing else if no follow-ups were warranted.',
   },
   {
     name: 'workspace-cleanup',
@@ -86,7 +90,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'high',
     summary: 'Sunday 11pm — surface stale drafts and unrefunded failed jobs.',
     prompt:
-      'Audit the user’s Sokosumi workspace: list DRAFT tasks untouched for >30 days and FAILED jobs older than 7 days that were never refunded. Offer to cancel/refund them in plain language — do not act without confirmation in chat. Reply only "ok" if neither category has anything.',
+      'Audit the user’s Sokosumi workspace: list DRAFT tasks untouched for >30 days and FAILED jobs older than 7 days that were never refunded. Offer to cancel/refund them in plain language — do not act without confirmation in chat. Reply with EXACTLY `[SILENT]` and nothing else if neither category has anything.',
   },
   {
     name: 'coworker-idle-nudge',
@@ -95,7 +99,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'high',
     summary: 'Monday 10am — flag coworkers unused for 30+ days.',
     prompt:
-      'List coworkers from sokosumi_list_coworkers who have no tasks assigned in the last 30 days. For each, write one sentence on what they could help with based on their capabilities. Cap at 3 coworkers; reply only "ok" if all are active.',
+      'List coworkers from sokosumi_list_coworkers who have no tasks assigned in the last 30 days. For each, write one sentence on what they could help with based on their capabilities. Cap at 3 coworkers; reply with EXACTLY `[SILENT]` and nothing else if all are active.',
   },
 ];
 
