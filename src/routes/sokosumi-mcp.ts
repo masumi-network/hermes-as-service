@@ -364,7 +364,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write',
     name: 'sokosumi_create_task',
     description:
-      "Create a new task and ASSIGN IT TO A COWORKER. FREE — tasks cost zero credits; spending happens later when jobs run under the task (that's sokosumi_create_job). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). organization_id: omit for the user's personal workspace (the default). Only pass one when the user has picked a specific workspace — you get that id from the workspace selector on a confirmation card, not by enumerating (you can't list the user's orgs). Tasks live on the board DRAFT → READY → RUNNING → COMPLETED.",
+      "Create a new task and ASSIGN IT TO A COWORKER. FREE — tasks cost zero credits; spending happens later when jobs run under the task (that's sokosumi_create_job). REQUIRED: coworker_id — call sokosumi_list_coworkers first and pick by specialty (research → Hannah, project mgmt → Elena, social → Pheme, coding → Alex). NEVER assign to Hermes (you're the coordinator). organization_id: omit for the user's personal workspace (the default). Only pass one when the user's intent points at a specific workspace — the id comes from sokosumi_list_organizations or their workspace pick on a confirmation card. Tasks live on the board DRAFT → READY → RUNNING → COMPLETED.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -376,7 +376,7 @@ const TOOLS_ALL: ToolDef[] = [
         },
         organization_id: {
           type: ['string', 'null'],
-          description: 'The workspace to file the task in. OMIT (or pass literal JSON null) for the user\'s PERSONAL workspace — this is the default and where the task goes when omitted. Pass an org id string ONLY to file in that org\'s shared workspace, and ONLY when you actually have that org\'s id — from the user\'s workspace pick on the confirmation card, or an org task/workspace they explicitly named. You canNOT look an org id up (org enumeration is unavailable), so never invent or guess one.',
+          description: 'The workspace to file the task in. OMIT (or pass literal JSON null) for the user\'s PERSONAL workspace — this is the default and where the task goes when omitted. Pass an org id string ONLY to file in that org\'s shared workspace when the user\'s intent points there — from their workspace pick on the confirmation card, an org task/workspace they explicitly named, or a lookup via sokosumi_list_organizations. Never invent or guess an org id.',
         },
         status: {
           type: 'string',
@@ -1004,9 +1004,10 @@ export async function executeTool(
       // workspace, so both `null` (explicit "Personal" pick) and `undefined`
       // (omitted) mean personal. Only a non-empty STRING is a specific org.
       // (Previously `undefined` fell into a legacy iterate-orgs branch that,
-      // with org enumeration now gone, failed to find even a valid personal
-      // coworker — "not found in any of the user's orgs" — so a plain
-      // "create a task for Hannah" errored.)
+      // while org enumeration was blocked (Sokosumi #3394; later reopened by
+      // #3408), failed to find even a valid personal coworker — "not found in
+      // any of the user's orgs" — so a plain "create a task for Hannah"
+      // errored.)
       const rawOrgArg = args['organization_id'];
       const organizationIdArg = typeof rawOrgArg === 'string' && rawOrgArg ? rawOrgArg : undefined;
       const isPersonalScope = !organizationIdArg;
@@ -1066,13 +1067,12 @@ export async function executeTool(
 
       if (organizationIdArg) {
         // Caller named the org — typically the user's workspace pick on a
-        // confirmation card. We can NO LONGER pre-validate that id against an
-        // org list: enumeration (/users/{id}/organizations) is session-only
-        // since Sokosumi #3394 and 403s for us. We don't need to either —
-        // listing coworkers SCOPED to the org is itself membership-gated
-        // server-side (a non-member gets 400 "User is not a member"), and a
-        // coworker that isn't whitelisted there simply won't be in the list.
-        // So trust the id and let the scoped call be the gate.
+        // confirmation card. We skip pre-validating the id against an org
+        // list (enumeration works again since Sokosumi #3408, but we don't
+        // need it here): listing coworkers SCOPED to the org is itself
+        // membership-gated server-side (a non-member gets 400 "User is not a
+        // member"), and a coworker that isn't whitelisted there simply won't
+        // be in the list. So trust the id and let the scoped call be the gate.
         try {
           const list = (await client
             .withOrganization(organizationIdArg)

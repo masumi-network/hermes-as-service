@@ -131,23 +131,22 @@ export async function purgeSokosumiMirror(
 /**
  * Thin client for Sokosumi's v1 API.
  *
- * Auth model: one org-wide coworker API key (held in Railway env), plus
- * `X-Delegation-User-Id` header that scopes each call to a specific end
- * user. No per-user OAuth needed.
+ * Auth model: per-env key held in Railway env — the orchestrator SERVICE
+ * token when configured, else the legacy coworker key — plus
+ * `X-Context-User-Id` (canonical) / `X-Delegation-User-Id` (legacy) headers
+ * that scope each call to a specific end user. No per-user OAuth needed.
  *
  * Used by:
  *   - sokosumi_sync onboarding step (pulls workspace state into Hermes memory)
  *   - daily recurring sync (refreshes memory once/day per user)
- *
- * Methods only cover the read endpoints we actually use. Write endpoints
- * (POST /tasks, POST /agents/:id/jobs, etc.) intentionally absent — those
- * land in Phase C with a user-consent flow.
+ *   - the sokosumi-mcp tool route (reads AND writes: create task, comment,
+ *     set status, create job, provide input — autonomy-gated upstream)
  */
 
 /**
  * A workspace the orchestrator can read. `id: null` is the user's personal
- * workspace — reachable with no org header, and the only scope guaranteed to
- * survive the loss of org enumeration (Sokosumi #3394).
+ * workspace — reachable with no org header and always present; org entries
+ * come from listOrganizations (reopened to the orchestrator by #3408).
  */
 export interface WorkspaceScope {
   id: string | null;
@@ -683,8 +682,10 @@ export class SokosumiClient {
  * onboarding sync step and the daily recurring sync. Returns null if the
  * Sokosumi API isn't configured (so callers can graceful-skip).
  *
- * Throttle / quota concerns: we make 5 parallel requests per user. Sokosumi
- * is the source of truth and will rate-limit if needed; we just propagate.
+ * Throttle / quota concerns: bounded fan-out — up to 5 workspaces in flight
+ * (mapLimit), each making 3 list calls plus up to 10 task-detail calls, plus
+ * 2 user-level calls. Sokosumi is the source of truth and will rate-limit if
+ * needed; we just propagate.
  */
 /**
  * A Sokosumi user can belong to multiple organizations. Tasks, jobs, and
@@ -709,8 +710,9 @@ export interface WorkspaceSnapshot {
   organizations: OrgWorkspace[];
   /** Credits live on the workspace's OWNER — the user for the personal
    *  workspace, the owning org for an org workspace. getCredits() reads only
-   *  the personal balance (all the orchestrator can reach; org credits need
-   *  org context we can't enumerate). */
+   *  the personal balance (the /users/{id}/credits endpoint is user-scoped;
+   *  org wallet balances aren't exposed to the orchestrator — judge org
+   *  spends by job price). */
   credits: unknown | null;
   /** Global agent catalog — same for every user. */
   agents: unknown[];

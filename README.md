@@ -1,13 +1,15 @@
 # Hermes Orchestrator
 
-A small HTTP service that provisions and manages **per-user Hermes Agent**
+A HTTP service that provisions and manages **per-user Hermes Agent**
 instances. Each user gets one isolated [Hermes Agent](https://github.com/NousResearch/hermes-agent)
-running in a hardware-isolated [Sprites.dev](https://sprites.dev) microVM
-(Firecracker). The orchestrator itself runs on Railway.
+running on its own always-on [Fly Machine](https://fly.io/docs/machines/)
+(Firecracker microVM, one Fly app per user). The orchestrator itself runs on
+Railway.
 
-**This is a backend service.** It has no UI. The Sokosumi web app calls it over
-HTTP to provision instances, then proxies user chat traffic to each user's
-private Hermes endpoint.
+**This is a backend service.** It has no end-user UI (there is an operator
+dashboard under `/admin`, Basic Auth). The Sokosumi web app calls it over HTTP
+to provision instances, then proxies user chat traffic through it to each
+user's private Hermes endpoint.
 
 ## Architecture
 
@@ -16,46 +18,58 @@ private Hermes endpoint.
    │     Sokosumi     │ ───────────────────▶ │  Hermes Orchestrator │
    │   (web app)      │                      │  (this service, on   │
    │                  │ ◀─── instance state  │   Railway)           │
-   └────────┬─────────┘                      └─────────┬────────────┘
-            │                                          │  REST
-            │                                          ▼
-            │                                ┌────────────────────┐
-            │                                │   Sprites.dev API  │
-            │                                └─────────┬──────────┘
-            │  OpenAI-format chat                      │ create / fs / exec / services
-            │  (Bearer apiServerKey)                   ▼
-            │                          ┌───────────────────────────────┐
-            └─────────────────────────▶│   User Sprite (microVM)       │
-                                       │   Hermes Agent on :8642       │
-                                       │   /opt/data persistent volume │
+   └──────────────────┘                      └─────────┬────────────┘
+                                                       │  Machines API
+                                                       ▼
+                                       ┌───────────────────────────────┐
+                                       │  Per-user Fly Machine         │
+                                       │  (image: hermes-user-image)   │
+                                       │  Hermes Agent on :8642        │
+                                       │  /opt/data persistent volume  │
                                        └───────────────────────────────┘
 ```
 
+Key flows:
+- **Chat**: Sokosumi → `POST /v1/proxy/:userId/v1/chat/completions` → the
+  user's machine. The proxy captures transcripts, streams progress, and runs
+  post-turn guards.
+- **LLM traffic**: each machine's `OPENROUTER_BASE_URL` points back at the
+  orchestrator (`/v1/llm/:instanceId`), so all model traffic flows through the
+  llm-proxy (model override, provider routing, usage metering, pricing).
+- **MCP tools**: each machine gets a per-instance Sokosumi MCP server from the
+  orchestrator (`/v1/mcp/:instanceId`) — taskboard read/write tools,
+  autonomy-gated (medium autonomy intercepts writes into confirmation cards).
+- **Warm pool**: signup speed comes from pre-booted stopped machines
+  (`WARM_POOL_TARGET`); provisioning from the pool takes seconds, a cold
+  create ~1–2 min.
+
 Per-user isolation properties:
-- One Firecracker microVM per user. Never shared.
-- Per-instance random `API_SERVER_KEY` (32 bytes), encrypted at rest in Postgres
-  with libsodium secretbox.
-- `OPENROUTER_API_KEY` is orchestrator-owned. It's written into the user
-  sprite's `/opt/data/.env` so Hermes can call OpenRouter — the user never
-  sees it.
-- The sprite's public URL is the only ingress; auth is the `API_SERVER_KEY`
+- One Firecracker microVM per user (one Fly app per user). Never shared.
+- Per-instance random `API_SERVER_KEY` (32 bytes), encrypted at rest in
+  Postgres with libsodium secretbox.
+- `OPENROUTER_API_KEY` is orchestrator-owned; machines only ever see a
+  per-instance proxy URL, never the upstream key.
+- The machine's public URL is the only ingress; auth is the `API_SERVER_KEY`
   bearer.
 
 ## Environment variables
 
+`src/config.ts` is the source of truth (zod-validated at boot). The
+must-haves:
+
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | no | Orchestrator HTTP port. Default `8080`. |
-| `LOG_LEVEL` | no | pino level. Default `info`. |
-| `ORCHESTRATOR_API_TOKEN` | **yes** | Shared secret. Sokosumi sends this as `Authorization: Bearer …` on every request. Use ≥32 random bytes. |
-| `DATABASE_URL` | **yes** | Neon Postgres URL with `sslmode=require`. |
-| `SPRITES_API_TOKEN` | **yes** | Token from sprites.dev → Settings → API tokens. |
-| `SPRITES_API_BASE` | no | Default `https://api.sprites.dev`. |
-| `SPRITES_DEFAULT_REGION` | no | Empty = sprites' default region. |
-| `DEFAULT_IDLE_SUSPEND_MINUTES` | no | Idle threshold for the bookkeeping cron. Default `30`. |
-| `PER_USER_INSTANCE_CAP` | no | Hard cap per user. Default `1`. |
-| `OPENROUTER_API_KEY` | **yes** | Orchestrator-owned. Injected into each user sprite. |
-| `MASTER_ENCRYPTION_KEY` | **yes** | 32 random bytes, base64-encoded. Encrypts `apiServerKey` at rest. |
+| `ORCHESTRATOR_API_TOKEN` | **yes** | Shared secret. Sokosumi sends this as `Authorization: Bearer …`. |
+| `DATABASE_URL` | **yes** | Postgres URL. |
+| `FLY_API_TOKEN` | **yes** | Fly Machines API token. |
+| `FLY_MACHINE_IMAGE` | **yes** | Per-user image ref, e.g. `registry.fly.io/hermes-user-image:v23`. |
+| `ORCHESTRATOR_PUBLIC_URL` | **yes** | Public URL of this service (machines call back through it). |
+| `OPENROUTER_API_KEY` | **yes** | Orchestrator-owned upstream LLM key. |
+| `MASTER_ENCRYPTION_KEY` | **yes** | 32 random bytes, base64. Encrypts secrets at rest. |
+| `ADMIN_PASSWORD` | **yes** | Basic Auth password for `/admin` (user `admin`). |
+| `SOKOSUMI_ORCHESTRATOR_API_KEY_*` | per env | Sokosumi service token per env (mainnet/preprod/dev). |
+| `TEXT_MODEL_OVERRIDE` | no | Force the fleet's text model without an image rebuild. |
+| `WARM_POOL_TARGET` | no | Warm-pool size; `0` disables the pool. |
 
 Generate `MASTER_ENCRYPTION_KEY`:
 ```bash
@@ -64,9 +78,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 ## API
 
-All endpoints require `Authorization: Bearer $ORCHESTRATOR_API_TOKEN`. Errors
-are returned as `application/problem+json` with `userId` included for
-correlation when relevant.
+All `/v1/*` endpoints require `Authorization: Bearer $ORCHESTRATOR_API_TOKEN`
+(machine-facing routes like the llm/mcp proxies authenticate with per-instance
+keys instead). Errors are `application/problem+json`.
 
 ### Provision
 
@@ -79,8 +93,9 @@ curl -X POST https://orchestrator.example.com/v1/instances \
 # { "instanceId": "…", "status": "provisioning" }
 ```
 
-Idempotent on `userId`. Returns the existing record if one already exists.
-Bootstrap runs asynchronously (~5–10 min); poll `GET` for `status: running`.
+Idempotent on `userId`. Provisioning is async — seconds from the warm pool,
+~1–2 min cold; poll `GET` until `status` reaches `infrastructure_ready`
+(setup wizard) and later `ready`/`running` (after onboarding).
 
 ### Get state
 
@@ -88,123 +103,69 @@ Bootstrap runs asynchronously (~5–10 min); poll `GET` for `status: running`.
 curl https://orchestrator.example.com/v1/instances/u_abc123 \
   -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN"
 # { "status": "running",
-#   "endpointUrl": "https://hermes-u-abc123-xxxxxx.sprites.app",
-#   "lastActivityAt": "2026-05-12T14:21:00.000Z" }
+#   "model": "xiaomi/mimo-v2.5",
+#   "endpointUrl": "https://hermes-u-abc123.fly.dev",
+#   "transitioning": false, "integrations": [...], "pendingConfirmations": [...] }
 ```
 
-### Resume / Suspend
+### More instance endpoints
+
+- `POST …/resume` / `POST …/suspend` — bookkeeping + machine stop/start.
+- `POST …/onboard` — run the onboarding pipeline (persona, memory, skills).
+- `POST …/secrets` — set a per-user secret (restarts the machine's Hermes).
+- `GET …/key` — the per-instance bearer Sokosumi uses for direct chat.
+- `GET …/inbox` — outbox messages (agent-initiated pushes, cron results).
+- `GET/PATCH/DELETE …/schedules…` — the user's scheduled tasks (orchestrator
+  mirror + native machine crons).
+- `GET …/confirmations` + `POST …/confirmations/:id/approve|reject` —
+  medium-autonomy write approvals.
+- `DELETE /v1/instances/:userId` — destroy machine, app, and DB row.
+
+### Chat proxy
 
 ```bash
-curl -X POST https://orchestrator.example.com/v1/instances/u_abc123/resume \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN"
-# { "endpointUrl": "…", "status": "running" }
-
-curl -X POST https://orchestrator.example.com/v1/instances/u_abc123/suspend \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN"
-# { "status": "suspended" }
-```
-
-Sprites releases the microVM's compute on idle automatically and wakes it
-sub-second on inbound HTTP — `/resume` is mostly a bookkeeping flip so
-Sokosumi knows the instance is allowed to receive traffic again.
-
-### Set per-user secret
-
-```bash
-curl -X POST https://orchestrator.example.com/v1/instances/u_abc123/secrets \
+curl $ORCH/v1/proxy/u_abc123/v1/chat/completions \
   -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"key":"EXA_API_KEY","value":"…"}'
-# 204
-```
-
-Reserved keys (`API_SERVER_*`, `HERMES_HOME`, `OPENROUTER_API_KEY`) are
-rejected — the orchestrator owns those. Writing a secret restarts the Hermes
-service inside the sprite so the new value takes effect.
-
-### Get bearer key
-
-```bash
-curl https://orchestrator.example.com/v1/instances/u_abc123/key \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN"
-# { "apiServerKey": "…" }
-```
-
-Sokosumi uses this to call the user's Hermes endpoint:
-```bash
-curl $ENDPOINT_URL/v1/chat/completions \
-  -H "Authorization: Bearer $API_SERVER_KEY" \
-  -H "Content-Type: application/json" \
   -d '{"model":"hermes-agent","messages":[{"role":"user","content":"hi"}]}'
-```
-
-### Destroy
-
-```bash
-curl -X DELETE https://orchestrator.example.com/v1/instances/u_abc123 \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN"
-# 204 — sprite and DB row deleted
 ```
 
 ## Local development
 
 ```bash
 npm install
-cp .env.example .env
-# fill in DATABASE_URL, SPRITES_API_TOKEN, OPENROUTER_API_KEY, MASTER_ENCRYPTION_KEY,
-# ORCHESTRATOR_API_TOKEN
+cp .env.example .env   # fill in the required vars above
 
-npx prisma migrate dev --name init
+npx prisma db push     # this repo uses db push (no migration files)
 npm run dev
-```
-
-Health check:
-```bash
-curl http://localhost:8080/health
+npm test
 ```
 
 ## Deployment (Railway)
 
-```bash
-railway login
-railway link            # link to your project
-railway up              # builds from Dockerfile and deploys
+Deploys are **manual** — pushing to git does NOT deploy:
 
-# Then in Railway dashboard → Variables, set every entry from .env.example.
-# Most importantly: DATABASE_URL (from Railway-Postgres or Neon),
-# SPRITES_API_TOKEN, OPENROUTER_API_KEY, MASTER_ENCRYPTION_KEY,
-# ORCHESTRATOR_API_TOKEN.
+```bash
+railway up --detach
+# verify: /admin/version bootedAt changed
 ```
 
-The container runs `prisma migrate deploy` on boot.
-
-## Per-user image (chat-only)
-
-This service does **not** push a Docker image to Sprites — Sprites is a
-stateful-microVM platform, not a container registry. Each user sprite is
-bootstrapped by `scripts/bootstrap-hermes-sprite.sh`, which:
-
-1. Installs system Python + uv + git inside the sprite.
-2. Clones [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent).
-3. Runs `uv sync --frozen` for the **core extras only** — no Playwright, no
-   Node, no browser binaries. (Chat-only profile.)
-4. Writes `/opt/data/config.yaml` disabling `terminal`, `shell`, `browser`,
-   `web`, `playwright`, `filesystem_write`.
-
-The orchestrator then writes `/opt/data/.env` with `API_SERVER_*` and
-`OPENROUTER_API_KEY`, registers the Hermes process as a sprite **service**
-on `http_port: 8642`, and the sprite's public URL routes traffic there.
+The container runs `prisma db push` on boot, so additive schema changes apply
+automatically. The per-user image is built separately — see
+`Dockerfile.hermes-user`'s header for the build/push commands — then bump
+`FLY_MACHINE_IMAGE` and roll instances (admin → instance → sync-config).
 
 ## Decisions worth knowing
 
-- **Why Sprites and not Fly:** Fly Machines is the brief's reference design;
-  Sprites gives equivalent Firecracker isolation, native auto-suspend, and a
-  simpler "no Docker image to push" deployment model.
-- **No Docker registry step:** Sprites can't run arbitrary OCI images. The
-  Hermes install happens inside the running sprite via the bootstrap script.
-- **Why bootstrap-on-first-boot vs. snapshot fork:** Sprites' checkpoints are
-  for in-place rollback only; you cannot fork a sprite from a checkpoint of
-  another. First-boot install costs ~10 min per user; the cost is paid once,
-  then the sprite is reused forever.
-- **Suspend is automatic:** Sprites pulls compute on idle. The orchestrator's
-  cron is bookkeeping-only — it doesn't actively stop machines.
+- **Always-on machines** (`auto_stop_machines: off`): Hermes' gateway daemon
+  must stay up for native cron and MCP; idle cost is accepted.
+- **Warm pool**: pre-booted stopped machines make signup fast;
+  `WARM_POOL_TARGET=0` is the kill switch.
+- **Model pinning**: the per-user image pins `nousresearch/hermes-agent` to a
+  tag that supports `agent.tool_use_enforcement` (anti-narration guard); the
+  llm-proxy can override the served model fleet-wide via
+  `TEXT_MODEL_OVERRIDE` without an image rebuild.
+- **Two cron systems**: native machine cron (Hermes' own scheduler; the
+  orchestrator mirrors + reconciles specs) plus orchestrator sweeps
+  (taskboard assistant, input responder, urgent interrupts, capability
+  rolls). `/admin/crons` shows both.
