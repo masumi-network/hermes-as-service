@@ -65,8 +65,12 @@ esac
 : "${ORCHESTRATOR_OUTBOX_TOKEN:?ORCHESTRATOR_OUTBOX_TOKEN not set}"
 
 # POST to the orchestrator. Use jq -nR to safely encode the multi-line
-# assistant response as a JSON string.
-body="$(jq -nR --arg c "$response" --arg k "$kind" '{content: $c, kind: $k}')"
+# assistant response as a JSON string. `source` carries the exact cron job
+# name so the orchestrator can attribute the delivery to a specific native
+# cron and stamp its mirror's lastRunAt (coarse `kind` can't distinguish e.g.
+# stuck-jobs-reminder from low-credits-watcher).
+body="$(jq -nR --arg c "$response" --arg k "$kind" --arg s "$job_name" \
+  '{content: $c, kind: $k} + (if $s == "" then {} else {source: $s} end)')"
 
 curl -sS -m 15 \
   -X POST \

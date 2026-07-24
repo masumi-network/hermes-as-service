@@ -147,6 +147,10 @@ const sprite = new Hono();
 const enqueueBody = z.object({
   content: z.string().min(1).max(128 * 1024), // server-side clip to 32 KB
   kind: z.string().min(1).max(64).optional(),
+  /** The originating native-cron job name (from the machine's cron-outbox
+   *  bridge). Lets us attribute a delivery to a specific native cron and stamp
+   *  its mirror's lastRunAt — even when the tick was a suppressed no-op. */
+  source: z.string().min(1).max(120).optional(),
 });
 
 sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
@@ -156,6 +160,17 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
   const parsed = enqueueBody.safeParse(raw);
   if (!parsed.success) {
     return c.json({ error: { message: parsed.error.issues[0]?.message ?? 'invalid body' } }, 400);
+  }
+  // A native cron fired — stamp its mirror's lastRunAt so the admin shows a
+  // real "last ran", regardless of whether it delivered or suppressed a no-op.
+  // Fire-and-forget; matched by (userId, name) on the system_prompt mirror.
+  if (parsed.data.source) {
+    void prisma.scheduledTask
+      .updateMany({
+        where: { userId: auth.row.userId, name: parsed.data.source, kind: 'system_prompt' },
+        data: { lastRunAt: new Date() },
+      })
+      .catch((err) => logger.warn({ err, source: parsed.data.source }, 'native_cron_mirror_stamp_failed'));
   }
   // Suppress background-cron no-ops ("Nothing stuck. ok", "[SILENT]", …) so a
   // tick that found nothing never lands in the user's chat. The machine bridge
@@ -189,6 +204,7 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
       event: 'outbox_pushed',
       detail: {
         kind: parsed.data.kind,
+        source: parsed.data.source ?? null,
         chars: parsed.data.content.length,
         preview: parsed.data.content.replace(/\s+/g, ' ').slice(0, 200),
       },

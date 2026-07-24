@@ -1810,16 +1810,54 @@ router.get('/admin/crons', async (c) => {
     </tr>`)
     .join('');
 
+  // Native machine crons — run ON each machine via Hermes' own scheduler
+  // (isolated sessions). The orchestrator can't tick them, but it holds a
+  // per-instance mirror (ScheduledTask kind=system_prompt) and hears their
+  // delivered output via the cron-outbox bridge, which stamps lastRunAt.
+  const { NATIVE_PROMPTS } = await import('../schedules/native-prompts.js');
+  const nativeStats = new Map(
+    (
+      await prisma.scheduledTask.groupBy({
+        by: ['name'],
+        where: { kind: 'system_prompt', enabled: true },
+        _count: { _all: true },
+        _max: { lastRunAt: true },
+      })
+    ).map((g) => [g.name, { count: g._count._all, lastRun: g._max.lastRunAt }]),
+  );
+  const nativeRows = NATIVE_PROMPTS.map((p) => {
+    const st = nativeStats.get(p.name);
+    const lastRun = st?.lastRun ?? null;
+    return `<tr>
+      <td class="mono">${esc(p.name)}</td>
+      <td class="mono">${esc(cadenceLabel(p.cronExpr))}${p.localTime ? ' <span class="dim">local</span>' : ''}</td>
+      <td class="mono">${esc(p.minAutonomy)}+</td>
+      <td class="num" title="Instances with this cron installed + enabled">${st?.count ?? 0}</td>
+      <td class="mono" title="Last time it pushed output to a user's chat">${lastRun ? esc(relTime(lastRun)) : '<span class="dim">— quiet</span>'}</td>
+      <td class="dim" style="font-size:11px;max-width:420px">${esc(p.summary)}</td>
+    </tr>`;
+  }).join('');
+
   const body = `
     <h1>Crons</h1>
-    <p class="dim">The orchestrator's background jobs — fleet-wide, one process serves every instance. Each row shows two different times: <strong>last tick</strong> = the most recent scheduled wake-up (proves the cron is alive, even when there was nothing to do) and <strong>last did work</strong> = the most recent tick that actually acted. Most ticks find nothing — that's normal, not a stalled cron. Per-instance results live on each instance's detail page.</p>
+    <p class="dim">Two schedulers, one dashboard. <strong>Orchestrator sweeps</strong> run fleet-wide in this process; <strong>native machine crons</strong> run on each user's machine via Hermes' own scheduler. For sweeps, <strong>last tick</strong> = the most recent wake-up (alive even when idle), <strong>last did work</strong> = the most recent tick that acted. Most ticks find nothing — normal, not stalled.</p>
 
+    <h2>Orchestrator sweeps <span class="dim" style="font-weight:400;font-size:12px">(fleet machinery + reactive helpers, run here)</span></h2>
     <div class="card" style="padding:0;overflow:hidden">
       <table>
         <thead><tr><th>Job</th><th>Schedule</th><th>Last tick</th><th>Status</th><th>Last did work</th><th>Last tick result</th><th>Output</th></tr></thead>
         <tbody>${registryRows || '<tr><td colspan="7" class="empty">No crons registered.</td></tr>'}</tbody>
       </table>
     </div>
+
+    <h2>Native machine crons <span class="dim" style="font-weight:400;font-size:12px">(the assistant's own scheduled tasks, run on each machine — isolated sessions)</span></h2>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead><tr><th>Job</th><th>Schedule</th><th>Min autonomy</th><th>Installed on</th><th>Last delivered</th><th>What it does</th></tr></thead>
+        <tbody>${nativeRows || '<tr><td colspan="6" class="empty">No native crons in the spec.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <p class="dim" style="font-size:11px">"Last delivered" is the last time a cron pushed something to a user's chat. A cron with nothing to report stays silent — so "quiet" can mean working-but-nothing-to-say, not broken. Precise per-cron attribution requires the next image roll (the machine bridge now sends each cron's name); the deliveries feed below shows real output today.</p>
 
     <h2>Work log <span class="dim" style="font-weight:400;font-size:12px">(only ticks that acted or failed — routine empty ticks aren't listed)</span></h2>
     <form method="get" action="/admin/crons" class="actions">
