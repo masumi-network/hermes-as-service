@@ -7,6 +7,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { HttpError, notFound, problemJson, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
+import { runGroundTruthGuard } from '../notifications/groundtruth-guard.js';
 import { subscribeProgress, type ProgressEvent } from './progress-bus.js';
 
 const router = new Hono();
@@ -238,6 +239,17 @@ async function captureNonStreaming(respText: string, ctx: CaptureCtx): Promise<v
     event: errorMessage ? 'chat_failed' : 'chat_proxied',
     detail: { requestId: ctx.requestId, latencyMs, status: ctx.upstreamStatus, ...(errorMessage ? { errorMessage } : {}) },
   });
+  // Ground-truth guard: catch a reply that claims a Sokosumi write with no real
+  // tool call this turn. Fire-and-forget; never blocks or fails the response.
+  if (!errorMessage && content) {
+    void runGroundTruthGuard({
+      instanceId: ctx.instanceId,
+      userId: ctx.userId,
+      requestId: ctx.requestId,
+      turnStartedAt: ctx.startedAt,
+      assistantText: content,
+    });
+  }
 }
 
 /**
@@ -735,6 +747,16 @@ async function captureSseStream(
       ...(errorMessage ? { errorMessage } : {}),
     },
   });
+  // Ground-truth guard (streaming path) — see captureNonStreaming.
+  if (!errorMessage && assembled) {
+    void runGroundTruthGuard({
+      instanceId: ctx.instanceId,
+      userId: ctx.userId,
+      requestId: ctx.requestId,
+      turnStartedAt: ctx.startedAt,
+      assistantText: assembled,
+    });
+  }
 }
 
 function findLastByRole(

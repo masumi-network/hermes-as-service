@@ -123,6 +123,14 @@ const schema = z.object({
     .optional()
     .default('true')
     .transform((v) => v.trim().toLowerCase() !== 'false'),
+  // Kill switch for the chat ground-truth guard (catches the agent claiming a
+  // Sokosumi write it never performed and fires a self-heal turn). Default on;
+  // set to "off" to disable without touching code.
+  GROUNDTRUTH_GUARD: z
+    .string()
+    .optional()
+    .default('on')
+    .transform((v) => v.trim().toLowerCase() !== 'off'),
 });
 
 export type Config = z.infer<typeof schema>;

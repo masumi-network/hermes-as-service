@@ -4,6 +4,7 @@ import type { Context } from 'hono';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
+import { recordEvent } from '../audit.js';
 import { SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 
@@ -611,6 +612,20 @@ export async function callTool(
     });
   }
 
+  if (toolDef && toolDef.access !== 'read') {
+    // A write tool that actually reaches execution. Record a ground-truth
+    // ledger entry BEFORE returning so the chat proxy's confabulation guard
+    // can tell a real write from the agent merely narrating one. A throw from
+    // executeTool (e.g. task not found) skips this — only real writes count.
+    const out = await executeTool(name, args, ctx);
+    await recordEvent({
+      userId: ctx.userId,
+      instanceId: ctx.instanceId,
+      event: 'sokosumi_write',
+      detail: { toolName: name },
+    });
+    return out;
+  }
   return executeTool(name, args, ctx);
 }
 

@@ -54,7 +54,12 @@ export type ProvisionEventType =
   | 'skill_installed'
   | 'skill_install_queued'
   | 'skill_removed'
-  | 'outbox_pushed';
+  | 'outbox_pushed'
+  // A Sokosumi write tool actually executed (comment/status/create/job/input).
+  // The chat proxy's ground-truth guard checks these to catch the agent
+  // CLAIMING a write it never performed.
+  | 'sokosumi_write'
+  | 'confabulation_suspected';
 
 /**
  * Persist a lifecycle event to ProvisionEvent. Never throws — auditing must
