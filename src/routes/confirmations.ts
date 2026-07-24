@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { isValidSokosumiEnv } from '../config.js';
+import { SokosumiClient } from '../sokosumi/client.js';
 import {
   approveConfirmation,
   listPendingConfirmations,
@@ -153,8 +155,6 @@ router.get('/v1/instances/:userId/confirmations', async (c) => {
   const nameById = new Map<string, string>();
   if (orgIds.size > 0) {
     try {
-      const { SokosumiClient } = await import('../sokosumi/client.js');
-      const { isValidSokosumiEnv } = await import('../config.js');
       const env = isValidSokosumiEnv(instance.sokosumiEnv) ? instance.sokosumiEnv : null;
       const orgs = await new SokosumiClient(userId, env).listOrganizations();
       for (const o of orgs) if (o.name) nameById.set(o.id, o.name);

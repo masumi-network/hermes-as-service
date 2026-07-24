@@ -6,6 +6,8 @@ import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { buildPersonaDirective, type Personality } from './profile.js';
+import { syncNativePromptCrons } from '../schedules/native-prompts.js';
+import { syncSystemSchedules } from '../schedules/system-schedules.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
 export interface OnboardingStep {
@@ -289,7 +291,6 @@ export async function runOnboarding(
   // task-augmentation) and the autonomy-gated recurring prompts
   // (morning-brief, weekly-wrap, etc.). Idempotent.
   try {
-    const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
     const integrationProviders = new Set(connectedProviders);
     const hasMailOrCalendar =
       integrationProviders.has('gmail') ||
@@ -325,7 +326,6 @@ export async function runOnboarding(
   // status flip above — the sync helper refuses non-ready instances.
   // Fire-and-forget: the agent turn is slow and onboarding is done.
   try {
-    const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
     void syncNativePromptCrons(row.id).catch(() => {});
   } catch (err) {
     log.warn({ err }, 'native_prompts_kickoff_failed');

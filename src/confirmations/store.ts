@@ -2,6 +2,9 @@ import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { notifyMasumi, shortId } from '../notify/masumi.js';
 import type { InstanceContext } from '../routes/sokosumi-mcp.js';
+import { isValidSokosumiEnv } from '../config.js';
+import { enqueueOutboxMessage } from '../outbox/enqueue.js';
+import { runApprovalContinuation } from './continuation.js';
 
 interface CreateInput {
   instanceId: string;
@@ -286,7 +289,6 @@ export async function approveConfirmation(
   }
 
   const { executeTool } = await import('../routes/sokosumi-mcp.js');
-  const { isValidSokosumiEnv } = await import('../config.js');
   const ctx: InstanceContext = {
     instanceId: instance.id,
     userId: instance.userId,
@@ -351,7 +353,6 @@ export async function approveConfirmation(
 
   const pushAnnouncement = async (head: string): Promise<void> => {
     try {
-      const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
       await enqueueOutboxMessage({
         instanceId: instance.id,
         userId: instance.userId,
@@ -373,7 +374,6 @@ export async function approveConfirmation(
     void (async () => {
       let summary: string | null = null;
       try {
-        const { runApprovalContinuation } = await import('./continuation.js');
         summary = await runApprovalContinuation({
           instance: {
             id: instance.id,
@@ -426,7 +426,6 @@ export async function rejectConfirmation(
   try {
     const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
     if (instance && !instance.destroyedAt) {
-      const { enqueueOutboxMessage } = await import('../outbox/enqueue.js');
       const reasonText = reason ? ` Reason: "${reason}".` : '';
       await enqueueOutboxMessage({
         instanceId: instance.id,

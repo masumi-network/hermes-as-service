@@ -86,7 +86,7 @@ Patrick's machine.
       → `src/admin/helpers.ts`; images section → `src/admin/images-routes.ts`;
       tests section → `src/admin/tests-routes.ts`. Pure moves; registration
       order preserved (images/compare before images/:tag).
-- [ ] **4.3 Hoist the proven-acyclic dynamic imports** to top-level.
+- [x] **4.3 Hoist the proven-acyclic dynamic imports** to top-level.
       NEVER hoist `confirmations/store ↔ routes/sokosumi-mcp` (real cycle).
       Post-listen recovery blocks in index.ts keep their call sites; leave
       intentional lazy-loads the audit documented.

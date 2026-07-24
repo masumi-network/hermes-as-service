@@ -32,6 +32,9 @@ process.on('unhandledRejection', (reason) => {
 import { adminRouter } from './admin/routes.js';
 import { restoreMasumiProfile } from './notify/masumi-restore.js';
 import { sendMasumiTest, masumiConfigured } from './notify/masumi.js';
+import { recoverStrandedTestRuns } from './bench/runner.js';
+import { migrateDevelopmentEnvRows } from './provision/env-migration.js';
+import { recoverStrandedOnboardings } from './provision/onboarding-recovery.js';
 import {
   startIdleSuspendCron,
   startSokosumiDailySyncCron,
@@ -116,7 +119,6 @@ startMcpToolsRollCron();
 // On boot, resume any onboarding pipelines that died with a previous pod.
 void (async () => {
   try {
-    const { recoverStrandedOnboardings } = await import('./provision/onboarding-recovery.js');
     await recoverStrandedOnboardings();
   } catch (err) {
     logger.error({ err }, 'onboarding_recovery_threw');
@@ -127,7 +129,6 @@ void (async () => {
 // can't survive a restart, so a lingering "running" row is always stale).
 void (async () => {
   try {
-    const { recoverStrandedTestRuns } = await import('./bench/runner.js');
     await recoverStrandedTestRuns();
   } catch (err) {
     logger.error({ err }, 'test_run_recovery_threw');
@@ -139,7 +140,6 @@ void (async () => {
 // failing with "env not configured" after we tightened the contract.
 void (async () => {
   try {
-    const { migrateDevelopmentEnvRows } = await import('./provision/env-migration.js');
     await migrateDevelopmentEnvRows();
   } catch (err) {
     logger.error({ err }, 'sokosumi_env_migration_threw');

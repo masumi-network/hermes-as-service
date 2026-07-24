@@ -24,6 +24,18 @@ import { renderChatMsg, renderEventRow, userLabel, compactText, shortProvider, d
 import { reconcileImageTags } from '../images/reconcile.js';
 import { TEST_SUITES, findSuite } from '../bench/suites.js';
 import { startSuiteRun } from '../bench/runner.js';
+import { getCronRegistry } from '../cron.js';
+import { decryptSecret } from '../crypto.js';
+import { runEodReportForInstance } from '../eod-report/sweep.js';
+import { FlyClient } from '../fly/client.js';
+import { notifyIntegrationConnected } from '../integrations/notify-connected.js';
+import { runOnboarding } from '../provision/onboarding.js';
+import { destroyInstance, resumeInstance, suspendInstance } from '../provision/provision.js';
+import { syncConfig } from '../provision/sync-config.js';
+import { handleToolsListResponse, isComposioUpstream } from '../routes/mcp-proxy.js';
+import { NATIVE_PROMPTS, syncNativePromptCrons } from '../schedules/native-prompts.js';
+import { syncSystemSchedules } from '../schedules/system-schedules.js';
+import { replayInstalledSkills } from '../skills/manager.js';
 
 const router = new Hono();
 
@@ -939,7 +951,6 @@ View them with the Fly CLI:
 
 router.post('/admin/instances/:userId/resume', async (c) => {
   const userId = c.req.param('userId');
-  const { resumeInstance } = await import('../provision/provision.js');
   try {
     await resumeInstance(userId);
   } catch (err) {
@@ -950,7 +961,6 @@ router.post('/admin/instances/:userId/resume', async (c) => {
 
 router.post('/admin/instances/:userId/suspend', async (c) => {
   const userId = c.req.param('userId');
-  const { suspendInstance } = await import('../provision/provision.js');
   try {
     await suspendInstance(userId);
   } catch (err) {
@@ -961,7 +971,6 @@ router.post('/admin/instances/:userId/suspend', async (c) => {
 
 router.post('/admin/instances/:userId/destroy', async (c) => {
   const userId = c.req.param('userId');
-  const { destroyInstance } = await import('../provision/provision.js');
   try {
     await destroyInstance(userId);
   } catch (err) {
@@ -982,7 +991,6 @@ router.post('/admin/instances/:userId/destroy', async (c) => {
  */
 const hardReset = async (c: Context) => {
   const userId = c.req.param('userId');
-  const { FlyClient } = await import('../fly/client.js');
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.json({ ok: true, userId, note: 'no row to delete' });
   if (row.spriteName) {
@@ -1014,7 +1022,6 @@ const retryOnboarding = async (c: Context) => {
     where: { id: row.id },
     data: { status: 'infrastructure_ready', onboardingSteps: steps as object, errorMessage: null },
   });
-  const { runOnboarding } = await import('../provision/onboarding.js');
   void runOnboarding(row.id, {}).catch((err) =>
     logger.error({ err, userId, instanceId: row.id }, 'admin_retry_onboarding_failed'),
   );
@@ -1029,7 +1036,6 @@ router.post('/admin/instances/:userId/retry-onboarding', retryOnboarding);
 
 router.post('/admin/instances/:userId/sync-config', async (c) => {
   const userId = c.req.param('userId');
-  const { syncConfig } = await import('../provision/sync-config.js');
   try {
     await syncConfig(userId);
   } catch (err) {
@@ -1113,9 +1119,6 @@ router.post('/admin/instances/:userId/test/mcp-integration', async (c) => {
     where: { userId_provider: { userId: row.userId, provider } },
   });
   if (!integ) return c.json({ error: `no integration for ${provider}` }, 404);
-
-  const { decryptSecret } = await import('../crypto.js');
-  const { isComposioUpstream, handleToolsListResponse } = await import('../routes/mcp-proxy.js');
   const mcpUrl = await decryptSecret(integ.mcpUrl);
   const cfg = loadConfig();
   const upstreamHeaders: Record<string, string> = {
@@ -1207,7 +1210,6 @@ function extractToolNamesAnyFormat(body: string): string[] {
 router.post('/admin/maintenance/resync-system-schedules', async (c) => {
   const all = c.req.query('all') === '1';
   const oneUser = c.req.query('userId') ?? undefined;
-  const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
   const where = all
     ? { destroyedAt: null, onboardedAt: { not: null } }
     : { userId: oneUser, destroyedAt: null };
@@ -1246,7 +1248,6 @@ router.post('/admin/maintenance/resync-system-schedules', async (c) => {
       // (one agent turn per instance — sequential, so an all-fleet resync
       // with native takes a while; run it when rolling out prompt changes).
       if (c.req.query('native') === '1') {
-        const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
         await syncNativePromptCrons(row.id);
       }
       synced++;
@@ -1272,7 +1273,6 @@ router.post('/admin/instances/:userId/test/notify-integration', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { provider?: string };
   const provider = body.provider;
   if (!provider) return c.json({ error: 'provider required' }, 400);
-  const { notifyIntegrationConnected } = await import('../integrations/notify-connected.js');
   try {
     await notifyIntegrationConnected(row.id, provider);
     return c.json({ ok: true });
@@ -1286,7 +1286,6 @@ router.post('/admin/instances/:userId/test/run-eod-report', async (c) => {
   const row = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!row) return c.json({ error: 'instance not found' }, 404);
   const dry = c.req.query('dry') === '1';
-  const { runEodReportForInstance } = await import('../eod-report/sweep.js');
   try {
     const res = await runEodReportForInstance(row.id, { force: true, dryRun: dry });
     return c.json({ ok: true, ...res });
@@ -1734,8 +1733,6 @@ router.get('/admin/crons', async (c) => {
   ]);
 
   const cronEvents = rawEvents.filter(isCronDrivenEvent).slice(0, 150);
-
-  const { getCronRegistry } = await import('../cron.js');
   const registry = getCronRegistry();
 
   // Last time each sweep actually DID something (all SweepRun rows are
@@ -1814,7 +1811,6 @@ router.get('/admin/crons', async (c) => {
   // (isolated sessions). The orchestrator can't tick them, but it holds a
   // per-instance mirror (ScheduledTask kind=system_prompt) and hears their
   // delivered output via the cron-outbox bridge, which stamps lastRunAt.
-  const { NATIVE_PROMPTS } = await import('../schedules/native-prompts.js');
   const nativeStats = new Map(
     (
       await prisma.scheduledTask.groupBy({
@@ -2028,7 +2024,6 @@ router.post('/admin/instances/:userId/skills/replay', async (c) => {
   const userId = c.req.param('userId');
   const row = await prisma.hermesInstance.findUnique({ where: { userId }, select: { id: true } });
   if (!row) return c.json({ error: 'instance not found' }, 404);
-  const { replayInstalledSkills } = await import('../skills/manager.js');
   try {
     const res = await replayInstalledSkills(row.id);
     return c.json({ ok: true, ...res });
@@ -2053,7 +2048,6 @@ router.get('/admin/instances/:userId/skills/exec-probe', async (c) => {
     select: { spriteName: true, spriteId: true },
   });
   if (!row?.spriteName || !row?.spriteId) return c.json({ error: 'no machine' }, 404);
-  const { FlyClient } = await import('../fly/client.js');
   const payload = 'A'.repeat(bytes);
   try {
     const res =

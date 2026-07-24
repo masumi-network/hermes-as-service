@@ -6,6 +6,7 @@ import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
+import { continueFollowupsForInstance } from './followup-continuation.js';
 
 /**
  * INPUT_REQUIRED auto-responder.
@@ -212,7 +213,6 @@ async function runInputResponderSweepInner(): Promise<{ scanned: number; prompte
     select: { id: true },
     take: 100,
   });
-  const { continueFollowupsForInstance } = await import('./followup-continuation.js');
   let prompted = 0;
   for (const instance of due) {
     try {

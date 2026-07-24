@@ -5,6 +5,8 @@ import { FlyClient } from '../fly/client.js';
 import { conflict, notFound, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { loadConfig } from '../config.js';
+import { stampMcpToolsVersion } from '../provision/mcp-tools-roll.js';
+import { notifyIntegrationConnected } from './notify-connected.js';
 
 /** Providers supported in the integration set. Keep this list authoritative.
  *  v1 (mail/calendar) + v2 batch (comms / dev / notes / CRM / social).
@@ -204,7 +206,6 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     // The restart also re-registered the current MCP tool catalog — stamp it
     // so the capability-roll sweep doesn't bounce this machine a second time.
     try {
-      const { stampMcpToolsVersion } = await import('../provision/mcp-tools-roll.js');
       await stampMcpToolsVersion(instance.id);
     } catch {
       /* best-effort — a missed stamp just costs one redundant idle roll */
@@ -230,7 +231,6 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     // notifyIntegrationConnected for the rationale.
     void (async () => {
       try {
-        const { notifyIntegrationConnected } = await import('./notify-connected.js');
         await notifyIntegrationConnected(instance.id, input.provider);
       } catch (err) {
         logger.warn({ err, userId: input.userId, provider: input.provider }, 'integration_notify_threw');

@@ -6,6 +6,7 @@ import { authenticateInstanceBearer } from './instance-auth.js';
 import { decryptSecret } from '../crypto.js';
 import { isValidCron, safeNextRun } from '../schedules/cron.js';
 import { logger } from '../logger.js';
+import { NATIVE_PROMPTS, propagateCronRemovalToMachine, propagateCronToggleToMachine } from '../schedules/native-prompts.js';
 
 const scheduleInput = z.object({
   name: z.string().min(1).max(120),
@@ -154,7 +155,6 @@ sokosumi.delete('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
     // machine, or it keeps firing invisibly. Fire-and-forget agent turn;
     // for native prompt names the hourly reconciler enforces convergence
     // even if this turn fails.
-    const { propagateCronRemovalToMachine } = await import('../schedules/native-prompts.js');
     void propagateCronRemovalToMachine(row.id, task.name).catch(() => {});
   }
   return c.body(null, 204);
@@ -186,7 +186,6 @@ sokosumi.patch('/v1/instances/:userId/schedules/:scheduleId', async (c) => {
     parsed.data.enabled !== undefined &&
     parsed.data.enabled !== task.enabled
   ) {
-    const { propagateCronToggleToMachine } = await import('../schedules/native-prompts.js');
     void propagateCronToggleToMachine(row.id, {
       name: task.name,
       enable: parsed.data.enabled,
@@ -269,7 +268,6 @@ async function createScheduleResponse(
   // on every reconcile pass and duplicates would double-list them. User
   // schedules keep plain-create semantics so a re-used name can never
   // silently clobber an existing user schedule's content.
-  const { NATIVE_PROMPTS } = await import('../schedules/native-prompts.js');
   const upsertableNames = new Set([...NATIVE_PROMPTS.map((n) => n.name), 'daily-brief']);
   const existing = upsertableNames.has(input.name)
     ? await prisma.scheduledTask.findFirst({

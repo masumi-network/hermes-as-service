@@ -24,6 +24,11 @@ import { prisma } from '../db.js';
 import { logger } from '../logger.js';
 import { loadConfig } from '../config.js';
 import { findImageVersion, tagFromRef } from '../images/manifest.js';
+import { listPendingConfirmations } from '../confirmations/store.js';
+import { decryptSecret } from '../crypto.js';
+import { buildPersonaDirective } from '../provision/profile.js';
+import { syncNativePromptCrons } from '../schedules/native-prompts.js';
+import { syncSystemSchedules } from '../schedules/system-schedules.js';
 
 const router = new Hono();
 
@@ -193,7 +198,6 @@ router.patch('/v1/instances/:userId', async (c) => {
           updated.autonomyLevel === 'low' || updated.autonomyLevel === 'high'
             ? updated.autonomyLevel
             : 'medium';
-        const { syncSystemSchedules } = await import('../schedules/system-schedules.js');
         await syncSystemSchedules({
           instanceId: row.id,
           userId: row.userId,
@@ -204,7 +208,6 @@ router.patch('/v1/instances/:userId', async (c) => {
         });
         // Reconcile the machine's native prompt cronjobs to the new autonomy
         // (fire-and-forget — the agent turn can take a couple of minutes).
-        const { syncNativePromptCrons } = await import('../schedules/native-prompts.js');
         void syncNativePromptCrons(row.id).catch(() => {});
       } catch (err) {
         logger.warn({ err, userId }, 'patch_instance_resync_schedules_failed');
@@ -245,8 +248,6 @@ async function notifyPersonaChanged(instanceId: string): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row || !row.endpointUrl) return;
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return;
-  const { decryptSecret } = await import('../crypto.js');
-  const { buildPersonaDirective } = await import('../provision/profile.js');
   const apiKey = await decryptSecret(row.apiServerKey);
   const directive = buildPersonaDirective({
     personaName: row.personaName,
@@ -280,7 +281,6 @@ async function postNudge(endpointUrl: string, apiKey: string, prompt: string): P
 async function notifyAutonomyChanged(instanceId: string, newLevel: string): Promise<void> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row || !row.endpointUrl) return;
-  const { decryptSecret } = await import('../crypto.js');
   const apiKey = await decryptSecret(row.apiServerKey);
   const prompt = `Internal — your reply is discarded. Your autonomy level has changed to "${newLevel}". Update your memory with this fact. At low you may only read; at medium your write/spend tool calls are intercepted by the orchestrator and require user approval before executing; at high you may act autonomously while respecting the cost rules in your SOUL. Reply only "ok".`;
   await postNudge(row.endpointUrl, apiKey, prompt);
@@ -292,7 +292,6 @@ router.get('/v1/instances/:userId', async (c) => {
     // Sokosumi polls this every 30s per user — run the three independent
     // queries in parallel. getInstance's notFound rejection still surfaces
     // through Promise.all into the same catch below.
-    const { listPendingConfirmations } = await import('../confirmations/store.js');
     const [view, integrations, pendingConfirmations] = await Promise.all([
       getInstance(userId),
       listIntegrations(userId),

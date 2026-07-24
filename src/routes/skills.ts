@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { HttpError, problemJson } from '../errors.js';
 import { installSkill, listInstalledSkills, removeSkill } from '../skills/manager.js';
+import { isPreinstalledSlug, listPreinstalledSkills } from '../skills/preinstalled.js';
 
 const router = new Hono();
 
@@ -74,7 +75,6 @@ router.get('/v1/instances/:userId/skills/preinstalled', async (c) => {
   if (!instance || instance.destroyedAt) {
     return c.json({ error: { message: 'instance not found' } }, 404);
   }
-  const { listPreinstalledSkills } = await import('../skills/preinstalled.js');
   const skills = await listPreinstalledSkills(instance);
   return c.json({ skills: skills ?? [] });
 });
@@ -89,7 +89,6 @@ router.delete('/v1/instances/:userId/skills/:slug', async (c) => {
   // reject: users can't remove image defaults. Otherwise it's just unknown.
   const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (instance && !instance.destroyedAt) {
-    const { isPreinstalledSlug } = await import('../skills/preinstalled.js');
     if (await isPreinstalledSlug(instance, slug)) {
       return c.json(
         { error: { message: 'Pre-installed skills that ship with the agent image cannot be removed' } },

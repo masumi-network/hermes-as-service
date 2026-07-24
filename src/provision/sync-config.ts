@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { loadConfig } from '../config.js';
 import { FlyClient } from '../fly/client.js';
 import { notFound, conflict } from '../errors.js';
+import { stampMcpToolsVersion } from './mcp-tools-roll.js';
 
 /**
  * Apply the current baked operator profile to a live instance.
@@ -42,7 +43,6 @@ export async function syncConfig(userId: string): Promise<void> {
   });
   // The gateway rebooted with the roll and re-registered the live MCP tool
   // catalog — stamp it so the capability-roll sweep sees this machine current.
-  const { stampMcpToolsVersion } = await import('./mcp-tools-roll.js');
   await stampMcpToolsVersion(row.id);
   logger.info(
     { userId, spriteName: row.spriteName, image: cfg.FLY_MACHINE_IMAGE },

@@ -10,6 +10,8 @@ import { buildMcpServersJsonForUser, markPendingIntegrationsConnected } from '..
 import { purgeSokosumiMirror } from '../sokosumi/client.js';
 import { buildMachineConfig, perInstanceEnv } from './machine-spec.js';
 import { claimPoolMachine, releaseClaimedPoolRecord, schedulePoolReplenishSoon } from './pool.js';
+import { replayInstalledSkills } from '../skills/manager.js';
+import { stampMcpToolsVersion } from './mcp-tools-roll.js';
 
 export interface ProvisionInput {
   userId: string;
@@ -347,7 +349,6 @@ async function finalizeProvisionedMachine(
   // Re-apply the user's installed marketplace skills onto this (possibly
   // fresh) machine. Idempotent + best-effort.
   try {
-    const { replayInstalledSkills } = await import('../skills/manager.js');
     await replayInstalledSkills(row.id);
   } catch (err) {
     log.warn({ err }, 'skills_replay_failed');
@@ -357,7 +358,6 @@ async function finalizeProvisionedMachine(
   // MCP tool catalog — stamp it so the capability-roll sweep doesn't treat a
   // freshly-provisioned instance as stale and bounce it.
   try {
-    const { stampMcpToolsVersion } = await import('./mcp-tools-roll.js');
     await stampMcpToolsVersion(row.id);
   } catch (err) {
     log.warn({ err }, 'mcp_tools_stamp_failed');
