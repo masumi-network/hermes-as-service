@@ -64,6 +64,28 @@ const DENYLIST_V21 = [
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v24',
+    releasedAt: '2026-07-24',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'MiMo-V2.5-PRO + SOUL failure-honesty rules.',
+    changes: [
+      'Default model → xiaomi/mimo-v2.5-pro (we had been on plain mimo-v2.5; Pro was the intended tier).',
+      'SOUL "Ground truth": report observed errors verbatim (never invent a cause like "link expired"), re-check evidence when challenged (never confess to errors not made), read deliverables fully before summarizing — the three failure modes from the 2026-07-24 log analysis.',
+      'Same base, tool-use enforcement, denylist, and skill packs as v23.',
+    ],
+    commit: '05cf381',
+    skillPacks: [
+      'coreyhaines31/marketingskills',
+      'conorbronsdon/avoid-ai-writing',
+      'Romanescu11/hermes-skill-factory',
+      'AgriciDaniel/claude-ads',
+      'nowork-studio/toprank (seo, google-ads, meta-ads, gemini)',
+    ],
+  },
+  {
     tag: 'v23',
     releasedAt: '2026-07-24',
     baseImage: 'nousresearch/hermes-agent:v2026.5.16',
