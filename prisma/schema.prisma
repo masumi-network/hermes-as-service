@@ -150,6 +150,20 @@ model HermesInstance {
   /// Fly API. Null on legacy rows until reconciled from live machine state.
   imageTag       String?
   imageRolledAt  DateTime?
+  /// Content hash of the Sokosumi-MCP tool catalog the machine last
+  /// registered, stamped whenever the orchestrator (re)boots its gateway
+  /// (provision / sync-config / capability roll). The Hermes agent registers
+  /// MCP tools once at gateway boot and never re-lists live, so when this
+  /// drifts from the live MCP_TOOLS_VERSION the machine is holding a stale
+  /// tool set (missing a newly-added tool, or offering a removed one). The
+  /// capability-roll sweep restarts such machines while they're idle.
+  mcpToolsVersion String?
+  /// Set when a capability roll (a restart to re-register MCP tools) begins;
+  /// cleared on success. While recent it does double duty: (1) it makes
+  /// `transitioning` true so the chat shows "applying your change…" instead
+  /// of offering a chat to a machine that's mid-restart, and (2) it backs the
+  /// sweep off a failed roll so a broken machine isn't bounced every tick.
+  rollingAt      DateTime?
   /// When true, this instance is a test bench: it appears on the admin Tests
   /// page as a target for running standard-chat suites — typically one bench
   /// instance pinned per image version for side-by-side comparison.

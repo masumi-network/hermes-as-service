@@ -39,6 +39,10 @@ export async function syncConfig(userId: string): Promise<void> {
     where: { id: row.id },
     data: { imageTag: cfg.FLY_MACHINE_IMAGE, imageRolledAt: new Date() },
   });
+  // The gateway rebooted with the roll and re-registered the live MCP tool
+  // catalog — stamp it so the capability-roll sweep sees this machine current.
+  const { stampMcpToolsVersion } = await import('./mcp-tools-roll.js');
+  await stampMcpToolsVersion(row.id);
   logger.info(
     { userId, spriteName: row.spriteName, image: cfg.FLY_MACHINE_IMAGE },
     'sync_config_done',

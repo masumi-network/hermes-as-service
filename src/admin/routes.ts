@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { prisma } from '../db.js';
+import { MCP_TOOLS_VERSION } from '../routes/sokosumi-mcp.js';
 import { esc, layout, relTime, statCard, statusPill } from './html.js';
 import { logger } from '../logger.js';
 import { loadConfig } from '../config.js';
@@ -40,6 +41,9 @@ router.get('/admin/version', (c) => {
     branch: process.env.RAILWAY_GIT_BRANCH ?? null,
     bootedAt: BOOTED_AT,
     nodeEnv: process.env.NODE_ENV ?? null,
+    // The live MCP tool-catalog version. Instances whose stamped
+    // mcpToolsVersion differs are stale and get rolled while idle.
+    mcpToolsVersion: MCP_TOOLS_VERSION,
   });
 });
 

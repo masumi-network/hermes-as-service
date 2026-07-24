@@ -10,6 +10,7 @@ import { runInputResponderSweep } from './notifications/input-responder.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
 import { runNativePromptReconcilerSweep } from './schedules/native-prompts.js';
+import { runMcpToolsRollSweep } from './provision/mcp-tools-roll.js';
 import { freshenSweepMirrors } from './schedules/system-schedules.js';
 
 const registered = new Map<string, cron.ScheduledTask>();
@@ -123,6 +124,16 @@ function register(
  */
 export function startIdleSuspendCron(): void {
   register('idle_suspend_cron', '*/5 * * * *', runOnce);
+}
+
+/**
+ * Restart idle instances whose registered MCP tool catalog is stale, so a
+ * newly-deployed Sokosumi-MCP tool reaches existing machines without anyone
+ * having to think about it. Idle-gated + capped per tick; the kill switch is
+ * MCP_AUTO_ROLL_MAX_PER_TICK=0. See src/provision/mcp-tools-roll.ts.
+ */
+export function startMcpToolsRollCron(): void {
+  register('mcp_tools_roll_cron', '*/5 * * * *', runMcpToolsRollSweep);
 }
 
 export async function runOnce(): Promise<number> {

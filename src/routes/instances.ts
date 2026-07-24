@@ -293,11 +293,18 @@ router.get('/v1/instances/:userId', async (c) => {
     const integrations = await listIntegrations(userId);
     const { listPendingConfirmations } = await import('../confirmations/store.js');
     const pendingConfirmations = await listPendingConfirmations(userId);
-    // `transitioning: true` when any integration is mid-apply OR the
-    // instance lifecycle is itself unsettled. Sokosumi gates the
-    // "Hermes is applying your change…" banner on this so the chat is
-    // never offered while a Fly machine replace is in progress.
+    // `transitioning: true` when any integration is mid-apply, a capability
+    // roll (MCP-tool refresh restart) is in flight, OR the instance lifecycle
+    // is itself unsettled. Sokosumi gates the "Hermes is applying your
+    // change…" banner on this so the chat is never offered while a Fly machine
+    // replace/restart is in progress. The roll window is time-boxed (3 min) so
+    // a crashed roll can't wedge the banner on forever.
+    // 4 min covers restartMachine's wait-for-'started' plus the gateway/API
+    // boot tail that continues after Fly reports the VM started.
+    const rolling =
+      view.rollingAt !== null && Date.now() - view.rollingAt.getTime() < 4 * 60_000;
     const transitioning =
+      rolling ||
       integrations.some((i) => i.status === 'connecting' || i.status === 'pending') ||
       view.status === 'provisioning' ||
       view.status === 'onboarding';

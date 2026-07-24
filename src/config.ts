@@ -35,6 +35,18 @@ const schema = z.object({
   DEFAULT_IDLE_SUSPEND_MINUTES: z.coerce.number().int().positive().default(30),
   PER_USER_INSTANCE_CAP: z.coerce.number().int().positive().default(1),
 
+  // Capability roll: when a deploy changes the MCP tool catalog, running
+  // machines keep their stale tool set until their gateway restarts (the
+  // Hermes agent only registers MCP tools at boot). This sweep restarts
+  // stale machines WHILE THEY'RE IDLE so new tools propagate on their own.
+  // Max machines to roll per tick — 0 is the kill switch (disables the sweep).
+  // Keep modest: each roll is a Fly stop→start, and rolling the whole fleet
+  // at once both hammers Fly and risks catching users mid-return.
+  MCP_AUTO_ROLL_MAX_PER_TICK: z.coerce.number().int().min(0).default(3),
+  // Only roll a machine after this many minutes of no chat activity, so a
+  // capability roll never interrupts an active conversation.
+  MCP_AUTO_ROLL_IDLE_MINUTES: z.coerce.number().int().positive().default(10),
+
   OPENROUTER_API_KEY: z.string().min(8),
   EXA_API_KEY: z.string().optional().default(''),
   // Composio API key (single org-wide secret). Injected as the x-api-key

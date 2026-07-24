@@ -201,6 +201,15 @@ export async function addIntegration(input: AddIntegrationInput): Promise<Integr
     // Wait for the replace to settle. 90s is generous; usually ~30s.
     await fly.waitForState(instance.spriteName, instance.spriteId!, 'started', 90);
 
+    // The restart also re-registered the current MCP tool catalog — stamp it
+    // so the capability-roll sweep doesn't bounce this machine a second time.
+    try {
+      const { stampMcpToolsVersion } = await import('../provision/mcp-tools-roll.js');
+      await stampMcpToolsVersion(instance.id);
+    } catch {
+      /* best-effort — a missed stamp just costs one redundant idle roll */
+    }
+
     const updated = await prisma.integration.update({
       where: { id: row.id },
       data: { status: 'connected', connectedAt: new Date(), lastError: null },

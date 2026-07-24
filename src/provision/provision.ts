@@ -48,6 +48,7 @@ export interface InstanceView {
   personaName: string | null;
   verbosity: string | null;
   tone: string | null;
+  rollingAt: Date | null;
 }
 
 /**
@@ -352,6 +353,16 @@ async function finalizeProvisionedMachine(
     log.warn({ err }, 'skills_replay_failed');
   }
 
+  // The machine's gateway is (re)booting now and will register the current
+  // MCP tool catalog — stamp it so the capability-roll sweep doesn't treat a
+  // freshly-provisioned instance as stale and bounce it.
+  try {
+    const { stampMcpToolsVersion } = await import('./mcp-tools-roll.js');
+    await stampMcpToolsVersion(row.id);
+  } catch (err) {
+    log.warn({ err }, 'mcp_tools_stamp_failed');
+  }
+
   // Returning vs new user — decided by whether onboardedAt is set on this
   // HermesInstance row (which survives Fly destroy/re-create since the row
   // is keyed on userId, not Fly app id).
@@ -553,6 +564,7 @@ function toView(row: {
   personaName: string | null;
   verbosity: string | null;
   tone: string | null;
+  rollingAt: Date | null;
 }): InstanceView {
   return {
     instanceId: row.id,
@@ -572,5 +584,6 @@ function toView(row: {
     personaName: row.personaName,
     verbosity: row.verbosity,
     tone: row.tone,
+    rollingAt: row.rollingAt,
   };
 }

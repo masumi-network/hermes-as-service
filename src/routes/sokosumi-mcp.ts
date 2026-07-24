@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { prisma } from '../db.js';
@@ -426,6 +427,27 @@ const TOOLS_ALL: ToolDef[] = [
     },
   },
 ];
+
+/**
+ * A short content hash of the tool CONTRACT — one entry per tool: its name,
+ * autonomy tier and input schema. Two deploys with the same callable surface
+ * produce the same version; adding, removing, renaming or re-scoping a tool
+ * (or changing its input schema) changes it.
+ *
+ * Descriptions are deliberately EXCLUDED: a copy tweak doesn't change what the
+ * agent can call, and we don't want to bounce the whole fleet over wording.
+ * (A description change still ships to any machine that rolls for another
+ * reason.) This is what the capability-roll sweep compares each instance's
+ * stamped `mcpToolsVersion` against — see src/provision/mcp-tools-roll.ts.
+ */
+export const MCP_TOOLS_VERSION: string = (() => {
+  const contract = TOOLS_ALL.map((t) => ({
+    name: t.name,
+    access: t.access,
+    inputSchema: t.inputSchema,
+  })).sort((a, b) => a.name.localeCompare(b.name));
+  return createHash('sha1').update(JSON.stringify(contract)).digest('hex').slice(0, 12);
+})();
 
 /**
  * Filter the tool catalog by the instance's autonomy level. Read tools

@@ -42,6 +42,7 @@ import {
   startEodReportCron,
   startPoolReplenishCron,
   startNativePromptReconcilerCron,
+  startMcpToolsRollCron,
 } from './cron.js';
 // On Fly always-on hosts, Hermes' own gateway daemon ticks its built-in
 // cron every 60s. We no longer need the orchestrator-side scheduler.
@@ -113,6 +114,7 @@ startInputResponderCron();
 startEodReportCron();
 startPoolReplenishCron();
 startNativePromptReconcilerCron();
+startMcpToolsRollCron();
 
 // On boot, resume any onboarding pipelines that died with a previous pod.
 void (async () => {
