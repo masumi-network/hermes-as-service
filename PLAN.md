@@ -9,15 +9,17 @@ Patrick's machine.
 
 ## Tier 0 — model
 
-- [ ] **0.1 Switch to MiMo-V2.5-Pro (we are on normal V2.5).**
+- [x] **0.1 Switch to MiMo-V2.5-Pro (we are on normal V2.5).**
       Verified 2026-07-25: `TEXT_MODEL_OVERRIDE=xiaomi/mimo-v2.5` AND v23
       config.yaml `default: xiaomi/mimo-v2.5` — both non-Pro. Fix:
       set `TEXT_MODEL_OVERRIDE=xiaomi/mimo-v2.5-pro`, re-pick providers
       (parasail does NOT host Pro; GMICloud hosts it WITHOUT tool support —
       rely on OpenRouter's tools-aware routing + pin tool-capable providers),
       update `docker/hermes-user/config.yaml` default for the v24 build.
-      Probe streaming granularity per provider first; live-verify tool calling
-      + served model afterward.
+      DONE 2026-07-24: env flipped (order=digitalocean,xiaomi — DO streams
+      ~5 chars/frame; GMICloud excluded by tools-aware routing), config.yaml →
+      pro for v24. Live-verified: agent tool-called get_credits on Pro; usage
+      ledger shows xiaomi/mimo-v2.5-pro.
 - [ ] **0.2 (user-driven, optional) Frontier A/B**: one day on
       `anthropic/claude-haiku-4-5` or `anthropic/claude-sonnet-5` via
       TEXT_MODEL_OVERRIDE; compare capitulation / invented-failure-causes /
@@ -25,19 +27,19 @@ Patrick's machine.
 
 ## Tier 1 — directly reduces agent failures
 
-- [ ] **1.1 v24 SOUL failure-honesty rules** (`docker/hermes-user/SOUL.md`,
+- [x] **1.1 v24 SOUL failure-honesty rules** (`docker/hermes-user/SOUL.md`,
       "Ground truth" section, keep it tight):
       report observed errors verbatim / never invent a cause; re-check evidence
       when challenged (never confess to errors not made); read a deliverable
       fully before summarizing it. Needs v24 image build+roll (bundle with 0.1
       config change).
-- [ ] **1.2 `sokosumi_set_task_status`: from-state constraints + fail fast**
+- [x] **1.2 `sokosumi_set_task_status`: from-state constraints + fail fast**
       (`src/routes/sokosumi-mcp.ts`): description documents that
       INPUT_REQUIRED/RUNNING tasks cannot be transitioned by the assistant
       (only the assigned coworker resumes them — comment instead); on a 4xx
       from Sokosumi return that guidance in the error text so the agent
       doesn't retry into a rate limit.
-- [ ] **1.3 Task-attachment tool** (`sokosumi_get_task_attachments`):
+- [x] **1.3 Task-attachment tool** (`sokosumi_get_task_attachments`):
       scans a task's events for markdown/file links, validates each with a
       bounded HEAD/GET (status + size + content-type), returns verified URLs
       (and inline content for small text files). Stops the agent improvising

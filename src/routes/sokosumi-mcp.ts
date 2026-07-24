@@ -265,6 +265,17 @@ const TOOLS_ALL: ToolDef[] = [
   },
   {
     access: 'read',
+    name: 'sokosumi_get_task_attachments',
+    description:
+      "Find and validate the file links (deliverables, ZIPs, docs) inside a task's events/comments. Returns each link with its VERIFIED status (reachable? size? content-type?) and inlines the content of small text files. Use this INSTEAD of curling links yourself: it distinguishes a dead link from a transient failure, so never claim a link 'expired' without this tool's evidence.",
+    inputSchema: {
+      type: 'object',
+      properties: { task_id: { type: 'string', description: 'Task id whose events to scan.' } },
+      required: ['task_id'],
+    },
+  },
+  {
+    access: 'read',
     name: 'sokosumi_list_notifications',
     description:
       "List the user's Sokosumi notifications (newest first) — task updates, job completions, input requests, etc. — plus the current unread count, a `total`, and a `nextCursor` for paging. Use to see what needs the user's attention and to surface anything important in chat.",
@@ -339,7 +350,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write-light',
     name: 'sokosumi_set_task_status',
     description:
-      "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). You cannot set RUNNING or the input/credit states — those are driven by the coworker actually doing the work. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",
+      "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). FROM-STATE LIMITS: a task in INPUT_REQUIRED or RUNNING canNOT be transitioned by you — only the assigned coworker resumes it once its input is answered. Don't retry a rejected transition; answer the input (sokosumi_provide_job_input) or comment instead. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -770,6 +781,102 @@ export async function executeTool(
       }
     }
 
+    case 'sokosumi_get_task_attachments': {
+      const id = String(args['task_id'] ?? '');
+      if (!id) throw new Error('missing required arg: task_id');
+      // Same scope resolution as sokosumi_get_task.
+      let task: unknown;
+      try {
+        task = await client.getTask(id);
+      } catch {
+        const orgs = await client.listWorkspaceScopes();
+        try {
+          task = await Promise.any(
+            orgs.map((org) => client.withOrganization(org.id).getTask(id)),
+          );
+        } catch {
+          throw new Error(`task ${id} not found in any workspace`);
+        }
+      }
+      const events = ((task as { events?: unknown[] })?.events ?? []) as Array<
+        Record<string, unknown>
+      >;
+      // Collect https URLs from event text: markdown links first (keep label),
+      // then bare URLs. Dedupe, cap at 10.
+      const found = new Map<string, string>(); // url -> label
+      for (const e of events) {
+        const text = String(e['comment'] ?? e['message'] ?? e['content'] ?? e['body'] ?? '');
+        for (const m of text.matchAll(/\[([^\]]{0,120})\]\((https:\/\/[^\s)]+)\)/g)) {
+          if (!found.has(m[2]!)) found.set(m[2]!, m[1] ?? '');
+        }
+        for (const m of text.matchAll(/https:\/\/[^\s)\]"'<>]+/g)) {
+          if (!found.has(m[0])) found.set(m[0], '');
+        }
+      }
+      const urls = [...found.entries()].slice(0, 10);
+      const attachments = await Promise.all(
+        urls.map(async ([url, label]) => {
+          // SSRF guard: only public https hosts.
+          try {
+            const host = new URL(url).hostname;
+            if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|\[?::1)/.test(host)) {
+              return { url, label, ok: false, error: 'blocked host' };
+            }
+          } catch {
+            return { url, label, ok: false, error: 'invalid url' };
+          }
+          try {
+            let res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(10_000) });
+            if (!res.ok && res.status === 405) {
+              // Host doesn't support HEAD — probe with a ranged GET.
+              res = await fetch(url, {
+                headers: { Range: 'bytes=0-0' },
+                signal: AbortSignal.timeout(10_000),
+              });
+            }
+            const contentType = res.headers.get('content-type') ?? undefined;
+            const len = Number(res.headers.get('content-length') ?? NaN);
+            const base = {
+              url,
+              label,
+              ok: res.ok,
+              status: res.status,
+              contentType,
+              sizeBytes: Number.isFinite(len) ? len : undefined,
+            };
+            // Inline small text-ish files so the agent needn't refetch.
+            const isText = /text\/|markdown|json|csv/.test(contentType ?? '');
+            if (res.ok && isText && (!Number.isFinite(len) || len < 100_000)) {
+              const body = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+                .then((r) => (r.ok ? r.text() : null))
+                .catch(() => null);
+              if (body !== null) return { ...base, content: body.slice(0, 50_000) };
+            }
+            return base;
+          } catch (err) {
+            return {
+              url,
+              label,
+              ok: false,
+              error: `fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        }),
+      );
+      return JSON.stringify(
+        {
+          taskId: id,
+          count: attachments.length,
+          note: attachments.some((a) => !a.ok)
+            ? 'Some links failed — the status/error field shows the OBSERVED failure; report it verbatim, do not guess a cause.'
+            : undefined,
+          attachments,
+        },
+        null,
+        2,
+      );
+    }
+
     case 'sokosumi_list_jobs': {
       // Personal + every org, bounded concurrency, each paginated. The API
       // ignores ?status, so we page all jobs and filter by status client-side.
@@ -972,19 +1079,38 @@ export async function executeTool(
         );
       }
       const body = { status, ...(comment ? { comment } : {}) };
+      // Sokosumi rejecting the TRANSITION (task found, move illegal — e.g.
+      // INPUT_REQUIRED → READY) must fail fast with guidance: fanning out to
+      // other scopes on that error just repeats the same rejection per org
+      // and rate-limits (observed live: 3 rejections → 429).
+      const isTransitionRejection = (err: unknown): boolean => {
+        const msg = err instanceof Error ? err.message : String(err);
+        return /→ (400|409|422)|transition|not allowed|invalid status/i.test(msg);
+      };
+      const transitionGuidance = (err: unknown): Error =>
+        new Error(
+          `${err instanceof Error ? err.message : String(err)}\n` +
+            'Sokosumi rejected this status transition. If the task is in INPUT_REQUIRED or ' +
+            'RUNNING, you cannot move it — only the assigned coworker resumes it once its ' +
+            'input is answered. Do NOT retry: answer the input (sokosumi_provide_job_input) ' +
+            'or leave a comment for the coworker instead.',
+        );
       // A task id alone doesn't tell us its workspace: try personal first,
-      // then any org scope we can still see (same shape as add_task_comment).
+      // then any org scope we can still see (same shape as add_task_comment) —
+      // but ONLY for not-found-shaped errors.
       try {
         const result = await client.addTaskEvent(taskId, body);
         return JSON.stringify({ taskId, status, result }, null, 2);
       } catch (err) {
+        if (isTransitionRejection(err)) throw transitionGuidance(err);
         for (const org of await client.listWorkspaceScopes()) {
           if (org.id === null) continue; // personal already attempted above
           try {
             const result = await client.withOrganization(org.id).addTaskEvent(taskId, body);
             return JSON.stringify({ orgId: org.id, taskId, status, result }, null, 2);
-          } catch {
-            /* try next scope */
+          } catch (orgErr) {
+            if (isTransitionRejection(orgErr)) throw transitionGuidance(orgErr);
+            /* not found in this scope — try next */
           }
         }
         // Rethrow the original failure — it carries Sokosumi's actual reason
