@@ -429,6 +429,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   let reasoningBuf = '';
   let reasoningPublished = false;
   let lastReasoningLiveAt = 0;
+  let sawFinish = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -493,10 +494,22 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
             toolPartials.set(idx, cur);
           }
         }
+        if ((chunk as { choices?: { finish_reason?: string | null }[] }).choices?.[0]?.finish_reason) {
+          sawFinish = true;
+        }
       } catch {
         /* ignore malformed lines */
       }
     }
+  }
+  // Upstream stream ended without a finish_reason = the provider aborted
+  // mid-generation (the gateway will treat the partial as a whole answer).
+  // Log with the served model so flaky providers are attributable.
+  if (!sawFinish) {
+    logger.warn(
+      { instanceId: ref.id, model, promptTokens, completionTokens },
+      'llm_stream_ended_without_finish',
+    );
   }
 
   // Reasoning-only call (no content/tool_calls observed) — flush at end.

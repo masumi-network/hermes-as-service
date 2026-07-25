@@ -762,6 +762,18 @@ async function captureSseStream(
   if (ctx.upstreamStatus >= 400 && !errorMessage) {
     errorMessage = `upstream_${ctx.upstreamStatus}`;
   }
+  // A healthy turn always ends with a finish_reason frame before [DONE]. A
+  // stream that just STOPS (observed live 2026-07-25: answer died mid-word,
+  // no error anywhere — upstream provider aborted mid-generation) previously
+  // captured as a normal-looking truncated answer. Flag it so admin shows the
+  // truncation and we can attribute provider flakiness.
+  if (!errorMessage && !finishReason) {
+    errorMessage = 'stream_ended_without_finish_reason (upstream abort — answer likely truncated)';
+    logger.warn(
+      { instanceId: ctx.instanceId, requestId: ctx.requestId, chars: assembled.length },
+      'chat_stream_truncated',
+    );
+  }
 
   await prisma.chatMessage.create({
     data: {
