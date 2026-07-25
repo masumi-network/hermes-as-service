@@ -85,7 +85,7 @@ and the Composio proxy.
 
 ## Phase 4 — teach the agent (SOUL v25)
 
-- [ ] **4.1 SOUL section (tight, ~15 lines):** what Hindsight is FOR
+- [x] **4.1 SOUL section (tight, ~15 lines):** what Hindsight is FOR
       (episodic archive) vs the `memory` tool (identity snapshot); retain
       durable facts/decisions/outcomes at the moment they happen (not
       transcripts, never credentials/secrets); recall BEFORE answering
