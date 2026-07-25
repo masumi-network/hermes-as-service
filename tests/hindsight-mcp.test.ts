@@ -77,3 +77,36 @@ describe('hindsight proxy route', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('extractSseJsonPayload — framing normalization', () => {
+  it('unwraps a standard FastMCP SSE frame', async () => {
+    const { extractSseJsonPayload } = await import('../src/routes/hindsight-mcp.js');
+    const body = 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n';
+    expect(extractSseJsonPayload(body)).toBe('{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}');
+  });
+
+  it('survives CRLF framing and a leading comment/ping', async () => {
+    const { extractSseJsonPayload } = await import('../src/routes/hindsight-mcp.js');
+    const body = ': ping\r\n\r\nevent: message\r\ndata: {"ok":true}\r\n\r\n';
+    expect(extractSseJsonPayload(body)).toBe('{"ok":true}');
+  });
+
+  it('joins multi-line data payloads', async () => {
+    const { extractSseJsonPayload } = await import('../src/routes/hindsight-mcp.js');
+    const body = 'event: message\ndata: {"a":\ndata: 1}\n\n';
+    expect(extractSseJsonPayload(body)).toBe('{"a":\n1}');
+  });
+
+  it('takes the LAST parseable frame when several arrive', async () => {
+    const { extractSseJsonPayload } = await import('../src/routes/hindsight-mcp.js');
+    const body = 'data: {"first":1}\n\ndata: {"second":2}\n\n';
+    expect(extractSseJsonPayload(body)).toBe('{"second":2}');
+  });
+
+  it('returns null on unparseable / empty bodies (caller passes through)', async () => {
+    const { extractSseJsonPayload } = await import('../src/routes/hindsight-mcp.js');
+    expect(extractSseJsonPayload('')).toBeNull();
+    expect(extractSseJsonPayload('event: message\ndata: not-json\n\n')).toBeNull();
+    expect(extractSseJsonPayload('data: [DONE]\n\n')).toBeNull();
+  });
+});

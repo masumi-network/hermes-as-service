@@ -109,14 +109,62 @@ async function forward(c: Context): Promise<Response> {
     'hindsight_proxy_forwarded',
   );
 
-  // Stream the response through untouched (streamable_http answers POST with
-  // either JSON or an SSE frame; both pass through fine).
   const outHeaders: Record<string, string> = {};
   for (const h of ['content-type', 'cache-control', 'mcp-session-id']) {
     const v = upstream.headers.get(h);
     if (v) outHeaders[h] = v;
   }
+
+  // NORMALIZE THE FRAMING. Hindsight (FastMCP) answers a JSON-RPC POST with an
+  // SSE frame — `event: message\ndata: {...}` — even when we ask for plain
+  // JSON (its middleware force-injects text/event-stream into Accept). The
+  // Hermes gateway's MCP client does not parse that for request/response
+  // calls: it saw HTTP 200 on tools/list and registered ZERO tools, silently.
+  // Every other MCP server we expose (sokosumi) returns plain JSON, so we
+  // unwrap here and hand the machine the shape it already handles.
+  // GET/SSE streams are left alone — those are genuine event streams.
+  const contentType = upstream.headers.get('content-type') ?? '';
+  if (method === 'POST' && contentType.includes('text/event-stream')) {
+    const raw = await upstream.text();
+    const payload = extractSseJsonPayload(raw);
+    if (payload) {
+      outHeaders['content-type'] = 'application/json';
+      return new Response(payload, { status: upstream.status, headers: outHeaders });
+    }
+    // Unparseable — hand back what we got rather than inventing a response.
+    logger.warn({ instanceId, preview: raw.slice(0, 200) }, 'hindsight_sse_unwrap_failed');
+    return new Response(raw, { status: upstream.status, headers: outHeaders });
+  }
+
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+/**
+ * Pull the JSON-RPC payload out of an SSE-framed response body. Returns the
+ * LAST complete `data:` payload that parses as JSON (a JSON-RPC response is
+ * normally a single `event: message`, but tolerate leading comments/pings and
+ * multi-line data). Null when nothing parses.
+ */
+export function extractSseJsonPayload(body: string): string | null {
+  let found: string | null = null;
+  // Frames are separated by a blank line; within a frame, `data:` lines
+  // concatenate (SSE spec joins them with \n).
+  for (const frame of body.split(/\r?\n\r?\n/)) {
+    const dataLines = frame
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trimStart());
+    if (dataLines.length === 0) continue;
+    const joined = dataLines.join('\n').trim();
+    if (!joined || joined === '[DONE]') continue;
+    try {
+      JSON.parse(joined);
+      found = joined;
+    } catch {
+      /* not this frame */
+    }
+  }
+  return found;
 }
 
 router.all('/v1/hindsight/:instanceId/mcp', forward);
