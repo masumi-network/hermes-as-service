@@ -21,6 +21,7 @@ import {
 import { imagesAdminRouter } from './images-routes.js';
 import { testsAdminRouter } from './tests-routes.js';
 import { renderChatMsg, renderEventRow, userLabel, compactText, shortProvider, dayAgo, hoursAgo, startOfMonthUtc, startOfDayUtc, usageByDay, perUserMonthlyAtCap, imageTagWhere, IMAGE_TAG_RE } from './helpers.js';
+import { resyncMcpServersForUser } from '../integrations/manager.js';
 import { reconcileImageTags } from '../images/reconcile.js';
 import { TEST_SUITES, findSuite } from '../bench/suites.js';
 import { startSuiteRun } from '../bench/runner.js';
@@ -1045,6 +1046,19 @@ router.post('/admin/instances/:userId/sync-config', async (c) => {
     logger.warn({ err, userId }, 'admin_sync_config_failed');
   }
   return c.redirect(`/admin/instances/${encodeURIComponent(userId)}`);
+});
+
+/** Re-apply the current MCP server SET to the machine (adds/removes servers
+ *  like `memory`). The capability roll only restarts, which can't deliver a
+ *  newly-added server — env survives a restart. Returns JSON so the result is
+ *  visible rather than a silent redirect. */
+router.post('/admin/instances/:userId/resync-mcp-servers', async (c) => {
+  const userId = c.req.param('userId');
+  const res = await resyncMcpServersForUser(userId).catch((err) => {
+    logger.warn({ err, userId }, 'admin_resync_mcp_servers_failed');
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  });
+  return c.json(res, res.ok ? 200 : 502);
 });
 
 router.post('/admin/instances/:userId/schedules/:scheduleId/toggle', async (c) => {

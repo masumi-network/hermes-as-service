@@ -379,7 +379,60 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
     url: `${base}/v1/sokosumi-mcp/${instance.id}`,
     headers: { Authorization: `Bearer ${proxyToken}` },
   });
+  // Long-term memory (Hindsight), when configured. The bank is bound to this
+  // user by the proxy from the AUTHENTICATED userId — the machine gets no
+  // bank id and cannot address another user's memory. Omitted entirely when
+  // HINDSIGHT_MCP_URL is unset, so the feature ships dark.
+  if (cfg.HINDSIGHT_MCP_URL.trim()) {
+    entries.push({
+      name: 'memory',
+      url: `${base}/v1/hindsight/${instance.id}/mcp`,
+      headers: { Authorization: `Bearer ${proxyToken}` },
+    });
+  }
   return JSON.stringify(entries);
+}
+
+/**
+ * Re-apply the CURRENT desired MCP server list to a live machine.
+ *
+ * Needed whenever the SET of servers changes (not just the tool catalog):
+ * MCP_SERVERS_JSON is machine env, and env survives a restart — so the
+ * capability roll, which only restarts, can't deliver a newly-added server
+ * like `memory`. This patches the env (Fly replaces the machine in place)
+ * and waits for it to come back.
+ *
+ * No-ops when the machine isn't in a patchable state. Returns what happened
+ * so the caller can report it.
+ */
+export async function resyncMcpServersForUser(
+  userId: string,
+): Promise<{ ok: boolean; reason?: string; servers?: string[] }> {
+  const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!instance || instance.destroyedAt) return { ok: false, reason: 'no_instance' };
+  if (!instance.spriteId || !instance.spriteName) return { ok: false, reason: 'no_machine' };
+
+  const mcpJson = await buildMcpServersJsonForUser(userId);
+  const names = (JSON.parse(mcpJson) as Array<{ name: string }>).map((e) => e.name);
+  const fly = new FlyClient();
+  try {
+    await fly.patchMachineEnv(instance.spriteName, instance.spriteId, {
+      MCP_SERVERS_JSON: mcpJson || '[]',
+    });
+    await fly.waitForState(instance.spriteName, instance.spriteId, 'started', 90);
+  } catch (err) {
+    logger.error({ err, userId }, 'mcp_servers_resync_failed');
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  // The replace re-registered the live tool catalog — stamp it so the
+  // capability-roll sweep doesn't bounce this machine again immediately.
+  try {
+    await stampMcpToolsVersion(instance.id);
+  } catch {
+    /* best-effort */
+  }
+  logger.info({ userId, servers: names }, 'mcp_servers_resynced');
+  return { ok: true, servers: names };
 }
 
 function toView(row: {

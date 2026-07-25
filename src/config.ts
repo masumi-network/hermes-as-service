@@ -117,6 +117,14 @@ const schema = z.object({
     .optional()
     .default('true')
     .transform((v) => v.trim().toLowerCase() !== 'false'),
+  // Hindsight long-term memory (self-hosted). Base URL of the Hindsight API
+  // on the private network, e.g. "http://hindsight.railway.internal:8888".
+  // EMPTY = the whole feature is off: no memory tools are injected into any
+  // machine and the proxy route answers "not configured".
+  HINDSIGHT_MCP_URL: z.string().optional().default(''),
+  // Bearer token the Hindsight MCP endpoint expects
+  // (its HINDSIGHT_API_MCP_AUTH_TOKEN). Held ONLY here — machines never see it.
+  HINDSIGHT_MCP_TOKEN: z.string().optional().default(''),
   // Kill switch for the chat ground-truth guard (catches the agent claiming a
   // Sokosumi write it never performed and fires a self-heal turn). Default on;
   // set to "off" to disable without touching code.

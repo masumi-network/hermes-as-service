@@ -21,13 +21,13 @@ and the Composio proxy.
 
 ## Phase 1 — stand up the service (needs Railway dashboard: Patrick or pairing)
 
-- [ ] **1.1 Create Railway service `hindsight`** in the hermes-orchestrator
+- [x] **1.1 Create Railway service `hindsight`** in the hermes-orchestrator
       project from image `ghcr.io/vectorize-io/hindsight:v0.8.5` (PINNED —
       pre-1.0 project, never `:latest`). Attach a volume mounted at
       `/home/hindsight/.pg0` (embedded Postgres; isolated from our main DB by
       design). No public domain — private networking only
       (`hindsight.railway.internal:8888`).
-- [ ] **1.2 Env for the service:**
+- [x] **1.2 Env for the service:**
       `HINDSIGHT_API_LLM_PROVIDER=openai`,
       `HINDSIGHT_API_LLM_BASE_URL=https://openrouter.ai/api/v1`,
       `HINDSIGHT_API_LLM_API_KEY=<OPENROUTER_API_KEY>`,
@@ -43,10 +43,10 @@ and the Composio proxy.
 
 ## Phase 2 — orchestrator proxy route
 
-- [ ] **2.1 Config** (`src/config.ts`): `HINDSIGHT_MCP_URL` (optional,
+- [x] **2.1 Config** (`src/config.ts`): `HINDSIGHT_MCP_URL` (optional,
       default '') + `HINDSIGHT_MCP_TOKEN` (optional). Empty URL = feature
       fully off — deploying the code before Phase 1 is safe.
-- [ ] **2.2 Route `src/routes/hindsight-mcp.ts`** modeled on mcp-proxy:
+- [x] **2.2 Route `src/routes/hindsight-mcp.ts`** modeled on mcp-proxy:
       - `ALL /v1/hindsight/:instanceId/mcp` with `authenticateInstanceBearer`
         (the shared helper from PLAN 4.1).
       - Forward JSON-RPC to `HINDSIGHT_MCP_URL` with the auth token header;
@@ -60,19 +60,19 @@ and the Composio proxy.
         v1). Banks are auto-created on first retain; if the live server 404s
         instead, create-on-first-use in the proxy.
       - Timeouts on every upstream fetch (20s) per the audit convention.
-- [ ] **2.3 Tests** (`tests/hindsight-mcp.test.ts`, fetch-mock style like
+- [x] **2.3 Tests** (`tests/hindsight-mcp.test.ts`, fetch-mock style like
       mcp-org-scope.test.ts): bank_id overwrite proven (agent-supplied
       bank_id ignored), tools/list filtered, bearer auth rejects bad tokens,
       feature-off (empty URL) returns a clean "not configured" error.
 
 ## Phase 3 — deliver the tools to machines
 
-- [ ] **3.1 Injection** (`src/integrations/manager.ts`
+- [x] **3.1 Injection** (`src/integrations/manager.ts`
       `buildMcpServersJsonForUser`): append a `hindsight` server entry →
       `${ORCHESTRATOR_PUBLIC_URL}/v1/hindsight/${instanceId}/mcp` with the
       per-instance bearer, ONLY when `HINDSIGHT_MCP_URL` is configured.
       New provisions get it automatically.
-- [ ] **3.2 Existing machines:** a new SERVER in `MCP_SERVERS_JSON` is
+- [x] **3.2 Existing machines:** a new SERVER in `MCP_SERVERS_JSON` is
       machine ENV — the capability roll's tool-hash does NOT cover it. Reuse
       the integration-connect path: patch env (`patchMachineEnv`) + restart,
       swept over idle instances (extend `mcp-tools-roll` staleness to include
@@ -128,3 +128,39 @@ Phase 1: ~half day (dashboard + smoke). Phases 2–3: ~1.5 days (the pattern
 exists twice in-repo). Phase 4: ~half day + image roll. Phase 5: ~half day.
 **Total ≈ 3 focused days**, decoupled — each phase deployable alone, feature
 dark until `HINDSIGHT_MCP_URL` is set.
+
+
+---
+
+## Execution log (2026-07-25)
+
+**Deviations from the plan, and why — all verified against source/live infra:**
+
+1. **Image tag is `0.8.5`, NOT `v0.8.5`** — ghcr 404s on the `v` prefix. First
+   deploy failed on MANIFEST_UNKNOWN until corrected.
+2. **Embedded Postgres does NOT work on Railway.** Railway bind-mounts volumes
+   root-owned; Hindsight runs rootless (UID 1000) and refuses to init its
+   embedded PG (their issue #1483). Switched to EXTERNAL Postgres via
+   `HINDSIGHT_API_DATABASE_URL`. Hindsight's container now has NO volume (the
+   local embedding model re-downloads on restart, ~30s boot cost — acceptable).
+3. **Railway's own Postgres can't host it** — `postgres-ssl:16` has no `vector`
+   extension (checked `pg_available_extensions`: only pg_trgm). Created a
+   dedicated `hindsightdb` service from `pgvector/pgvector:pg18` with its own
+   volume. This ALSO avoids a real hazard: the orchestrator boots with
+   `prisma db push --accept-data-loss`, which must never point at a database
+   holding Hindsight's tables.
+   - Gotcha: PGDATA must be a SUBDIRECTORY of the mount
+     (`/var/lib/postgresql/18/docker/pgdata`) or initdb aborts on `lost+found`.
+4. **Tenancy is stronger than planned.** Hindsight supports SINGLE-BANK MODE:
+   the bank is bound by URL path (`/mcp/{bank_id}/`), not a tool argument. The
+   proxy builds that path from the AUTHENTICATED userId, so there is no
+   `bank_id` argument to rewrite or tamper with — strictly safer than the
+   planned argument-overwrite. Path traversal is covered by encodeURIComponent
+   (unit-tested).
+5. **Tool restriction is server-side**, not proxy-side: set
+   `HINDSIGHT_API_MCP_ENABLED_TOOLS=retain,recall,reflect` on the Hindsight
+   service. Bank-management tools are never registered at all.
+6. **Smoke test deferred to the proxy path.** `railway ssh` needs an
+   interactive re-login, and I would not expose Hindsight publicly just to
+   curl it. Verification happens through the authenticated proxy after deploy
+   (Phase 5.1/5.2) instead.

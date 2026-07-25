@@ -9,6 +9,7 @@ import { proxyRouter } from './routes/proxy.js';
 import { llmProxyRouter } from './routes/llm-proxy.js';
 import { mcpProxyRouter } from './routes/mcp-proxy.js';
 import { sokosumiMcpRouter } from './routes/sokosumi-mcp.js';
+import { hindsightMcpRouter } from './routes/hindsight-mcp.js';
 import { schedulesSokosumiRouter, schedulesSpriteRouter } from './routes/schedules.js';
 import { outboxSokosumiRouter, outboxSpriteRouter } from './routes/outbox.js';
 import { confirmationsRouter } from './routes/confirmations.js';
@@ -64,6 +65,7 @@ app.get('/health', (c) => c.json({ ok: true }));
 app.route('/', llmProxyRouter);
 app.route('/', mcpProxyRouter);
 app.route('/', sokosumiMcpRouter);
+app.route('/', hindsightMcpRouter);
 app.route('/', schedulesSpriteRouter);
 app.route('/', outboxSpriteRouter);
 
