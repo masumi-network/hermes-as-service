@@ -216,6 +216,7 @@ async function runFlyPipeline(
         image: cfg.FLY_MACHINE_IMAGE,
         volumeId: volume.id,
         instanceId,
+        userId: row.userId,
         apiServerKey,
         llmProxyToken,
         mcpServersJson,
@@ -278,7 +279,7 @@ async function claimPoolPipeline(
     await fly.patchMachineEnv(
       pool.appName,
       pool.machineId,
-      perInstanceEnv(cfg, { instanceId, apiServerKey, llmProxyToken, mcpServersJson }),
+      perInstanceEnv(cfg, { instanceId, userId: row.userId, apiServerKey, llmProxyToken, mcpServersJson }),
     );
 
     // patchMachineEnv on a stopped machine leaves it stopped (config applies

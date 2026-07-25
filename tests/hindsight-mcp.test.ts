@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { hindsightBankUrl } from '../src/routes/hindsight-mcp.js';
 
 /**
  * The security property under test: a machine can only ever reach ITS OWN
@@ -7,31 +6,38 @@ import { hindsightBankUrl } from '../src/routes/hindsight-mcp.js';
  * and the proxy builds that path from the AUTHENTICATED userId — so there is
  * no bank_id argument for an agent to tamper with.
  */
-describe('hindsightBankUrl — bank binding', () => {
-  it('binds the bank from the userId in the path', () => {
-    expect(hindsightBankUrl('http://hindsight.railway.internal:8888', 'user_1', '')).toBe(
-      'http://hindsight.railway.internal:8888/mcp/user_1/',
+describe('forceBankPath — tenancy enforcement', () => {
+  const UID = '8Z5tyaPc4LmMPB74hrXbi9huAa9QgJQz';
+
+  it('rewrites the REST bank segment to the authenticated user', async () => {
+    const { forceBankPath } = await import('../src/routes/hindsight-mcp.js');
+    expect(forceBankPath('/v1/default/banks/someone-else/memories', UID)).toBe(
+      `/v1/default/banks/${UID}/memories`,
     );
   });
 
-  it('handles a real 32-char Sokosumi user id verbatim', () => {
-    const uid = '8Z5tyaPc4LmMPB74hrXbi9huAa9QgJQz';
-    expect(hindsightBankUrl('http://h:8888', uid, '')).toBe(`http://h:8888/mcp/${uid}/`);
+  it('rewrites the MCP single-bank segment too', async () => {
+    const { forceBankPath } = await import('../src/routes/hindsight-mcp.js');
+    expect(forceBankPath('/mcp/attacker-bank/', UID)).toBe(`/mcp/${UID}/`);
   });
 
-  it('tolerates a trailing slash on the base url', () => {
-    expect(hindsightBankUrl('http://h:8888/', 'u', '')).toBe('http://h:8888/mcp/u/');
+  it('rewrites EVERY bank occurrence in a path', async () => {
+    const { forceBankPath } = await import('../src/routes/hindsight-mcp.js');
+    expect(forceBankPath('/v1/default/banks/a/x/banks/b/y', UID)).toBe(
+      `/v1/default/banks/${UID}/x/banks/${UID}/y`,
+    );
   });
 
-  it('appends a sub-path without losing the bank segment', () => {
-    expect(hindsightBankUrl('http://h:8888', 'u', 'messages')).toBe('http://h:8888/mcp/u/messages');
+  it('URL-encodes the user id so it cannot escape its segment', async () => {
+    const { forceBankPath } = await import('../src/routes/hindsight-mcp.js');
+    const out = forceBankPath('/v1/default/banks/x/memories', '../other');
+    expect(out).toBe('/v1/default/banks/..%2Fother/memories');
+    expect(out).not.toContain('/banks/../');
   });
 
-  it('URL-ENCODES a userId so it cannot escape its bank segment (path traversal)', () => {
-    // A hostile/odd id must never produce a path that reaches another bank.
-    const url = hindsightBankUrl('http://h:8888', '../other-bank', '');
-    expect(url).toBe('http://h:8888/mcp/..%2Fother-bank/');
-    expect(url).not.toContain('/mcp/../');
+  it('leaves paths without a bank segment untouched', async () => {
+    const { forceBankPath } = await import('../src/routes/hindsight-mcp.js');
+    expect(forceBankPath('/health', UID)).toBe('/health');
   });
 });
 

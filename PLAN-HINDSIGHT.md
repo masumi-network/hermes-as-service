@@ -164,3 +164,50 @@ dark until `HINDSIGHT_MCP_URL` is set.
    interactive re-login, and I would not expose Hindsight publicly just to
    curl it. Verification happens through the authenticated proxy after deploy
    (Phase 5.1/5.2) instead.
+
+
+---
+
+## ARCHITECTURE CORRECTION (2026-07-25, after live testing)
+
+**The MCP approach was wrong.** Hermes ships a NATIVE hindsight memory
+provider (`/opt/hermes/plugins/memory/hindsight/`), one of nine providers.
+Native beats MCP decisively: it injects memory context into the system
+prompt, PREFETCHES relevant memories before every turn, and SYNCS turns
+after every response. MCP tools only fire when the model chooses to call
+them — which is exactly why the MCP build never produced memory behaviour
+even though the tools registered.
+
+(For the record: my earlier "the gateway caps tools at ~20" conclusion was
+NOT established. 28 registered vs 20 visible was real, but the cause was
+never proven and is now moot — we no longer inject an MCP memory server.)
+
+**Provider config (verified from the installed source, not the docs):**
+- modes are `cloud` | `local_embedded` | `local_external` — the docs list
+  only two. Ours is `local_external`.
+- `api_url` is a **config.json key only** (no env var); everything else has
+  an env var (HINDSIGHT_MODE / _API_KEY / _BANK_ID / _BUDGET / ...).
+- the client is built as `Hindsight(base_url=api_url, api_key=...)`, so the
+  machine can point at OUR proxy and authenticate with its own instance
+  token — the Hindsight credential still never leaves the orchestrator.
+- `bank_id` is static per machine, which is exactly right here: one machine
+  per user, so it is simply that user's id.
+
+**Implemented:**
+- proxy generalized from `/mcp` only → ALL REST paths, rewriting every
+  `/banks/{x}/` (and `/mcp/{x}/`) segment to the AUTHENTICATED userId. That
+  is the isolation guarantee, unit-tested including traversal.
+- machine env: HINDSIGHT_API_URL (our proxy) / _API_KEY (instance token) /
+  _BANK_ID (userId) / _MODE, in both cold-provision and pool-claim paths.
+- launcher writes `$HERMES_HOME/hindsight/config.json` and appends
+  `memory: provider: hindsight` to config.yaml — ONLY when
+  HINDSIGHT_API_URL is present, so the feature stays dark otherwise.
+- auto_retain + auto_recall ON (memory_mode hybrid) per Patrick's call.
+- consolidation model: xiaomi/mimo-v2.5 (non-Pro) — $0.14/M, verified
+  cheaper than the Flash-class alternatives considered.
+- the MCP `memory` server injection was REMOVED (two competing memory paths
+  would be worse than one).
+
+**Still to verify after the v26 roll:** auto-recall/auto-retain actually
+firing (proxy logs should show traffic WITHOUT the agent choosing a tool),
+and the cross-user isolation probe.

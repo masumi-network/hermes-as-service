@@ -26,6 +26,7 @@ mkdir -p "$HERMES_HOME"
       GATEWAY_ALLOW_ALL_USERS \
       EXA_API_KEY \
       ORCHESTRATOR_BASE INSTANCE_ID ORCHESTRATOR_OUTBOX_TOKEN \
+      HINDSIGHT_MODE HINDSIGHT_API_KEY HINDSIGHT_BANK_ID \
       MCP_SERVERS_JSON; do
     val="${!var-}"
     if [ -n "$val" ]; then
@@ -46,6 +47,30 @@ chmod 0600 "$HERMES_HOME/.env"
 # boot via the upstream entrypoint; we override that here.
 cp -f /opt/hermes-user-config/SOUL.md  "$HERMES_HOME/SOUL.md"
 cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
+
+# ---- 2b. Hindsight long-term memory (native provider, mode local_external) ----
+# The orchestrator passes HINDSIGHT_API_URL (its own per-instance proxy) and
+# HINDSIGHT_BANK_ID (this user's id). We write the provider's config.json and
+# switch memory.provider on. When HINDSIGHT_API_URL is absent the whole
+# feature stays off and Hermes keeps its built-in memory only.
+if [ -n "${HINDSIGHT_API_URL:-}" ]; then
+  mkdir -p "$HERMES_HOME/hindsight"
+  cat > "$HERMES_HOME/hindsight/config.json" <<HSEOF
+{
+  "mode": "local_external",
+  "api_url": "${HINDSIGHT_API_URL}",
+  "bank_id": "${HINDSIGHT_BANK_ID:-hermes}",
+  "memory_mode": "hybrid",
+  "auto_retain": true,
+  "auto_recall": true,
+  "retain_async": true,
+  "recall_budget": "mid",
+  "retain_context": "conversation between Hermes and the user"
+}
+HSEOF
+  chmod 0600 "$HERMES_HOME/hindsight/config.json"
+  printf '\nmemory:\n  provider: hindsight\n' >> "$HERMES_HOME/config.yaml"
+fi
 
 # ---- 2b. MCP servers (HTTP-based, from OAuth broker) ----
 # MCP_SERVERS_JSON is set by the orchestrator when the user has connected

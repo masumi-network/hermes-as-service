@@ -5,27 +5,25 @@ import { loadConfig } from '../config.js';
 import { authenticateInstanceBearer } from './instance-auth.js';
 
 /**
- * Per-user Hindsight (long-term memory) MCP proxy.
+ * Per-user Hindsight proxy — the transport for Hermes' NATIVE hindsight
+ * memory provider (mode `local_external`).
  *
- * Hermes machines call here with their per-instance bearer; we forward to the
- * self-hosted Hindsight MCP server on the private network, attaching the
- * Hindsight auth token (held only in our Railway env). Same trust model as the
- * Composio proxy: the memory service's credentials never land on a machine.
+ * The plugin on each machine is pointed at
+ * `${ORCHESTRATOR_PUBLIC_URL}/v1/hindsight/{instanceId}` as its `api_url`
+ * and authenticates with that instance's own bearer. We forward to the
+ * self-hosted Hindsight server on the private network, attaching the real
+ * Hindsight credential — which never lands on a machine. Same trust model as
+ * the Composio + Sokosumi proxies.
  *
- * TENANCY — the important part. Hindsight supports "single-bank mode" where
- * the bank is bound by the URL path (`/mcp/{bank_id}/`), not by a tool
- * argument. We build that path from the AUTHENTICATED userId, so a machine
- * physically cannot address another user's memory: there is no bank_id
- * argument to tamper with, and the agent never learns any bank id but its own.
- *
- * Tool surface is restricted server-side on the Hindsight service itself
- * (HINDSIGHT_API_MCP_ENABLED_TOOLS=retain,recall,reflect), so bank management
- * tools are not exposed to agents at all.
+ * TENANCY: Hindsight addresses a memory bank as a path segment
+ * (`.../banks/{bank_id}/...`). We REWRITE that segment to the AUTHENTICATED
+ * userId on every request, so a machine cannot read or write another user's
+ * memory even if its local config were tampered with.
  */
 const router = new Hono();
 
-/** Hindsight calls are memory ops (recall does hybrid retrieval; reflect runs
- *  an LLM turn). Generous but bounded — a hung call must not wedge an agent. */
+/** Memory ops are prefetch-blocking on the agent's turn; bounded but generous
+ *  (reflect runs an LLM pass server-side). */
 const UPSTREAM_TIMEOUT_MS = 60_000;
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -35,46 +33,69 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-/** JSON-RPC-shaped error so the MCP client surfaces it instead of hanging. */
-function rpcUnavailable(message: string): Response {
-  return jsonResponse(503, { jsonrpc: '2.0', error: { code: -32603, message } });
+/**
+ * Force the bank segment to `userId` wherever it appears.
+ * `/v1/default/banks/<anything>/memories` → `/v1/default/banks/<userId>/memories`
+ * Also covers the MCP single-bank form `/mcp/<anything>/`.
+ * Exported for tests — this is the isolation guarantee.
+ */
+export function forceBankPath(path: string, userId: string): string {
+  const safe = encodeURIComponent(userId);
+  return path
+    .replace(/\/banks\/[^/]+/g, `/banks/${safe}`)
+    .replace(/^\/mcp\/[^/]+/, `/mcp/${safe}`);
 }
 
 /**
- * Build the upstream single-bank MCP URL for a user. The trailing slash is
- * required by Hindsight's single-bank route (`/mcp/{bank_id}/`).
+ * Pull the JSON-RPC/JSON payload out of an SSE-framed body. FastMCP answers
+ * POSTs with `event: message\ndata: {...}` even when plain JSON was requested;
+ * clients that expect JSON see a 200 and parse nothing. Returns the LAST
+ * parseable `data:` payload, or null.
  */
-export function hindsightBankUrl(baseUrl: string, userId: string, rest: string): string {
-  const base = baseUrl.replace(/\/$/, '');
-  const suffix = rest ? `/${rest.replace(/^\//, '')}` : '';
-  return `${base}/mcp/${encodeURIComponent(userId)}/${suffix.replace(/^\//, '')}`;
+export function extractSseJsonPayload(body: string): string | null {
+  let found: string | null = null;
+  for (const frame of body.split(/\r?\n\r?\n/)) {
+    const dataLines = frame
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trimStart());
+    if (dataLines.length === 0) continue;
+    const joined = dataLines.join('\n').trim();
+    if (!joined || joined === '[DONE]') continue;
+    try {
+      JSON.parse(joined);
+      found = joined;
+    } catch {
+      /* not this frame */
+    }
+  }
+  return found;
 }
 
 async function forward(c: Context): Promise<Response> {
   const cfg = loadConfig();
-  if (!cfg.HINDSIGHT_MCP_URL.trim()) {
-    return rpcUnavailable('Hindsight memory is not configured on this orchestrator.');
+  const base = cfg.HINDSIGHT_MCP_URL.trim();
+  if (!base) {
+    return jsonResponse(503, { error: { message: 'Hindsight memory is not configured.' } });
   }
   const instanceId = c.req.param('instanceId') ?? '';
-  const auth = await authenticateInstanceBearer(instanceId, c.req.header('Authorization'), {
+  // The provider SDK may send its key as a bearer or as x-api-key.
+  const bearer = c.req.header('Authorization') ?? `Bearer ${c.req.header('x-api-key') ?? ''}`;
+  const auth = await authenticateInstanceBearer(instanceId, bearer, {
     decryptFailMessage: 'token decrypt failed',
   });
   if (!auth.ok) return jsonResponse(auth.status, { error: { message: auth.message } });
 
-  // The bank is the AUTHENTICATED user — never anything the caller supplied.
-  const upstreamUrl = hindsightBankUrl(
-    cfg.HINDSIGHT_MCP_URL,
-    auth.row.userId,
-    c.req.param('rest') ?? '',
-  );
+  const rest = c.req.param('rest') ?? '';
+  const url = new URL(c.req.url);
+  const upstreamPath = forceBankPath(`/${rest}`.replace(/\/+/g, '/'), auth.row.userId);
+  const upstreamUrl = `${base.replace(/\/$/, '')}${upstreamPath}${url.search}`;
 
   const method = c.req.method.toUpperCase();
   const headers: Record<string, string> = {};
   if (cfg.HINDSIGHT_MCP_TOKEN.trim()) {
     headers['Authorization'] = `Bearer ${cfg.HINDSIGHT_MCP_TOKEN.trim()}`;
   }
-  // Pass through the MCP-relevant request headers only — never the machine's
-  // own bearer, and never arbitrary client headers.
   for (const h of ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version']) {
     const v = c.req.header(h);
     if (v) headers[h] = v;
@@ -96,16 +117,16 @@ async function forward(c: Context): Promise<Response> {
     const isTimeout =
       err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
     logger.warn(
-      { err, instanceId, ms: Date.now() - t0, timeout: isTimeout },
+      { err, instanceId, path: upstreamPath, timeout: isTimeout },
       'hindsight_proxy_upstream_failed',
     );
-    return rpcUnavailable(
-      isTimeout ? 'Memory service timed out.' : 'Memory service unreachable.',
-    );
+    return jsonResponse(503, {
+      error: { message: isTimeout ? 'Memory service timed out.' : 'Memory service unreachable.' },
+    });
   }
 
   logger.info(
-    { instanceId, method, status: upstream.status, ms: Date.now() - t0 },
+    { instanceId, method, path: upstreamPath, status: upstream.status, ms: Date.now() - t0 },
     'hindsight_proxy_forwarded',
   );
 
@@ -115,14 +136,7 @@ async function forward(c: Context): Promise<Response> {
     if (v) outHeaders[h] = v;
   }
 
-  // NORMALIZE THE FRAMING. Hindsight (FastMCP) answers a JSON-RPC POST with an
-  // SSE frame — `event: message\ndata: {...}` — even when we ask for plain
-  // JSON (its middleware force-injects text/event-stream into Accept). The
-  // Hermes gateway's MCP client does not parse that for request/response
-  // calls: it saw HTTP 200 on tools/list and registered ZERO tools, silently.
-  // Every other MCP server we expose (sokosumi) returns plain JSON, so we
-  // unwrap here and hand the machine the shape it already handles.
-  // GET/SSE streams are left alone — those are genuine event streams.
+  // Normalize SSE-framed POST replies to plain JSON (see extractSseJsonPayload).
   const contentType = upstream.headers.get('content-type') ?? '';
   if (method === 'POST' && contentType.includes('text/event-stream')) {
     const raw = await upstream.text();
@@ -131,7 +145,6 @@ async function forward(c: Context): Promise<Response> {
       outHeaders['content-type'] = 'application/json';
       return new Response(payload, { status: upstream.status, headers: outHeaders });
     }
-    // Unparseable — hand back what we got rather than inventing a response.
     logger.warn({ instanceId, preview: raw.slice(0, 200) }, 'hindsight_sse_unwrap_failed');
     return new Response(raw, { status: upstream.status, headers: outHeaders });
   }
@@ -139,35 +152,7 @@ async function forward(c: Context): Promise<Response> {
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
 }
 
-/**
- * Pull the JSON-RPC payload out of an SSE-framed response body. Returns the
- * LAST complete `data:` payload that parses as JSON (a JSON-RPC response is
- * normally a single `event: message`, but tolerate leading comments/pings and
- * multi-line data). Null when nothing parses.
- */
-export function extractSseJsonPayload(body: string): string | null {
-  let found: string | null = null;
-  // Frames are separated by a blank line; within a frame, `data:` lines
-  // concatenate (SSE spec joins them with \n).
-  for (const frame of body.split(/\r?\n\r?\n/)) {
-    const dataLines = frame
-      .split(/\r?\n/)
-      .filter((l) => l.startsWith('data:'))
-      .map((l) => l.slice(5).trimStart());
-    if (dataLines.length === 0) continue;
-    const joined = dataLines.join('\n').trim();
-    if (!joined || joined === '[DONE]') continue;
-    try {
-      JSON.parse(joined);
-      found = joined;
-    } catch {
-      /* not this frame */
-    }
-  }
-  return found;
-}
-
-router.all('/v1/hindsight/:instanceId/mcp', forward);
-router.all('/v1/hindsight/:instanceId/mcp/:rest{.*}', forward);
+router.all('/v1/hindsight/:instanceId', forward);
+router.all('/v1/hindsight/:instanceId/:rest{.*}', forward);
 
 export { router as hindsightMcpRouter };

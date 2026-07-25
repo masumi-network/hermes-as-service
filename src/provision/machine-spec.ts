@@ -14,6 +14,8 @@ export function perInstanceEnv(
   cfg: Config,
   args: {
     instanceId: string;
+    /** End-user id — the Hindsight memory bank for this machine. */
+    userId?: string;
     apiServerKey: string;
     llmProxyToken: string;
     mcpServersJson: string;
@@ -29,6 +31,17 @@ export function perInstanceEnv(
     ORCHESTRATOR_OUTBOX_TOKEN: args.llmProxyToken,
     // Composio MCP servers (empty array if the user hasn't connected anything)
     MCP_SERVERS_JSON: args.mcpServersJson,
+    // Hermes' NATIVE hindsight memory provider (mode local_external). The
+    // machine talks to our proxy, never to Hindsight directly, and never
+    // holds the Hindsight credential. Empty API URL = provider left off.
+    ...(cfg.HINDSIGHT_MCP_URL.trim()
+      ? {
+          HINDSIGHT_API_URL: `${orch}/v1/hindsight/${args.instanceId}`,
+          HINDSIGHT_API_KEY: args.llmProxyToken,
+          HINDSIGHT_BANK_ID: args.userId ?? '',
+          HINDSIGHT_MODE: 'local_external',
+        }
+      : {}),
   };
 }
 
@@ -62,6 +75,7 @@ export function buildMachineConfig(
     image: string;
     volumeId: string;
     instanceId: string;
+    userId?: string;
     apiServerKey: string;
     llmProxyToken: string;
     mcpServersJson: string;
@@ -79,6 +93,7 @@ export function buildMachineConfig(
       ...staticMachineEnv(cfg),
       ...perInstanceEnv(cfg, {
         instanceId: args.instanceId,
+        userId: args.userId,
         apiServerKey: args.apiServerKey,
         llmProxyToken: args.llmProxyToken,
         mcpServersJson: args.mcpServersJson,

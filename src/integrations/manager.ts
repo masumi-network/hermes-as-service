@@ -379,17 +379,6 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
     url: `${base}/v1/sokosumi-mcp/${instance.id}`,
     headers: { Authorization: `Bearer ${proxyToken}` },
   });
-  // Long-term memory (Hindsight), when configured. The bank is bound to this
-  // user by the proxy from the AUTHENTICATED userId — the machine gets no
-  // bank id and cannot address another user's memory. Omitted entirely when
-  // HINDSIGHT_MCP_URL is unset, so the feature ships dark.
-  if (cfg.HINDSIGHT_MCP_URL.trim()) {
-    entries.push({
-      name: 'memory',
-      url: `${base}/v1/hindsight/${instance.id}/mcp`,
-      headers: { Authorization: `Bearer ${proxyToken}` },
-    });
-  }
   return JSON.stringify(entries);
 }
 
@@ -407,17 +396,41 @@ export async function buildMcpServersJsonForUser(userId: string): Promise<string
  */
 export async function resyncMcpServersForUser(
   userId: string,
-): Promise<{ ok: boolean; reason?: string; servers?: string[] }> {
+): Promise<{ ok: boolean; reason?: string; servers?: string[]; memory?: boolean }> {
   const instance = await prisma.hermesInstance.findUnique({ where: { userId } });
   if (!instance || instance.destroyedAt) return { ok: false, reason: 'no_instance' };
   if (!instance.spriteId || !instance.spriteName) return { ok: false, reason: 'no_machine' };
 
   const mcpJson = await buildMcpServersJsonForUser(userId);
   const names = (JSON.parse(mcpJson) as Array<{ name: string }>).map((e) => e.name);
+  const cfg = loadConfig();
+  const orch = cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, '');
+  // Also (re)apply the Hindsight memory-provider env. Adding the provider to
+  // an EXISTING machine is an env change like MCP_SERVERS_JSON — a restart
+  // alone can't deliver it. Empty HINDSIGHT_MCP_URL clears it back off.
+  let hindsightEnv: Record<string, string> = {
+    HINDSIGHT_API_URL: '',
+    HINDSIGHT_API_KEY: '',
+    HINDSIGHT_BANK_ID: '',
+    HINDSIGHT_MODE: '',
+  };
+  if (cfg.HINDSIGHT_MCP_URL.trim() && instance.llmProxyToken) {
+    try {
+      hindsightEnv = {
+        HINDSIGHT_API_URL: `${orch}/v1/hindsight/${instance.id}`,
+        HINDSIGHT_API_KEY: await decryptSecret(instance.llmProxyToken),
+        HINDSIGHT_BANK_ID: userId,
+        HINDSIGHT_MODE: 'local_external',
+      };
+    } catch (err) {
+      logger.warn({ err, userId }, 'hindsight_env_token_decrypt_failed');
+    }
+  }
   const fly = new FlyClient();
   try {
     await fly.patchMachineEnv(instance.spriteName, instance.spriteId, {
       MCP_SERVERS_JSON: mcpJson || '[]',
+      ...hindsightEnv,
     });
     await fly.waitForState(instance.spriteName, instance.spriteId, 'started', 90);
   } catch (err) {
@@ -431,8 +444,8 @@ export async function resyncMcpServersForUser(
   } catch {
     /* best-effort */
   }
-  logger.info({ userId, servers: names }, 'mcp_servers_resynced');
-  return { ok: true, servers: names };
+  logger.info({ userId, servers: names, memory: Boolean(hindsightEnv.HINDSIGHT_API_URL) }, 'mcp_servers_resynced');
+  return { ok: true, servers: names, memory: Boolean(hindsightEnv.HINDSIGHT_API_URL) };
 }
 
 function toView(row: {
