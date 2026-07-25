@@ -13,6 +13,10 @@ import { labelForBuiltinTool, summarizeResult } from './tool-labels.js';
 
 const router = new Hono();
 
+/** Min gap between live "Thinking…" ticker frames per LLM call. Fast enough
+ *  to feel live, slow enough not to spam the SSE channel. */
+const REASONING_LIVE_THROTTLE_MS = 350;
+
 // ---------- in-memory per-instance rate limit ----------
 const rateBuckets = new Map<string, number[]>();
 
@@ -243,6 +247,23 @@ function publishReasoning(instanceId: string, text: string): void {
 }
 
 /**
+ * LIVE variant: published repeatedly (throttled) WHILE the model is still
+ * reasoning, so the user watches the think happen instead of getting one
+ * chip when the answer starts. Shows the TAIL — the current thought — since
+ * the head freezes once the text outgrows the snippet. Sokosumi replaces
+ * its reasoning chip on every frame, so these render as a live ticker; the
+ * final publishReasoning() call (head summary) still lands last and becomes
+ * the resting state of the chip.
+ */
+function publishReasoningLive(instanceId: string, text: string): void {
+  if (!hasProgressSubscribers(instanceId)) return;
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!flat) return;
+  const detail = flat.length > 160 ? `…${flat.slice(-159)}` : flat;
+  publishProgress(instanceId, { phase: 'reasoning', label: 'Thinking', detail, ts: Date.now() });
+}
+
+/**
  * Every tool's result flows back into the NEXT LLM call as trailing
  * `role:"tool"` messages — so on each forwarded request we can announce the
  * just-completed round as `tool_done` chips (with a short result summary).
@@ -407,6 +428,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   const toolPartials = new Map<number, { name: string; args: string; id: string }>();
   let reasoningBuf = '';
   let reasoningPublished = false;
+  let lastReasoningLiveAt = 0;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -439,10 +461,18 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
         }
         const delta = chunk.choices?.[0]?.delta;
         const rdelta = delta?.reasoning ?? delta?.reasoning_content;
-        if (typeof rdelta === 'string') reasoningBuf += rdelta;
-        // Flush the reasoning snippet the moment real output (content or a
-        // tool call) begins — so the "thinking" step shows during the wait,
-        // before the answer/tool chip, not after.
+        if (typeof rdelta === 'string' && rdelta) {
+          reasoningBuf += rdelta;
+          // LIVE ticker: stream the think while it happens (throttled), so
+          // the UI shows reasoning DURING the wait, not just at answer time.
+          const nowMs = Date.now();
+          if (!reasoningPublished && nowMs - lastReasoningLiveAt >= REASONING_LIVE_THROTTLE_MS) {
+            publishReasoningLive(ref.id, reasoningBuf);
+            lastReasoningLiveAt = nowMs;
+          }
+        }
+        // Flush the final head-summary snippet the moment real output
+        // (content or a tool call) begins — the chip's resting state.
         const realOutputStarted =
           (typeof delta?.content === 'string' && delta.content.length > 0) ||
           Array.isArray(delta?.tool_calls);
