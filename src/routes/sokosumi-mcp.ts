@@ -621,15 +621,31 @@ export async function callTool(
   // call with the stored args and pushes the result to Hermes via the
   // outbox. write-light tools (comments) are exempt — they execute now.
   if (toolDef && confirmsAtMedium(toolDef.access) && ctx.autonomyLevel === 'medium') {
-    const { createPendingConfirmation, summarizeToolCall } = await import('../confirmations/store.js');
+    const { createPendingConfirmation, summarizeToolCall, ConfirmationBurstError } = await import(
+      '../confirmations/store.js'
+    );
     const summary = await summarizeToolCall(name, args, ctx);
-    const pending = await createPendingConfirmation({
-      instanceId: ctx.instanceId,
-      userId: ctx.userId,
-      toolName: name,
-      toolArgs: args,
-      summary,
-    });
+    let pending: { id: string; summary: string };
+    try {
+      pending = await createPendingConfirmation({
+        instanceId: ctx.instanceId,
+        userId: ctx.userId,
+        toolName: name,
+        toolArgs: args,
+        summary,
+      });
+    } catch (err) {
+      if (err instanceof ConfirmationBurstError) {
+        // Stacking a second card the user never asked for is worse than
+        // refusing the call. Hand back an unambiguous stop instruction.
+        return JSON.stringify({
+          status: 'blocked_awaiting_user',
+          confirmation_id: err.existingId,
+          message: `STOP. You already raised a confirmation the user has not answered yet: "${err.existingSummary}". This new call was NOT submitted and no second card was created. Do not call ${name} again. Write ONE plain-language chat message explaining what you are proposing and why, then end your turn and wait for the user.`,
+        });
+      }
+      throw err;
+    }
     return JSON.stringify({
       status: 'pending_confirmation',
       confirmation_id: pending.id,
@@ -750,6 +766,30 @@ export async function executeTool(
       if (q) {
         all = all.filter((x) =>
           ((x.task as { name?: string })?.name ?? '').toLowerCase().includes(q),
+        );
+      }
+      // An empty result used to come back as `{total: 300, count: 0, tasks: []}`
+      // — a total that counts every task in every workspace next to a count of
+      // zero, with no hint that a filter caused it. The agent read that as "the
+      // call failed" and retried six times in forty seconds. Say what happened.
+      if (all.length === 0) {
+        const filters = [
+          status ? `status=${status.toUpperCase()}` : null,
+          q ? `search="${q}"` : null,
+        ].filter(Boolean);
+        return JSON.stringify(
+          {
+            total: totalAcrossWorkspaces,
+            count: 0,
+            truncated,
+            tasks: [],
+            explanation:
+              filters.length > 0
+                ? `No tasks matched ${filters.join(' and ')}. ${totalAcrossWorkspaces} task(s) exist across the ${perScope.length} workspace(s) searched — the filter excluded all of them. This is a complete, successful answer: do NOT retry this call. Drop or widen the filter if you need to see them.`
+                : `This user has no tasks in any of the ${perScope.length} workspace(s) searched. This is a complete, successful answer: do NOT retry this call.`,
+          },
+          null,
+          2,
         );
       }
       return JSON.stringify(

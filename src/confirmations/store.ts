@@ -5,6 +5,11 @@ import type { InstanceContext } from '../routes/sokosumi-mcp.js';
 import { isValidSokosumiEnv } from '../config.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 import { runApprovalContinuation } from './continuation.js';
+import {
+  coworkerName as coworkerNameFor,
+  taskName as taskNameFor,
+  workspaceName as workspaceNameFor,
+} from './names.js';
 
 interface CreateInput {
   instanceId: string;
@@ -12,6 +17,32 @@ interface CreateInput {
   toolName: string;
   toolArgs: Record<string, unknown>;
   summary: string;
+}
+
+/**
+ * A second card for the SAME tool within this window is treated as a retry
+ * loop, not a second intention.
+ *
+ * Observed in production: three sokosumi_create_task cards in five minutes,
+ * two of them NINE SECONDS apart, with no chat message between them. The
+ * exact-args dedupe below never fired because each proposal differed slightly.
+ * From the user's side that is three unexplained approval requests.
+ *
+ * The tool contract already says "tell the user what you're proposing and stop
+ * — do not retry this tool". This enforces it instead of trusting it.
+ */
+const BURST_WINDOW_MS = 90_000;
+
+/** Raised when a burst is detected. The caller turns this into a tool response
+ *  that tells the agent to stop and talk to the user. */
+export class ConfirmationBurstError extends Error {
+  constructor(
+    readonly existingId: string,
+    readonly existingSummary: string,
+  ) {
+    super('a confirmation for this tool is already awaiting the user');
+    this.name = 'ConfirmationBurstError';
+  }
 }
 
 export async function createPendingConfirmation(
@@ -34,6 +65,31 @@ export async function createPendingConfirmation(
       'pending_confirmation_deduped',
     );
     return { id: dup.id, summary: dup.summary };
+  }
+
+  // Burst guard — a DIFFERENT proposal for the same tool moments after the
+  // last one. Exact-args dedupe can't catch this; see BURST_WINDOW_MS.
+  const recent = await prisma.pendingConfirmation.findFirst({
+    where: {
+      userId: input.userId,
+      toolName: input.toolName,
+      status: 'pending',
+      createdAt: { gt: new Date(Date.now() - BURST_WINDOW_MS) },
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, summary: true, createdAt: true },
+  });
+  if (recent) {
+    logger.warn(
+      {
+        userId: input.userId,
+        toolName: input.toolName,
+        existingId: recent.id,
+        sinceMs: Date.now() - recent.createdAt.getTime(),
+      },
+      'pending_confirmation_burst_blocked',
+    );
+    throw new ConfirmationBurstError(recent.id, recent.summary);
   }
   const row = await prisma.pendingConfirmation.create({
     data: {
@@ -71,42 +127,67 @@ export async function createPendingConfirmation(
 export async function summarizeToolCall(
   toolName: string,
   args: Record<string, unknown>,
-  ctx: InstanceContext,
+  /** Omit to skip id→name resolution (summary falls back to raw ids). Naming
+   *  is a nicety; it must never be able to block a confirmation. */
+  ctx?: InstanceContext,
 ): Promise<string> {
+  const who = ctx ? { userId: ctx.userId, env: ctx.env } : null;
+  const coworkerName = (id: string) => (who ? coworkerNameFor(id, who) : Promise.resolve(id));
+  const workspaceName = (id: string | null | undefined) =>
+    who ? workspaceNameFor(id, who) : Promise.resolve(id ?? 'your personal workspace');
+  const taskName = (id: string) => (who ? taskNameFor(id, who) : Promise.resolve(id));
   switch (toolName) {
     case 'sokosumi_create_task': {
-      const taskName = String(args['name'] ?? '(unnamed)').slice(0, 120);
-      const coworkerId = String(args['coworker_id'] ?? '(unspecified)');
-      return `Create a new task "${taskName}" and assign it to coworker ${coworkerId}.`;
+      const title = String(args['name'] ?? '(unnamed)').slice(0, 120);
+      const [coworker, workspace] = await Promise.all([
+        coworkerName(String(args['coworker_id'] ?? '')),
+        workspaceName(args['organization_id'] as string | null | undefined),
+      ]);
+      const why = String(args['description'] ?? '').trim();
+      const head = `Create the task "${title}" in ${workspace} and assign it to ${coworker}.`;
+      // The description IS the explanation of what the coworker will do — the
+      // single most useful thing on the card, and it used to be omitted.
+      return why ? `${head}\n\nWhat they'll be asked to do: ${why.slice(0, 500)}` : head;
     }
     case 'sokosumi_create_job': {
       const agentId = String(args['agent_id'] ?? '(unspecified)');
-      const taskId = String(args['task_id'] ?? '(unspecified)');
-      return `Start a Sokosumi agent job: agent=${agentId} task=${taskId}. This will spend credits.`;
+      const task = await taskName(String(args['task_id'] ?? ''));
+      return `Start a paid Sokosumi agent job under the task "${task}" (agent ${agentId}). This SPENDS CREDITS.`;
     }
     case 'sokosumi_add_task_comment': {
-      const taskId = String(args['task_id'] ?? '(unspecified)');
+      const task = await taskName(String(args['task_id'] ?? ''));
       const comment = String(args['comment'] ?? '');
-      const snippet = comment.length > 140 ? comment.slice(0, 140) + '…' : comment;
-      return `Post a comment on task ${taskId}: "${snippet}".`;
+      const snippet = comment.length > 300 ? comment.slice(0, 300) + '…' : comment;
+      return `Post this comment on the task "${task}":\n\n${snippet}`;
     }
     case 'sokosumi_set_task_status': {
-      const taskId = String(args['task_id'] ?? '(unspecified)');
+      const task = await taskName(String(args['task_id'] ?? ''));
       const status = String(args['status'] ?? '(unspecified)').toUpperCase();
       const verb =
         status === 'READY'
-          ? `Move task ${taskId} to READY so its assigned coworker can start it`
+          ? `Move the task "${task}" to READY so its assigned coworker can start it`
           : status === 'CANCELED'
-            ? `Cancel task ${taskId}`
+            ? `Cancel the task "${task}"`
             : status === 'COMPLETED'
-              ? `Mark task ${taskId} as completed`
-              : `Move task ${taskId} back to ${status}`;
+              ? `Mark the task "${task}" as completed`
+              : `Move the task "${task}" back to ${status}`;
       const note = String(args['comment'] ?? '').trim();
       return note ? `${verb}, with the note "${note.slice(0, 120)}".` : `${verb}.`;
     }
     case 'sokosumi_provide_job_input': {
       const jobId = String(args['job_id'] ?? '(unspecified)');
-      return `Provide input to job ${jobId} so it can continue.`;
+      // Show the ANSWER being submitted. Approving blind was the whole
+      // complaint — "provide input to job <uuid>" says nothing about what.
+      const data = args['input_data'];
+      const rendered =
+        data && typeof data === 'object'
+          ? Object.entries(data as Record<string, unknown>)
+              .map(([k, v]) => `  • ${k}: ${String(JSON.stringify(v) ?? '').slice(0, 200)}`)
+              .join('\n')
+          : String(data ?? '').slice(0, 300);
+      return rendered
+        ? `Answer the paused job ${jobId} with:\n${rendered}`
+        : `Provide input to job ${jobId} so it can continue.`;
     }
     case 'sokosumi_refund_job': {
       const jobId = String(args['job_id'] ?? '(unspecified)');
@@ -115,8 +196,6 @@ export async function summarizeToolCall(
     default:
       return `Run ${toolName} with arguments: ${JSON.stringify(args).slice(0, 240)}`;
   }
-  // ctx reserved for future per-env summary tweaks
-  void ctx;
 }
 
 interface ApproveResult {

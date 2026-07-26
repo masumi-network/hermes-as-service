@@ -106,13 +106,13 @@ describe('confirmation-card copy for set_task_status', () => {
 
   it('reads as a sentence, not raw JSON', async () => {
     const s = await summarize({ task_id: 'tsk_1', status: 'READY' });
-    expect(s).toBe('Move task tsk_1 to READY so its assigned coworker can start it.');
+    expect(s).toBe('Move the task "tsk_1" to READY so its assigned coworker can start it.');
     expect(s).not.toContain('{');
   });
 
   it('phrases cancel and complete naturally', async () => {
-    expect(await summarize({ task_id: 't', status: 'CANCELED' })).toBe('Cancel task t.');
-    expect(await summarize({ task_id: 't', status: 'COMPLETED' })).toBe('Mark task t as completed.');
+    expect(await summarize({ task_id: 't', status: 'CANCELED' })).toBe('Cancel the task "t".');
+    expect(await summarize({ task_id: 't', status: 'COMPLETED' })).toBe('Mark the task "t" as completed.');
   });
 
   it('includes the note when one is given', async () => {
