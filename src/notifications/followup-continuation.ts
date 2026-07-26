@@ -44,10 +44,14 @@ interface CompletedJob {
 export interface RawSweepJob {
   id?: string;
   name?: string;
+  /** PAYMENT status (completed / refund_resolved / …), NOT the job lifecycle.
+   *  See ../sokosumi/job-state.ts. */
   status?: string;
   completedAt?: string;
   updatedAt?: string;
   createdAt?: string;
+  /** On-chain settlement flag — the strongest "this job is finished" signal. */
+  jobStatusSettled?: boolean;
 }
 
 /**
@@ -98,9 +102,9 @@ export async function continueFollowupsForInstance(
   const filterCompleted = (orgId: string | null, jobs: RawSweepJob[]): CompletedJob[] => {
     const found: CompletedJob[] = [];
     for (const j of jobs) {
-      // Sokosumi's /jobs endpoint ignores the status filter (returns all
-      // statuses, lowercase) — re-check client-side so we only continue
-      // plans off genuinely completed jobs.
+      // `completed` is one of the values the job's `status` FIELD genuinely
+      // carries (unlike awaiting_input — see ../sokosumi/job-state.ts), so
+      // this client-side check is sound.
       if (j.status && j.status.toLowerCase() !== 'completed') continue;
       // completedAt preferred (same as urgent.ts): updatedAt moves on any
       // post-completion touch (rating, refund) and would replay old jobs.
@@ -136,8 +140,12 @@ export async function continueFollowupsForInstance(
     const perOrg = await mapLimit(orgs, 5, async (org): Promise<CompletedJob[]> => {
       const orgClient = client.withOrganization(org.id);
       try {
-        // API ignores ?status; page all jobs (bounded) + filter COMPLETED.
-        const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as RawSweepJob[];
+        // Completion really does show up on the job's `status` FIELD, so this
+        // one filters client-side correctly. Early-stop keeps a long workspace
+        // history from costing a full pagination every tick.
+        const jobs = (
+          await orgClient.listAllJobs({ maxItems: 500, stopWhenOlderThan: since })
+        ).items as RawSweepJob[];
         return filterCompleted(org.id, jobs);
       } catch (err) {
         anyOrgFailed = true;

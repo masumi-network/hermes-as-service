@@ -4,11 +4,14 @@ import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
+import { awaitingInputTimestamp, couldBeAwaitingInput } from '../sokosumi/job-state.js';
 import { isValidSokosumiEnv, type SokosumiEnv } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 
 const COOLDOWN_MS = 2 * 60 * 60_000; // 2h between urgent interrupts per user
 const MAX_EVENTS_TO_GATE = 10; // cap on candidate events fed to Hermes per tick
+/** Per-workspace ceiling on job-detail probes in one tick. */
+const MAX_PROBES_PER_SCOPE = 25;
 
 /**
  * Proactive urgent-interrupt path.
@@ -92,31 +95,40 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
   // Bounded parallel fan-out over the workspaces; catch stays INSIDE the
   // mapped fn (one org failing must not reject the sweep), and results are
   // flattened in org order so downstream ordering matches the old loop.
+  type RawJob = {
+    id?: string;
+    name?: string;
+    agentId?: string;
+    status?: string;
+    completedAt?: string;
+    updatedAt?: string;
+    createdAt?: string;
+    result?: string;
+    jobStatusSettled?: boolean;
+  };
+  // Early-stop pagination against the furthest-back watermark — a workspace
+  // with years of history costs one page, not all of them, every tick.
+  const oldestWatermark = new Date(
+    Math.min(sinceCompleted.getTime(), sinceAwaiting.getTime(), sinceFailed.getTime()),
+  );
+
   const perOrg = await mapLimit(orgs, 5, async (org): Promise<Candidate[]> => {
     const orgClient = client.withOrganization(org.id);
     const found: Candidate[] = [];
     try {
-      // Page all jobs ONCE (the API ignores ?status), then bucket by the job's
-      // REAL status — the old code made a per-status call and trusted the
-      // ignored filter, mislabeling jobs by whichever iteration fetched them.
-      const jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as Array<{
-        id?: string;
-        name?: string;
-        agentId?: string;
-        status?: string;
-        completedAt?: string;
-        updatedAt?: string;
-        createdAt?: string;
-        result?: string;
-      }>;
-      for (const j of jobs) {
+      // COMPLETED / FAILED come off the job's `status` FIELD, which really does
+      // carry those two values. AWAITING_INPUT does NOT live there and needs a
+      // separate path — see ./sokosumi/job-state.ts.
+      const [recent, everAwaiting] = await Promise.all([
+        orgClient.listAllJobs({ maxItems: 500, stopWhenOlderThan: oldestWatermark }),
+        orgClient.listAllJobs({ status: 'AWAITING_INPUT', maxItems: 200 }),
+      ]);
+
+      for (const j of recent.items as RawJob[]) {
         const jobStatus = (j.status ?? '').toUpperCase();
-        if (jobStatus !== 'COMPLETED' && jobStatus !== 'AWAITING_INPUT' && jobStatus !== 'FAILED') {
-          continue;
-        }
-        const status = jobStatus as 'COMPLETED' | 'AWAITING_INPUT' | 'FAILED';
-        const watermark =
-          status === 'COMPLETED' ? sinceCompleted : status === 'AWAITING_INPUT' ? sinceAwaiting : sinceFailed;
+        if (jobStatus !== 'COMPLETED' && jobStatus !== 'FAILED') continue;
+        const status = jobStatus as 'COMPLETED' | 'FAILED';
+        const watermark = status === 'COMPLETED' ? sinceCompleted : sinceFailed;
         // completedAt for COMPLETED, updatedAt for the others (state transitions).
         const stampStr = status === 'COMPLETED' ? j.completedAt : j.updatedAt ?? j.createdAt;
         if (!stampStr) continue;
@@ -133,6 +145,47 @@ export async function checkUrgentInterruptsForInstance(instanceId: string): Prom
           jobId: j.id ?? '?',
         });
       }
+
+      // Genuinely-paused jobs: narrow server-side, reject settled ones for
+      // free, confirm the rest against their event log.
+      const allCandidates = (everAwaiting.items as RawJob[]).filter(
+        (j) => j.id && couldBeAwaitingInput(j),
+      );
+      // Same per-scope probe ceiling as the input-responder — one tick must not
+      // become hundreds of GETs. Newest-first, so the cap keeps the freshest.
+      const candidates = allCandidates.slice(0, MAX_PROBES_PER_SCOPE);
+      if (allCandidates.length > candidates.length) {
+        log.warn(
+          { orgId: org.id, candidates: allCandidates.length, probed: candidates.length },
+          'urgent_check_candidates_truncated',
+        );
+      }
+      const confirmed = await mapLimit(candidates, 5, async (j): Promise<Candidate | null> => {
+        try {
+          const ev = await orgClient.getPendingInputRequest(j.id!);
+          if (!ev) return null;
+          const stampStr = awaitingInputTimestamp(ev, j);
+          if (!stampStr) return null;
+          const stamp = new Date(stampStr);
+          if (isNaN(stamp.getTime()) || stamp.getTime() <= sinceAwaiting.getTime()) return null;
+          return {
+            name: j.name ?? '(unnamed job)',
+            agentId: j.agentId ?? '?',
+            timestamp: stampStr,
+            resultSnippet: String(ev['comment'] ?? ev['message'] ?? ev['content'] ?? '')
+              .slice(0, 800)
+              .replace(/\s+/g, ' '),
+            orgId: org.id,
+            status: 'AWAITING_INPUT' as const,
+            jobId: j.id!,
+          } satisfies Candidate;
+        } catch (err) {
+          anyOrgFailed = true;
+          log.warn({ err, orgId: org.id, jobId: j.id }, 'urgent_check_job_probe_failed');
+          return null;
+        }
+      });
+      found.push(...confirmed.filter((c): c is Candidate => c !== null));
     } catch (err) {
       anyOrgFailed = true;
       log.warn({ err, orgId: org.id }, 'urgent_check_list_jobs_failed');

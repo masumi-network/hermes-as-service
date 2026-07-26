@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { decryptSecret } from '../crypto.js';
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
+import { awaitingInputTimestamp, couldBeAwaitingInput } from '../sokosumi/job-state.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
 import { runCronAgentTurn } from './cron-agent-turn.js';
@@ -36,6 +37,32 @@ import {
 
 const MAX_JOBS_PER_TICK = 5;
 const AGENT_TURN_TIMEOUT_MS = 4 * 60_000;
+/** Per-workspace ceiling on job-detail probes in one tick. */
+const MAX_PROBES_PER_SCOPE = 25;
+
+/**
+ * How often to run the ever-awaited BACKSTOP listing (in ticks; 6 × 5min = 30min).
+ *
+ * A job that pauses for input bumps its updatedAt, so it lands in the ordinary
+ * recent-jobs listing we already fetch — that path catches fresh pauses within
+ * one tick at no extra cost. The `?status=AWAITING_INPUT` listing exists only
+ * to catch a job that paused BEFORE the watermark and is still sitting there,
+ * which no amount of recency scanning would surface. That's a slow-moving
+ * condition, so paying one extra call per workspace every tick was most of the
+ * savings from early-stop pagination handed straight back.
+ */
+const BACKSTOP_EVERY_N_TICKS = 6;
+const tickCounter = new Map<string, number>();
+
+/** True on the ticks where the aged-paused-job backstop should run. Counter is
+ *  in-memory: a deploy just means one extra backstop, which is harmless.
+ *  Exported for tests. */
+export function shouldRunBackstop(instanceId: string): boolean {
+  const n = (tickCounter.get(instanceId) ?? 0) + 1;
+  tickCounter.set(instanceId, n % BACKSTOP_EVERY_N_TICKS);
+  if (tickCounter.size > 5000) tickCounter.clear();
+  return n % BACKSTOP_EVERY_N_TICKS === 1 % BACKSTOP_EVERY_N_TICKS;
+}
 
 interface PausedJob {
   jobId: string;
@@ -89,6 +116,12 @@ export async function respondToInputRequestsForInstance(
   // 6h lookback on first run (no watermark yet) so activating the feature on an
   // existing instance doesn't reach back over very stale paused jobs.
   const since = row.lastInputResponderAt ?? new Date(Date.now() - 6 * 60 * 60_000);
+  // The listing we hand to the followup pass must cover ITS window too, which
+  // is watermarked separately — early-stop against whichever reaches further
+  // back, or the prefetch would silently hide completions from that pass.
+  const followupSince = row.lastFollowupSweepAt ?? new Date(Date.now() - 60 * 60_000);
+  const prefetchSince = new Date(Math.min(since.getTime(), followupSince.getTime()));
+  const runBackstop = shouldRunBackstop(instanceId);
   const paused: PausedJob[] = [];
   let anyOrgFailed = false;
   const captureAt = new Date();
@@ -105,21 +138,86 @@ export async function respondToInputRequestsForInstance(
       const found: PausedJob[] = [];
       let jobs: RawSweepJob[] = [];
       try {
-        // The API ignores ?status, so page all jobs (bounded) and filter to
-        // AWAITING_INPUT client-side below — a single 15-item page could miss
-        // an aged paused job entirely.
-        jobs = (await orgClient.listAllJobs({ maxItems: 500 })).items as RawSweepJob[];
-        for (const j of jobs) {
-          // Sokosumi's /jobs endpoint ignores the status query filter and
-          // returns all statuses (lowercase), so re-check client-side —
-          // otherwise a recently-touched COMPLETED job would be treated as
-          // awaiting input and waste an agent turn.
-          if (j.status && j.status.toLowerCase() !== 'awaiting_input') continue;
-          const stampStr = j.updatedAt ?? j.createdAt;
-          if (!stampStr || !j.id) continue;
-          const stamp = new Date(stampStr);
-          if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) continue;
-          found.push({ jobId: j.id, name: j.name ?? '(unnamed job)', orgId: org.id, timestamp: stampStr });
+        // See ./sokosumi/job-state.ts for why no single listing can answer
+        // "is this job awaiting input NOW".
+        //
+        // (1) Recent jobs — early-stops at the older of the two watermarks, so
+        //     a workspace with years of history costs one page instead of
+        //     paging all of it. Also serves the followup pass's prefetch. A
+        //     job that JUST paused is in here (pausing bumps updatedAt).
+        // (2) Ever-awaited jobs — the backstop for a job that paused before the
+        //     watermark and is still stuck. Slow-moving, so it runs every Nth
+        //     tick rather than every tick.
+        const [recent, everAwaiting] = await Promise.all([
+          orgClient.listAllJobs({ maxItems: 500, stopWhenOlderThan: prefetchSince }),
+          runBackstop
+            ? orgClient.listAllJobs({ status: 'AWAITING_INPUT', maxItems: 200 })
+            : Promise.resolve({ items: [] as unknown[] }),
+        ]);
+        jobs = recent.items as RawSweepJob[];
+
+        // Candidates, cheapest filter first — every one costs a detail fetch.
+        //   · from `recent`: only jobs TOUCHED since the watermark. Over a
+        //     5-minute window that's normally zero; without this narrowing the
+        //     whole 100-item page would become probes.
+        //   · from the backstop: everything it returned (already a tiny set).
+        // Both then drop anything settled, which cannot be awaiting input.
+        const touchedSince = (j: RawSweepJob): boolean => {
+          const ts = j.updatedAt ?? j.createdAt;
+          if (!ts) return false;
+          const t = new Date(ts).getTime();
+          return !isNaN(t) && t > since.getTime();
+        };
+        const seen = new Set<string>();
+        const allCandidates = [
+          ...(recent.items as RawSweepJob[]).filter(touchedSince),
+          ...(everAwaiting.items as RawSweepJob[]),
+        ].filter((j) => {
+          if (!j.id || seen.has(j.id)) return false;
+          seen.add(j.id);
+          return couldBeAwaitingInput(j);
+        });
+        // Hard bound on detail fetches per scope. In practice the settled
+        // filter leaves ~0, but an account with a large unsettled backlog must
+        // not turn one tick into hundreds of GETs. Listing is newest-first, so
+        // the cap keeps the freshest; the rest resurface next tick.
+        const candidates = allCandidates.slice(0, MAX_PROBES_PER_SCOPE);
+        if (allCandidates.length > candidates.length) {
+          log.warn(
+            { orgId: org.id, candidates: allCandidates.length, probed: candidates.length },
+            'input_responder_candidates_truncated',
+          );
+        }
+
+        const confirmed = await mapLimit(candidates, 5, async (j) => {
+          try {
+            const ev = await orgClient.getPendingInputRequest(j.id!);
+            if (!ev) return null;
+            const stampStr = awaitingInputTimestamp(ev, j);
+            if (!stampStr) return null;
+            const stamp = new Date(stampStr);
+            if (isNaN(stamp.getTime()) || stamp.getTime() <= since.getTime()) return null;
+            return {
+              jobId: j.id!,
+              name: j.name ?? '(unnamed job)',
+              orgId: org.id,
+              timestamp: stampStr,
+            } satisfies PausedJob;
+          } catch (err) {
+            // A single unreadable job must not fail the org — but it DOES mean
+            // our view is partial, so don't let the watermark skip past it.
+            anyOrgFailed = true;
+            log.warn({ err, orgId: org.id, jobId: j.id }, 'input_responder_job_probe_failed');
+            return null;
+          }
+        });
+        found.push(...confirmed.filter((c): c is PausedJob => c !== null));
+
+        if (candidates.length > 0) {
+          log.info(
+            { orgId: org.id, everAwaiting: everAwaiting.items.length, candidates: candidates.length, paused: found.length },
+            'input_responder_scanned',
+          );
         }
       } catch (err) {
         anyOrgFailed = true;

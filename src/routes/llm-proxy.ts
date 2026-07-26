@@ -376,12 +376,15 @@ interface InstanceRef {
 }
 
 async function captureNonStreaming(respText: string, ref: InstanceRef): Promise<void> {
+  const t0 = Date.now();
   try {
     const json = JSON.parse(respText) as {
       model?: string;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
       choices?: {
+        finish_reason?: string | null;
         message?: {
+          content?: string;
           reasoning?: string;
           reasoning_content?: string;
           tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[];
@@ -400,6 +403,22 @@ async function captureNonStreaming(respText: string, ref: InstanceRef): Promise<
     }
     const promptTokens = json.usage?.prompt_tokens ?? 0;
     const completionTokens = json.usage?.completion_tokens ?? 0;
+    const finishReason = json.choices?.[0]?.finish_reason ?? null;
+    logTurn({
+      ref,
+      model: json.model ?? 'unknown',
+      promptTokens,
+      completionTokens,
+      ms: Date.now() - t0,
+      finishReason,
+      // Non-streamed replies arrive whole; a missing finish_reason here is a
+      // malformed body, not a mid-generation abort.
+      truncated: false,
+      contentChars: (message?.content ?? '').length,
+      reasoningChars: (reasoning ?? '').length,
+      toolCalls: (toolCalls ?? []).map((tc) => tc.function?.name ?? '').filter(Boolean),
+      streamed: false,
+    });
     if (promptTokens === 0 && completionTokens === 0) return;
     await recordLlmUsage({
       instanceId: ref.id,
@@ -430,6 +449,9 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
   let reasoningPublished = false;
   let lastReasoningLiveAt = 0;
   let sawFinish = false;
+  const t0 = Date.now();
+  let contentChars = 0;
+  let finishReason: string | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -474,6 +496,7 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
         }
         // Flush the final head-summary snippet the moment real output
         // (content or a tool call) begins — the chip's resting state.
+        if (typeof delta?.content === 'string') contentChars += delta.content.length;
         const realOutputStarted =
           (typeof delta?.content === 'string' && delta.content.length > 0) ||
           Array.isArray(delta?.tool_calls);
@@ -494,8 +517,11 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
             toolPartials.set(idx, cur);
           }
         }
-        if ((chunk as { choices?: { finish_reason?: string | null }[] }).choices?.[0]?.finish_reason) {
+        const fr = (chunk as { choices?: { finish_reason?: string | null }[] }).choices?.[0]
+          ?.finish_reason;
+        if (fr) {
           sawFinish = true;
+          finishReason = fr;
         }
       } catch {
         /* ignore malformed lines */
@@ -522,6 +548,20 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
     );
   }
 
+  logTurn({
+    ref,
+    model,
+    promptTokens,
+    completionTokens,
+    ms: Date.now() - t0,
+    finishReason,
+    truncated: !sawFinish,
+    contentChars,
+    reasoningChars: reasoningBuf.length,
+    toolCalls: [...toolPartials.values()].map((p) => p.name).filter(Boolean),
+    streamed: true,
+  });
+
   if (promptTokens === 0 && completionTokens === 0) return;
   await recordLlmUsage({
     instanceId: ref.id,
@@ -531,6 +571,51 @@ async function captureSse(stream: ReadableStream<Uint8Array>, ref: InstanceRef):
     completionTokens,
     streamed: true,
   });
+}
+
+/**
+ * One line per model turn — the thing that was missing.
+ *
+ * Before this, a healthy 12-hour day of real agent conversations produced zero
+ * log lines about the model: the proxy only logged on error paths, so there was
+ * no way to answer "why was that reply bad?" after the fact. Tokens, latency,
+ * finish_reason and which tools were called are all here, keyed by instance so
+ * a single user's session can be pulled out of the stream.
+ *
+ * Logged at warn when the turn ended abnormally (truncated, or the model hit
+ * its length cap) so it stands out without a separate alert path.
+ */
+function logTurn(t: {
+  ref: InstanceRef;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  ms: number;
+  finishReason: string | null;
+  truncated: boolean;
+  contentChars: number;
+  reasoningChars: number;
+  toolCalls: string[];
+  streamed: boolean;
+}): void {
+  const abnormal = t.truncated || t.finishReason === 'length';
+  const fields = {
+    instanceId: t.ref.id,
+    userId: t.ref.userId,
+    model: t.model,
+    promptTokens: t.promptTokens,
+    completionTokens: t.completionTokens,
+    ms: t.ms,
+    finishReason: t.finishReason,
+    truncated: t.truncated,
+    contentChars: t.contentChars,
+    reasoningChars: t.reasoningChars,
+    toolCalls: t.toolCalls,
+    toolCallCount: t.toolCalls.length,
+    streamed: t.streamed,
+  };
+  if (abnormal) logger.warn(fields, 'llm_turn');
+  else logger.info(fields, 'llm_turn');
 }
 
 // ---------- routes ----------

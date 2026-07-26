@@ -1,5 +1,6 @@
 import { getSokosumiConfig, type SokosumiEnv } from '../config.js';
 import { logger } from '../logger.js';
+import { extractAwaitingInputEvent, type JobLifecycleStatus } from './job-state.js';
 
 /**
  * Test-fixture overrides: when a user provisions via Sokosumi's local-dev
@@ -190,6 +191,58 @@ export async function mapLimit<T, R>(
   return results;
 }
 
+/**
+ * Org membership changes about never, but every sweep tick re-enumerated it —
+ * two `listWorkspaceScopes()` calls per 5-minute tick per user, forever. Cached
+ * per (userId, env) with a short TTL: still picks up a new org within minutes,
+ * costs nothing in the 99.9% case. Negative results are NOT cached, so a
+ * transient failure that degrades to "personal only" can't stick.
+ */
+const SCOPE_CACHE_TTL_MS = 15 * 60_000;
+/** One small entry per active user; bounded so the map can't grow unbounded
+ *  in a long-lived process. */
+const SCOPE_CACHE_MAX = 2000;
+const scopeCache = new Map<string, { at: number; scopes: WorkspaceScope[] }>();
+
+/**
+ * Safety margin on watermark-based pagination early-stop. Sokosumi orders
+ * newest-first, but the sort key isn't guaranteed to be the same field we
+ * compare on, and the tail of a listing was observed to be slightly
+ * non-monotonic. A day of slack makes the optimization free of correctness
+ * risk: the sweeps' own watermarks are hours old, so a stale page still stops
+ * pagination, while anything remotely near the cutoff is still fetched.
+ */
+const PAGINATION_CUTOFF_SLACK_MS = 24 * 60 * 60_000;
+
+/** Newest timestamp on a page — max over every stamp field an item might
+ *  carry, so the early-stop can't be fooled by a missing `updatedAt`. */
+function newestStamp(items: unknown[]): number {
+  let newest = -Infinity;
+  for (const item of items) {
+    if (!item || typeof item !== 'object') return Infinity; // unknown shape → never stop
+    const o = item as Record<string, unknown>;
+    for (const key of ['updatedAt', 'createdAt', 'completedAt']) {
+      const v = o[key];
+      if (typeof v !== 'string' || !v) continue;
+      const t = new Date(v).getTime();
+      if (!isNaN(t) && t > newest) newest = t;
+    }
+  }
+  // A page with no parseable stamps must not trigger a stop.
+  return newest === -Infinity ? Infinity : newest;
+}
+
+/** Drop cached scopes — call after anything that can change org membership. */
+export function invalidateWorkspaceScopeCache(userId?: string): void {
+  if (!userId) {
+    scopeCache.clear();
+    return;
+  }
+  for (const key of scopeCache.keys()) {
+    if (key.startsWith(`${userId}::`)) scopeCache.delete(key);
+  }
+}
+
 export class SokosumiClient {
   private readonly userId: string;
   private readonly env: SokosumiEnv | null | undefined;
@@ -237,8 +290,10 @@ export class SokosumiClient {
 
   // ---------- jobs ----------
 
+  /** One page of jobs. `status` is the LIFECYCLE filter (ever-in-state), which
+   *  is NOT the `status` field on the returned items — see ./job-state.ts. */
   async listJobs(opts: {
-    status?: 'INITIATED' | 'AWAITING_PAYMENT' | 'AWAITING_INPUT' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+    status?: JobLifecycleStatus;
     agentId?: string;
     limit?: number;
     scope?: 'workspace' | 'owned';
@@ -255,25 +310,65 @@ export class SokosumiClient {
    *  (sweeps, board-wide views) — a single page can miss a blocked task that
    *  never bumps its updatedAt to resurface. */
   async listAllTasks(
-    opts: { scope?: 'workspace' | 'owned'; status?: string; limit?: number; maxItems?: number } = {},
-  ): Promise<{ items: unknown[]; total: number; truncated: boolean }> {
+    opts: {
+      scope?: 'workspace' | 'owned';
+      status?: string;
+      limit?: number;
+      maxItems?: number;
+      /** Stop paging once a whole page predates this. See paginateAll. */
+      stopWhenOlderThan?: Date;
+    } = {},
+  ): Promise<{ items: unknown[]; total: number; truncated: boolean; pages: number }> {
     const qs = new URLSearchParams();
     if (opts.scope) qs.set('scope', opts.scope);
     if (opts.status) qs.set('status', opts.status);
     qs.set('limit', String(opts.limit ?? 100));
-    return this.paginateAll(`/tasks?${qs}`, { maxItems: opts.maxItems ?? 1000 });
+    return this.paginateAll(`/tasks?${qs}`, {
+      maxItems: opts.maxItems ?? 1000,
+      ...(opts.stopWhenOlderThan ? { stopWhenOlderThan: opts.stopWhenOlderThan } : {}),
+    });
   }
 
-  /** ALL jobs in this workspace, paginated (bounded). NOTE: the API ignores
-   *  ?status, so filter the returned items client-side by status. */
+  /**
+   * ALL jobs in this workspace, paginated (bounded).
+   *
+   * `status` is Sokosumi's LIFECYCLE filter — it selects jobs that have EVER
+   * been in that state, not jobs currently in it, and it does NOT correspond
+   * to the `status` field on the returned items (that one is payment state).
+   * See ./job-state.ts before using either. Good for narrowing a candidate
+   * set; never sufficient on its own to decide current state.
+   */
   async listAllJobs(
-    opts: { status?: string; agentId?: string; limit?: number; maxItems?: number } = {},
-  ): Promise<{ items: unknown[]; total: number; truncated: boolean }> {
+    opts: {
+      status?: JobLifecycleStatus;
+      agentId?: string;
+      limit?: number;
+      maxItems?: number;
+      /** Stop paging once a whole page predates this. See paginateAll. */
+      stopWhenOlderThan?: Date;
+    } = {},
+  ): Promise<{ items: unknown[]; total: number; truncated: boolean; pages: number }> {
     const qs = new URLSearchParams();
     if (opts.status) qs.set('status', opts.status);
     if (opts.agentId) qs.set('agentId', opts.agentId);
     qs.set('limit', String(opts.limit ?? 100));
-    return this.paginateAll(`/jobs?${qs}`, { maxItems: opts.maxItems ?? 1000 });
+    return this.paginateAll(`/jobs?${qs}`, {
+      maxItems: opts.maxItems ?? 1000,
+      ...(opts.stopWhenOlderThan ? { stopWhenOlderThan: opts.stopWhenOlderThan } : {}),
+    });
+  }
+
+  /**
+   * Is this job awaiting input RIGHT NOW, and on which event?
+   *
+   * The only authoritative answer — `?status=AWAITING_INPUT` and the `status`
+   * field both fail to answer it (see ./job-state.ts). Costs one GET, so call
+   * it only for candidates that survived the free `couldBeAwaitingInput`
+   * filter. Returns the open request event, or null.
+   */
+  async getPendingInputRequest(jobId: string): Promise<Record<string, unknown> | null> {
+    const job = (await this.getJob(jobId)) as { events?: unknown } | null;
+    return extractAwaitingInputEvent(job?.events ?? null);
   }
 
   async getJob(id: string): Promise<unknown> {
@@ -534,8 +629,30 @@ export class SokosumiClient {
    * workspaces; an empty org list must never mean "read nothing".
    */
   async listWorkspaceScopes(): Promise<WorkspaceScope[]> {
+    const key = `${this.userId}::${this.env ?? 'mainnet'}`;
+    const hit = scopeCache.get(key);
+    if (hit && Date.now() - hit.at < SCOPE_CACHE_TTL_MS) return hit.scopes;
+
     const orgs = await this.listOrganizations();
-    return [{ id: null, name: 'Personal' }, ...orgs];
+    const scopes: WorkspaceScope[] = [{ id: null, name: 'Personal' }, ...orgs];
+    // Don't cache a degraded "personal only" answer produced by a swallowed
+    // 403 — it would pin the user to one workspace for the whole TTL.
+    if (orgs.length > 0) {
+      // Bound growth: sweep expired entries before inserting into a full map.
+      if (scopeCache.size >= SCOPE_CACHE_MAX) {
+        const now = Date.now();
+        for (const [k, v] of scopeCache) {
+          if (now - v.at >= SCOPE_CACHE_TTL_MS) scopeCache.delete(k);
+        }
+        // Still full (every entry fresh) — drop the oldest insertion.
+        if (scopeCache.size >= SCOPE_CACHE_MAX) {
+          const oldest = scopeCache.keys().next().value;
+          if (oldest !== undefined) scopeCache.delete(oldest);
+        }
+      }
+      scopeCache.set(key, { at: Date.now(), scopes });
+    }
+    return scopes;
   }
 
   /** Withdraws an org-context-bound copy of this client. Subsequent calls
@@ -630,10 +747,13 @@ export class SokosumiClient {
    *  whether the bound cut it short (truncated). */
   protected async paginateAll<T>(
     basePath: string,
-    opts: { maxItems?: number; maxPages?: number } = {},
-  ): Promise<{ items: T[]; total: number; truncated: boolean }> {
+    opts: { maxItems?: number; maxPages?: number; stopWhenOlderThan?: Date } = {},
+  ): Promise<{ items: T[]; total: number; truncated: boolean; pages: number }> {
     const maxItems = opts.maxItems ?? 500;
     const maxPages = opts.maxPages ?? 25;
+    const cutoff = opts.stopWhenOlderThan
+      ? opts.stopWhenOlderThan.getTime() - PAGINATION_CUTOFF_SLACK_MS
+      : null;
     const sep = basePath.includes('?') ? '&' : '?';
     const items: T[] = [];
     let cursor: string | null = null;
@@ -649,8 +769,15 @@ export class SokosumiClient {
       total = page.total;
       cursor = page.nextCursor;
       pages += 1;
+      // Watermark early-stop. Both /jobs and /tasks page newest-first, so once
+      // an ENTIRE page predates the caller's cutoff, every later page does too.
+      // Keyed on the page MAXIMUM (not its last item) because ordering isn't
+      // strictly monotonic within a page, and carries a slack margin on top.
+      if (cutoff !== null && page.items.length > 0 && newestStamp(page.items) < cutoff) {
+        return { items, total, truncated: false, pages };
+      }
     } while (cursor && pages < maxPages && items.length < maxItems);
-    return { items, total, truncated: Boolean(cursor) };
+    return { items, total, truncated: Boolean(cursor), pages };
   }
 }
 

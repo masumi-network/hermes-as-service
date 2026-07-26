@@ -7,6 +7,7 @@ import { logger } from '../logger.js';
 
 import { recordEvent } from '../audit.js';
 import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
+import { extractAwaitingInputEvent } from '../sokosumi/job-state.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 
 /**
@@ -38,37 +39,50 @@ export interface InstanceContext {
   autonomyLevel: 'low' | 'medium' | 'high';
 }
 
-/**
- * Pull the pending awaiting-input event out of a job's events[]. Sokosumi has
- * no dedicated input-request endpoint — the question and the event id you must
- * answer both live in the job's event log. Defensive: the exact event shape
- * isn't guaranteed, so we match any event whose type/status mentions INPUT and
- * return the newest. Exported for unit tests.
- */
-export function extractAwaitingInputEvent(events: unknown): Record<string, unknown> | null {
-  if (!Array.isArray(events)) return null;
-  // A job's event log keeps BOTH the open request and its later resolution
-  // (e.g. type INPUT_REQUEST followed by INPUT_PROVIDED / INPUT_RESPONSE). Match
-  // the OPEN request only — never an already-answered event, whose id is useless
-  // to provide_job_input and would re-submit against a resolved event.
-  const RESOLVED = /PROVIDED|RESPONSE|RECEIVED|RESOLVED|ANSWERED|SUBMITTED|COMPLETED|FULFILLED/;
-  const matches = events.filter((e): e is Record<string, unknown> => {
-    if (!e || typeof e !== 'object') return false;
-    const o = e as Record<string, unknown>;
-    const t = String(o['type'] ?? '').toUpperCase();
-    const s = String(o['status'] ?? '').toUpperCase();
-    if (!(t.includes('INPUT') || s.includes('INPUT'))) return false;
-    if (RESOLVED.test(t) || RESOLVED.test(s)) return false;
-    return true;
-  });
-  if (matches.length === 0) return null;
-  matches.sort((a, b) =>
-    String(b['createdAt'] ?? b['updatedAt'] ?? '').localeCompare(
-      String(a['createdAt'] ?? a['updatedAt'] ?? ''),
-    ),
-  );
-  return matches[0] ?? null;
+/** Lives in ../sokosumi/job-state.ts now, alongside the rest of Sokosumi's
+ *  job-state rules. Re-exported here for existing importers. */
+export { extractAwaitingInputEvent };
+
+/** The coworker fields the tool's own description promises. */
+export interface ProjectedCoworker {
+  id?: string;
+  slug?: string;
+  name?: string;
+  caption?: string;
+  description?: string;
+  capabilities?: unknown;
 }
+
+/**
+ * Strip a coworker down to what the agent can actually act on.
+ *
+ * Measured on a real 9-workspace account, the raw objects came to 534 KB —
+ * roughly 130k tokens, half the context window, for ONE tool call. 90% of that
+ * was a `metadata` blob (~4.6 KB per coworker) the agent has no use for, plus
+ * `vendor`, `image`, `baseURL` and on-chain identifiers. The five fields the
+ * tool advertises total about 44 bytes.
+ *
+ * `description` is kept (and capped) because picking the right coworker is the
+ * whole point of the tool; everything else is dropped.
+ */
+export function projectCoworker(raw: unknown): ProjectedCoworker {
+  if (!raw || typeof raw !== 'object') return {};
+  const o = raw as Record<string, unknown>;
+  const str = (k: string): string | undefined => (typeof o[k] === 'string' ? (o[k] as string) : undefined);
+  const description = str('description');
+  return {
+    ...(str('id') ? { id: str('id') } : {}),
+    ...(str('slug') ? { slug: str('slug') } : {}),
+    ...(str('name') ? { name: str('name') } : {}),
+    ...(str('caption') ? { caption: str('caption') } : {}),
+    ...(description ? { description: description.slice(0, COWORKER_DESCRIPTION_MAX) } : {}),
+    ...(o['capabilities'] !== undefined && o['capabilities'] !== null
+      ? { capabilities: o['capabilities'] }
+      : {}),
+  };
+}
+
+const COWORKER_DESCRIPTION_MAX = 400;
 
 interface AuthOk {
   ok: true;
@@ -1010,7 +1024,6 @@ export async function executeTool(
       const limit = clampNumber(args['limit'], 30, 100);
       // Per-org delegation needed — fan out across the user's orgs in parallel.
       const orgs = await client.listWorkspaceScopes();
-      const all: Array<{ orgId: string | null; orgName?: string; coworker: unknown }> = [];
       const settled = await Promise.allSettled(
         orgs.map((org) =>
           client
@@ -1019,14 +1032,35 @@ export async function executeTool(
             .then((coworkers) => ({ org, coworkers })),
         ),
       );
+      // The SAME coworkers are whitelisted in every workspace — a real account
+      // returned 12 distinct people repeated 9 times. Emit each once, with the
+      // workspaces it can be assigned in, instead of 108 near-identical copies.
+      const byId = new Map<
+        string,
+        ProjectedCoworker & { availableIn: Array<{ orgId: string | null; orgName?: string }> }
+      >();
       for (const r of settled) {
-        if (r.status === 'fulfilled') {
-          for (const c of r.value.coworkers) {
-            all.push({ orgId: r.value.org.id, orgName: r.value.org.name, coworker: c });
-          }
+        if (r.status !== 'fulfilled') continue;
+        for (const c of r.value.coworkers) {
+          const projected = projectCoworker(c);
+          const key = projected.id ?? projected.slug;
+          if (!key) continue;
+          const entry = byId.get(key) ?? { ...projected, availableIn: [] };
+          entry.availableIn.push({
+            orgId: r.value.org.id,
+            ...(r.value.org.name ? { orgName: r.value.org.name } : {}),
+          });
+          byId.set(key, entry);
         }
       }
-      return JSON.stringify({ count: all.length, coworkers: all }, null, 2);
+      const coworkers = [...byId.values()];
+      // Compact JSON, not pretty-printed: this is model input, and indentation
+      // was ~25% of a payload that already dwarfed every other tool's.
+      return JSON.stringify({
+        count: coworkers.length,
+        note: 'availableIn lists the workspaces each coworker can be assigned in (orgId null = personal).',
+        coworkers,
+      });
     }
 
     // ---------- write tools ----------

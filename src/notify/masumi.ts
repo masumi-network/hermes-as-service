@@ -37,6 +37,52 @@ export function masumiConfigured(): boolean {
 const lastSent = new Map<string, number>();
 
 /**
+ * Circuit breaker for a notifier that is configured but broken.
+ *
+ * Observed in production: the CLI exited nonzero on every send (empty stderr —
+ * an unimported profile in the container), so each alert logged one failure and
+ * nothing else ever happened. The channel looked configured, the alerts looked
+ * delivered, and nobody found out. After OPEN_AFTER consecutive failures we
+ * stop spawning and say so loudly ONCE, then retry after a cooldown so a fixed
+ * deployment heals itself without a restart.
+ */
+const CIRCUIT_OPEN_AFTER = 3;
+const CIRCUIT_COOLDOWN_MS = 30 * 60_000;
+let consecutiveFailures = 0;
+let circuitOpenedAt: number | null = null;
+
+/** True when sends are currently suppressed. */
+export function masumiCircuitOpen(): boolean {
+  if (circuitOpenedAt === null) return false;
+  if (Date.now() - circuitOpenedAt >= CIRCUIT_COOLDOWN_MS) {
+    // Cooldown elapsed — let one probe through.
+    circuitOpenedAt = null;
+    consecutiveFailures = 0;
+    return false;
+  }
+  return true;
+}
+
+function recordSendResult(ok: boolean, detail?: { message: string; code?: unknown; stderr: string }): void {
+  if (ok) {
+    if (consecutiveFailures > 0) logger.info('masumi_notify_recovered');
+    consecutiveFailures = 0;
+    circuitOpenedAt = null;
+    return;
+  }
+  consecutiveFailures += 1;
+  if (consecutiveFailures >= CIRCUIT_OPEN_AFTER && circuitOpenedAt === null) {
+    circuitOpenedAt = Date.now();
+    logger.error(
+      { consecutiveFailures, bin: BIN, profile: PROFILE, channel: CHANNEL, ...detail },
+      'masumi_notify_circuit_open',
+    );
+    return;
+  }
+  logger.warn({ consecutiveFailures, ...detail }, 'masumi_notify_failed');
+}
+
+/**
  * Fire-and-forget a message into the Masumi channel. Never throws; never
  * blocks the caller. No-op when the identity/channel aren't configured.
  *
@@ -45,6 +91,7 @@ const lastSent = new Map<string, number>();
  */
 export function notifyMasumi(text: string, opts: { key?: string; throttleMs?: number } = {}): void {
   if (!masumiConfigured()) return;
+  if (masumiCircuitOpen()) return;
   const key = opts.key ?? text;
   const window = opts.throttleMs ?? DEFAULT_THROTTLE_MS;
   const now = Date.now();
@@ -62,12 +109,16 @@ export function notifyMasumi(text: string, opts: { key?: string; throttleMs?: nu
     ['--json', '--profile', PROFILE, 'channel', 'send', CHANNEL, body, '--agent', AGENT],
     { timeout: 20_000, env: { ...process.env, XDG_CONFIG_HOME: MASUMI_CONFIG_HOME } },
     (err, _stdout, stderr) => {
-      if (err) {
-        logger.warn(
-          { err: err.message, stderr: String(stderr).slice(0, 300) },
-          'masumi_notify_failed',
-        );
-      }
+      recordSendResult(
+        !err,
+        err
+          ? {
+              message: err.message,
+              code: (err as NodeJS.ErrnoException).code ?? undefined,
+              stderr: String(stderr).slice(0, 300),
+            }
+          : undefined,
+      );
     },
   );
 }
@@ -90,6 +141,9 @@ export async function sendMasumiTest(text: string): Promise<{ ok: boolean; error
       ['--json', '--profile', PROFILE, 'channel', 'send', CHANNEL, text, '--agent', AGENT],
       { timeout: 20_000, env: { ...process.env, XDG_CONFIG_HOME: MASUMI_CONFIG_HOME } },
     );
+    // The admin "test channel" button doubles as the circuit reset: a green
+    // test means the operator fixed it, so resume sending immediately.
+    recordSendResult(true);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
