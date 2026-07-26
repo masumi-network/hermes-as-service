@@ -64,6 +64,50 @@ const DENYLIST_V21 = [
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v27',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'SOUL: delegation means the TASK is the deliverable, not the work.',
+    changes: [
+      'SOUL "WHAT YOU DON\'T DO" now covers Hermes\' OWN tools, not just Sokosumi mechanics. The old text only forbade assigning tasks to yourself and running jobs yourself, so "you coordinate, you don\'t execute" read as an object-model rule — nothing stopped the agent from cloning 35 repos and POSTing to a CMS with its own shell.',
+      'Explicit rule for "create a task for <coworker> to do X": the deliverable is the TASK, not X; credentials/docs the user supplies in that sentence are FOR the coworker and get passed through in the description, not used by Hermes.',
+      'Names the exact observed failure: doing X and then filing a "review and polish what I already did" task, which demotes the specialist to a proofreader. Includes a self-check on the words review/polish/verify.',
+      'Closing test: "after you finish, could the coworker still do the whole job the user described?"',
+      'Motivated by the 2026-07-26 session — asked to create a task for Bront to write a CMS release entry, the agent wrote the entry itself and gave Bront a review task, then baked that inversion into a weekly cron.',
+    ],
+  },
+  {
+    tag: 'v26',
+    releasedAt: '2026-07-26',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'Hindsight long-term memory via Hermes\' NATIVE memory provider.',
+    changes: [
+      'Launcher writes $HERMES_HOME/hindsight/config.json (mode local_external, hybrid, auto_retain + auto_recall on) and appends `memory: provider: hindsight` to config.yaml when HINDSIGHT_API_URL is set.',
+      'Replaced the earlier MCP-server approach: memory is now injected pre-turn and synced post-turn by the provider, so it costs no tool calls and never competes for the tool budget.',
+      'Per-instance HINDSIGHT_* env points at the orchestrator\'s per-user proxy; the real Hindsight credential never lands on a machine.',
+    ],
+    commit: 'b1c6f92',
+  },
+  {
+    tag: 'v25',
+    releasedAt: '2026-07-25',
+    baseImage: 'nousresearch/hermes-agent:v2026.5.16',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V21,
+    summary: 'SOUL "Two memories" — the note card vs the archive.',
+    changes: [
+      'SOUL section distinguishing the always-loaded memory note card from the searchable long-term archive, so the agent stops treating the small file as its only memory.',
+    ],
+    commit: '5a4ccf5',
+  },
+  {
     tag: 'v24',
     releasedAt: '2026-07-24',
     baseImage: 'nousresearch/hermes-agent:v2026.5.16',
