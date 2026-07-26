@@ -8,7 +8,8 @@ import { decryptSecret } from '../crypto.js';
 import { HttpError, notFound, problemJson, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { runGroundTruthGuard } from '../notifications/groundtruth-guard.js';
-import { subscribeProgress, type ProgressEvent } from './progress-bus.js';
+import { lastProgressEvent, subscribeProgress, type ProgressEvent } from './progress-bus.js';
+import { acquireTurn, busyMessage, busyResponse, releaseTurn } from './turn-guard.js';
 
 const router = new Hono();
 
@@ -68,6 +69,8 @@ export function clampReplayMessages(messages: OpenAIMessage[] | undefined): bool
 router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
   const userId = c.req.param('userId');
   const t0 = Date.now();
+  // Mutable so the catch below can release a slot claimed inside the try.
+  const guardKey = { instanceId: '', requestId: '' };
 
   try {
     const row = await prisma.hermesInstance.findUnique({
@@ -105,6 +108,46 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
     const requestId = randomUUID();
     const lastUser = findLastByRole(parsed.messages, 'user');
     const lastSystem = findLastByRole(parsed.messages, 'system');
+
+    // One turn at a time per instance. A second message arriving mid-turn used
+    // to start a parallel agent that redid the whole job from scratch — see
+    // ./turn-guard.ts for the session that motivated this.
+    const busy = acquireTurn(row.id, {
+      requestId,
+      prompt: lastUser ? contentToText(lastUser.content) : '',
+    });
+    if (busy) {
+      const activity = lastProgressEvent(row.id);
+      const detail = activity
+        ? [activity.label, activity.detail].filter(Boolean).join(' — ')
+        : null;
+      const text = busyMessage(busy, detail);
+      logger.info(
+        {
+          userId,
+          requestId,
+          blockedBy: busy.requestId,
+          runningForMs: Date.now() - busy.startedAt,
+        },
+        'turn_guard_rejected_concurrent',
+      );
+      // Persist so the exchange is visible in the admin transcript.
+      await prisma.chatMessage
+        .create({
+          data: {
+            instanceId: row.id,
+            userId: row.userId,
+            requestId,
+            role: 'assistant',
+            content: text,
+            finishReason: 'turn_guard_busy',
+          },
+        })
+        .catch(() => {});
+      return busyResponse(text, isStreaming, parsed.model);
+    }
+    guardKey.instanceId = row.id;
+    guardKey.requestId = requestId;
 
     // Persist the user message now so it's visible even if upstream hangs.
     // The two message inserts stay SEQUENTIAL (admin chat detail orders by
@@ -167,7 +210,13 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         requestId,
         startedAt: t0,
         upstreamStatus: upstreamRes.status,
-      }).catch((err) => logger.error({ err, userId, requestId }, 'sse_capture_failed'));
+      })
+        .catch((err) => logger.error({ err, userId, requestId }, 'sse_capture_failed'))
+        // The capture branch always runs to completion, so it is the honest
+        // signal that the agent's turn is over. Releasing on the CLIENT branch
+        // instead would free the slot when the user closes the tab, letting a
+        // follow-up start a parallel run — the exact bug this guards.
+        .finally(() => releaseTurn(row.id, requestId));
 
       // When the caller opts in (Sokosumi sends `X-Hermes-Progress: 1`), we
       // inject `event: hermes.status` frames so the UI can show what the
@@ -201,6 +250,7 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
       startedAt: t0,
       upstreamStatus: upstreamRes.status,
     }).catch((err) => logger.error({ err, userId, requestId }, 'capture_failed'));
+    releaseTurn(row.id, requestId);
 
     const contentType = upstreamRes.headers.get('Content-Type') ?? 'application/json';
     return new Response(respText, {
@@ -208,6 +258,9 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
       headers: { 'Content-Type': contentType },
     });
   } catch (err) {
+    // Never strand the slot on a failure between acquire and the release
+    // points above — the next message would be told "still working" forever.
+    releaseTurn(guardKey.instanceId, guardKey.requestId);
     logger.error({ err, userId }, 'proxy_error');
     if (err instanceof HttpError) return problemJson(c, err);
     return problemJson(

@@ -62,6 +62,14 @@ const subscribers = new Map<string, Set<Subscriber>>();
  * A throwing subscriber never affects the publisher or other subscribers.
  */
 export function publishProgress(instanceId: string, event: ProgressEvent): void {
+  // Remembered even with nobody listening: when a second message arrives while
+  // a turn is running, the turn guard answers "here's what I'm doing right now"
+  // from this, and there is no open stream at that moment by definition.
+  lastEvent.set(instanceId, event);
+  if (lastEvent.size > 2000) {
+    const cutoff = Date.now() - LAST_EVENT_TTL_MS;
+    for (const [k, v] of lastEvent) if (v.ts < cutoff) lastEvent.delete(k);
+  }
   const set = subscribers.get(instanceId);
   if (!set || set.size === 0) return;
   for (const fn of set) {
@@ -71,6 +79,26 @@ export function publishProgress(instanceId: string, event: ProgressEvent): void 
       // a broken subscriber must not break publishing
     }
   }
+}
+
+const LAST_EVENT_TTL_MS = 30 * 60_000;
+const lastEvent = new Map<string, ProgressEvent>();
+
+/** Most recent progress event for an instance, or null when there is none or
+ *  it is too old to describe what is happening now. */
+export function lastProgressEvent(instanceId: string): ProgressEvent | null {
+  const e = lastEvent.get(instanceId);
+  if (!e) return null;
+  if (Date.now() - e.ts > LAST_EVENT_TTL_MS) {
+    lastEvent.delete(instanceId);
+    return null;
+  }
+  return e;
+}
+
+/** Test seam. */
+export function _resetProgressMemory(): void {
+  lastEvent.clear();
 }
 
 /** True if at least one chat stream is currently listening for this instance. */
