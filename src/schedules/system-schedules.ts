@@ -83,7 +83,7 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     kind: 'system_sweep',
     name: 'Taskboard assistant',
     description:
-      'Every 5 minutes: Hermes watches your taskboard. On new tasks it adds useful context as a comment when it has something to add; on tasks waiting for input it helps them continue — answering when it can source the answer safely, or leaving a comment and flagging you when the input is a judgment call. (Medium autonomy: each comment/answer is a confirmation card; high: it acts directly.)',
+      'Every 5 minutes: Hermes watches your taskboard. When a task FINISHES — including work a coworker ran from a schedule or from your own chat with them — it messages you what finished and what it produced, and continues the plan with a follow-up task when you had agreed on a next step. On tasks waiting for input it helps them continue, answering when it can source the answer safely or flagging you when it is a judgment call. On brand-new tasks it adds useful context only when it actually has some. (Medium autonomy: comments/answers and any follow-up task arrive as confirmation cards; high: it acts directly.)',
     cronExpr: '4-59/5 * * * *',
     localTime: false,
     minAutonomy: 'medium',
