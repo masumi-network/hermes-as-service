@@ -187,22 +187,12 @@ describe('workspace-scope cache', () => {
   });
 });
 
-describe('aged-paused-job backstop cadence', () => {
-  it('fires on the first tick, then every 6th (30 min)', async () => {
-    const { shouldRunBackstop } = await import('../src/notifications/input-responder.js');
-    const fired: number[] = [];
-    for (let tick = 1; tick <= 13; tick++) {
-      if (shouldRunBackstop('inst-a')) fired.push(tick);
-    }
-    expect(fired).toEqual([1, 7, 13]);
-  });
-
-  it('counts per instance, so one user cannot shift another off-cadence', async () => {
-    const { shouldRunBackstop } = await import('../src/notifications/input-responder.js');
-    expect(shouldRunBackstop('inst-b')).toBe(true);
-    // Interleaved ticks from a different instance must not consume b's counter.
-    shouldRunBackstop('inst-c');
-    shouldRunBackstop('inst-c');
-    expect(shouldRunBackstop('inst-b')).toBe(false);
-  });
-});
+/*
+ * The aged-paused-job BACKSTOP CADENCE that used to live here is gone.
+ *
+ * The predecessor sweep only ran the `?status=AWAITING_INPUT` listing every
+ * 6th tick, to save one call per workspace. The merged board sweep runs it
+ * every tick on purpose: a job that paused before the recency window could
+ * otherwise sit unnoticed for half an hour, and a blocked job is the most
+ * time-critical thing on the board. Detection latency beats the saved call.
+ */

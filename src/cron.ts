@@ -4,9 +4,7 @@ import { logger } from './logger.js';
 import { loadConfig } from './config.js';
 import { runSokosumiDailySweep } from './sokosumi/sync.js';
 import { runInboxRefreshSweep } from './inbox/refresh.js';
-import { runUrgentInterruptSweep } from './notifications/urgent.js';
-import { runTaskboardAssistantSweep } from './notifications/taskboard-assistant.js';
-import { runInputResponderSweep } from './notifications/input-responder.js';
+import { runBoardSweep } from './notifications/board-sweep.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
 import { runNativePromptReconcilerSweep } from './schedules/native-prompts.js';
@@ -198,37 +196,19 @@ export function startInboxRefreshCron(): void {
 }
 
 /**
- * Hourly cron — proactive urgent-interrupt check. For each ready instance,
- * scan for newly-completed Sokosumi jobs and ask Hermes to gate whether
- * any are worth interrupting the user about. Gated by a 2h cooldown floor
- * to prevent spam. YES events fire a notification to the user's outbox.
+ * Every 5 minutes — the board sweep. ONE pass per instance over everything
+ * that changed, tasks AND jobs together: blocked work gets answered, finished
+ * work gets reported to the user and continued into a follow-up when memory
+ * says a plan called for one, and genuinely new tasks get context.
+ *
+ * Replaces three sweeps that overlapped at different levels — taskboard
+ * assistant (tasks), input-responder + follow-up continuation (jobs), and
+ * urgent-interrupts (job notifications) — whose notification cooldown it
+ * inherits. Tasks rank above jobs, and a job whose task is already in the
+ * batch is dropped as a duplicate view of the same work.
  */
-export function startUrgentInterruptCron(): void {
-  register('urgent_interrupt_cron', '30 * * * *', runUrgentInterruptSweep, 'urgent-interrupts');
-}
-
-/**
- * Every 5 minutes (staggered off input-responder) — taskboard assistant for
- * medium+ users. Watches the user's own tasks: comments on new ones with
- * useful context, and helps INPUT_REQUIRED tasks continue (answer if clear
- * + safe, else comment + flag to the user). Task-driven so it sees
- * coworker-run work the job sweeps can't. Only prompts the agent when a
- * task actually changed; idle instances cost just the list call.
- */
-export function startTaskboardAssistantCron(): void {
-  register('taskboard_assistant_cron', '4-59/5 * * * *', runTaskboardAssistantSweep, 'taskboard-assistant');
-}
-
-/**
- * Every 5 minutes — input-responder + follow-up continuation sweep.
- * Detects Sokosumi jobs paused in AWAITING_INPUT and, at medium/high autonomy,
- * drives Hermes to answer them (high = submit immediately, medium = raise a
- * confirmation card). Low autonomy is skipped (urgent-interrupts notifies).
- * The same sweep also spots newly-COMPLETED jobs and asks Hermes whether a
- * planned next step should continue (create follow-up tasks / comment).
- */
-export function startInputResponderCron(): void {
-  register('input_responder_cron', '2-59/5 * * * *', runInputResponderSweep, 'input-responder');
+export function startBoardSweepCron(): void {
+  register('board_sweep_cron', '4-59/5 * * * *', runBoardSweep, 'board-sweep');
 }
 
 /**

@@ -40,9 +40,7 @@ import {
   startIdleSuspendCron,
   startSokosumiDailySyncCron,
   startInboxRefreshCron,
-  startUrgentInterruptCron,
-  startTaskboardAssistantCron,
-  startInputResponderCron,
+  startBoardSweepCron,
   startEodReportCron,
   startPoolReplenishCron,
   startNativePromptReconcilerCron,
@@ -111,9 +109,7 @@ const server = serve({ fetch: app.fetch, port: cfg.PORT, hostname: '0.0.0.0' }, 
 startIdleSuspendCron();
 startSokosumiDailySyncCron();
 startInboxRefreshCron();
-startUrgentInterruptCron();
-startTaskboardAssistantCron();
-startInputResponderCron();
+startBoardSweepCron();
 startEodReportCron();
 startPoolReplenishCron();
 startNativePromptReconcilerCron();

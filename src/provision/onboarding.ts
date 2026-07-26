@@ -287,8 +287,8 @@ export async function runOnboarding(
 
   // ---- finalize ----
   // Sync the full set of system schedules — both the orchestrator-sweep
-  // mirror rows (sokosumi-sync, inbox-refresh, urgent-interrupts,
-  // task-augmentation) and the autonomy-gated recurring prompts
+  // mirror rows (sokosumi-sync, inbox-refresh, board-sweep, eod-report)
+  // and the autonomy-gated recurring prompts
   // (morning-brief, weekly-wrap, etc.). Idempotent.
   try {
     const integrationProviders = new Set(connectedProviders);

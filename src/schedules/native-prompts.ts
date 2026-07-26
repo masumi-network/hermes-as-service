@@ -76,15 +76,6 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
       'Call sokosumi_get_credits for the personal workspace balance. If it is below 25 credits, send a one-sentence heads-up with the balance and the 1–2 most recent jobs that drove the spend. If it is 25+ — OR you cannot read it (balances are usually not visible to you) — reply with EXACTLY `[SILENT]` and nothing else (do not explain that you could not check).',
   },
   {
-    name: 'followup-task-generator',
-    cronExpr: '0 6 * * *',
-    localTime: true,
-    minAutonomy: 'high',
-    summary: 'Daily 6am — create follow-up tasks from yesterday’s completed jobs.',
-    prompt:
-      'For each Sokosumi job that completed in the last 24h, read the result and decide whether it implies a clearly defined next task. FIRST check sokosumi_list_tasks for an existing follow-up already covering it (the 5-minute continuation pass may have created one) — skip those. For each qualifying job: pick the right coworker via sokosumi_list_coworkers, create the follow-up task via sokosumi_create_task, and add a brief comment linking back to the source job. Skip jobs where the next step is ambiguous — do not invent work. End with a one-paragraph summary of what you created, or reply with EXACTLY `[SILENT]` and nothing else if no follow-ups were warranted.',
-  },
-  {
     name: 'workspace-cleanup',
     cronExpr: '0 23 * * 0',
     localTime: true,
@@ -106,7 +97,17 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
 
 /** Names that once existed (any design iteration) and must be removed if
  * present on a machine. morning-brief was folded into the daily-brief. */
-const RETIRED_NATIVE_NAMES = ['morning-brief', 'awaiting-input-chaser'];
+const RETIRED_NATIVE_NAMES = [
+  'morning-brief',
+  'awaiting-input-chaser',
+  // Retired with the board-sweep merge: it was the THIRD implementation of
+  // "create a follow-up task from finished work", after the 5-minute
+  // continuation pass and the taskboard done-path. Its own prompt admitted the
+  // overlap ("the 5-minute continuation pass may have created one — skip
+  // those"), and being daily + HIGH-autonomy + job-level it was strictly
+  // dominated by the 5-minute board sweep, which sees tasks too.
+  'followup-task-generator',
+];
 
 /**
  * Shift a local-time cron's hour (and day-of-week, when the shift crosses

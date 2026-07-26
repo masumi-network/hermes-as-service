@@ -243,7 +243,25 @@ export function aggregateCrons(
       }
       case 'chat_proxied': {
         const source = String(detail.source ?? '');
-        if (source === 'urgent_interrupt') {
+        if (source === 'board_sweep') {
+          // The merged sweep does the work all three retired ones used to, so
+          // it feeds both buckets: the board line, and the interrupt line for
+          // items it actually messaged about (quiet ones were held back).
+          stats.taskAugmentation.ran++;
+          const items = Number(detail.items ?? detail.scanned ?? 0);
+          const quiet = Number(detail.quiet ?? 0);
+          const parts = [
+            `${items} item(s)`,
+            `${Number(detail.taskDone ?? 0) + Number(detail.jobDone ?? 0)} finished`,
+            `${Number(detail.taskInput ?? 0) + Number(detail.jobInput ?? 0)} blocked`,
+          ];
+          stats.taskAugmentation.lastDetail = parts.join(', ');
+          if (items > quiet) {
+            stats.urgent.ran++;
+            stats.urgent.lastDetail = `${items - quiet} item(s) surfaced to you`;
+          }
+        } else if (source === 'urgent_interrupt') {
+          // Retired sweep — kept so a report covering older events still reads.
           stats.urgent.ran++;
           stats.urgent.lastDetail = `${detail.events ?? 0} event(s) considered`;
         } else if (source === 'task_augmentation' || source === 'taskboard_assistant') {

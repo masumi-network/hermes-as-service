@@ -1870,6 +1870,7 @@ function cadenceLabel(expr: string): string {
     '*/2 * * * *': 'every 2 min',
     '*/5 * * * *': 'every 5 min',
     '2-59/5 * * * *': 'every 5 min',
+    '4-59/5 * * * *': 'every 5 min',
     '0 * * * *': 'hourly (:00)',
     '15 * * * *': 'hourly (:15)',
     '20 * * * *': 'hourly (:20)',
@@ -1881,6 +1882,8 @@ function cadenceLabel(expr: string): string {
 }
 
 const CRON_EVENT_SOURCES = new Set([
+  'board_sweep',
+  // Retired sweeps kept here so historical events still classify as cron work.
   'urgent_interrupt',
   'urgent',
   'input_responder',

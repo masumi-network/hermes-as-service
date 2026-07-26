@@ -7,7 +7,7 @@ import { safeNextRun } from './cron.js';
  * created at onboarding-finalize and re-synced any time the autonomy
  * level changes. These are all kind "system_sweep": informational mirrors
  * of orchestrator-level background sweeps (sokosumi-sync, inbox-refresh,
- * urgent-interrupts, task-augmentation, input-responder, eod-report). The
+ * board-sweep, eod-report). The
  * scheduler never dispatches them; the matching sweep in cron.ts reads the
  * row's `enabled` flag to gate work per user, and freshens the row's
  * last/next-run stamps after each tick so the settings panel stays honest.
@@ -69,35 +69,15 @@ const SYSTEM_SCHEDULES: SystemScheduleSpec[] = [
     requires: (ctx) => ctx.hasMailOrCalendar,
   },
   {
-    slug: 'urgent-interrupts',
+    slug: 'board-sweep',
     kind: 'system_sweep',
-    name: 'Urgent interrupts',
+    name: 'Board watcher',
     description:
-      'Hourly watcher for completed Sokosumi jobs, AWAITING_INPUT events, and failures — sends a notification only when something genuinely needs your attention.',
-    cronExpr: '30 * * * *',
-    localTime: false,
-    minAutonomy: 'low',
-  },
-  {
-    slug: 'taskboard-assistant',
-    kind: 'system_sweep',
-    name: 'Taskboard assistant',
-    description:
-      'Every 5 minutes: Hermes watches your taskboard. When a task FINISHES — including work a coworker ran from a schedule or from your own chat with them — it messages you what finished and what it produced, and continues the plan with a follow-up task when you had agreed on a next step. On tasks waiting for input it helps them continue, answering when it can source the answer safely or flagging you when it is a judgment call. On brand-new tasks it adds useful context only when it actually has some. (Medium autonomy: comments/answers and any follow-up task arrive as confirmation cards; high: it acts directly.)',
+      'Every 5 minutes: Hermes watches everything on your board — tasks and the paid jobs under them. When work FINISHES (including work a coworker ran from a schedule or from your own chat with them) it messages you what finished and what it produced, and continues the plan with a follow-up task when you had agreed on a next step. When something is BLOCKED waiting on an answer it settles it where it safely can, and flags you when the call is genuinely yours. On brand-new tasks it adds context only when it actually has some. Interrupts are rate-limited to one every 2 hours — failures and blocked work always come through, and anything held back appears in your end-of-day report. (Medium autonomy: answers and any follow-up task arrive as confirmation cards; high: it acts directly.)',
     cronExpr: '4-59/5 * * * *',
     localTime: false,
     minAutonomy: 'medium',
     requires: (ctx) => ctx.sokosumiConfigured,
-  },
-  {
-    slug: 'input-responder',
-    kind: 'system_sweep',
-    name: 'Auto-answer input requests',
-    description:
-      'Every 5 minutes: detects Sokosumi jobs paused on AWAITING_INPUT and has Hermes answer them for you when it can tell what the job needs — at high autonomy it submits the answer immediately, at medium it raises a confirmation card for you to approve. Also spots jobs that just COMPLETED and, when you and Hermes had agreed on a next step, continues the plan (follow-up tasks arrive as confirmation cards at medium autonomy). (At low autonomy you just get the urgent-interrupt notification instead.)',
-    cronExpr: '2-59/5 * * * *',
-    localTime: false,
-    minAutonomy: 'medium',
   },
   {
     slug: 'eod-report',
@@ -138,42 +118,51 @@ export async function syncSystemSchedules(ctx: SyncContext): Promise<{
   );
   const eligibleIds = new Set(eligible.map((s) => systemRowId(s.slug, ctx.instanceId)));
 
-  // One-time slug migration: task-augmentation → taskboard-assistant.
-  // Carry the user's enabled/disabled toggle across so a prior opt-out isn't
-  // silently lost when the old row is deleted below and the new one is
-  // created enabled-by-default.
-  const oldAugmentId = systemRowId('task-augmentation', ctx.instanceId);
-  const newBoardId = systemRowId('taskboard-assistant', ctx.instanceId);
-  const oldAugment = await prisma.scheduledTask.findUnique({
-    where: { id: oldAugmentId },
-    select: { enabled: true },
-  });
-  if (oldAugment && !oldAugment.enabled) {
-    const newRow = await prisma.scheduledTask.findUnique({ where: { id: newBoardId }, select: { id: true } });
+  // Slug migrations. Carry the user's enabled/disabled toggle across so a prior
+  // opt-out isn't silently lost when the old row is deleted below and the new
+  // one is created enabled-by-default.
+  //   task-augmentation                                    → taskboard-assistant
+  //   taskboard-assistant + input-responder + urgent-interrupts → board-sweep
+  // For the 3→1 merge, a user who had opted OUT of ANY of the three keeps the
+  // merged sweep off: silently re-enabling work they'd turned off is worse than
+  // making them switch it back on.
+  const MIGRATIONS: Array<{ from: string[]; to: string }> = [
+    { from: ['task-augmentation'], to: 'taskboard-assistant' },
+    { from: ['taskboard-assistant', 'input-responder', 'urgent-interrupts'], to: 'board-sweep' },
+  ];
+  for (const mig of MIGRATIONS) {
+    const spec = SYSTEM_SCHEDULES.find((sp) => sp.slug === mig.to);
+    if (!spec) continue;
+    const newId = systemRowId(mig.to, ctx.instanceId);
+    const olds = await prisma.scheduledTask.findMany({
+      where: { id: { in: mig.from.map((f) => systemRowId(f, ctx.instanceId)) } },
+      select: { enabled: true },
+    });
+    if (olds.length === 0 || olds.every((o) => o.enabled)) continue;
+    const newRow = await prisma.scheduledTask.findUnique({ where: { id: newId }, select: { id: true } });
     if (newRow) {
-      await prisma.scheduledTask.update({ where: { id: newBoardId }, data: { enabled: false } });
+      await prisma.scheduledTask.update({ where: { id: newId }, data: { enabled: false } });
     } else {
       // New row not created yet — stash the intent by pre-creating a disabled
       // placeholder the upsert below will keep (its update block never touches
       // enabled). Uses the current spec's cadence so nextRunAt is sane.
-      const boardSpec = SYSTEM_SCHEDULES.find((s) => s.slug === 'taskboard-assistant');
-      if (boardSpec) {
-        await prisma.scheduledTask.create({
+      await prisma.scheduledTask
+        .create({
           data: {
-            id: newBoardId,
+            id: newId,
             instanceId: ctx.instanceId,
             userId: ctx.userId,
             kind: 'system_sweep',
-            name: boardSpec.name,
-            description: boardSpec.description,
-            prompt: `[orchestrator] ${boardSpec.name}`,
-            cronExpr: boardSpec.cronExpr,
+            name: spec.name,
+            description: spec.description,
+            prompt: `[orchestrator] ${spec.name}`,
+            cronExpr: spec.cronExpr,
             timezone: 'UTC',
             enabled: false,
-            nextRunAt: safeNextRun(boardSpec.cronExpr, 'UTC', new Date()) ?? new Date(Date.now() + 3_600_000),
+            nextRunAt: safeNextRun(spec.cronExpr, 'UTC', new Date()) ?? new Date(Date.now() + 3_600_000),
           },
-        }).catch(() => {});
-      }
+        })
+        .catch(() => {});
     }
   }
 
@@ -245,9 +234,7 @@ export async function freshenSweepMirrors(
   slug:
     | 'sokosumi-sync'
     | 'inbox-refresh'
-    | 'urgent-interrupts'
-    | 'taskboard-assistant'
-    | 'input-responder'
+    | 'board-sweep'
     | 'eod-report',
 ): Promise<void> {
   const spec = SYSTEM_SCHEDULES.find((s) => s.slug === slug);
@@ -284,9 +271,7 @@ export async function isSystemSweepEnabled(
   slug:
     | 'sokosumi-sync'
     | 'inbox-refresh'
-    | 'urgent-interrupts'
-    | 'taskboard-assistant'
-    | 'input-responder'
+    | 'board-sweep'
     | 'eod-report',
 ): Promise<boolean> {
   const id = systemRowId(slug, instanceId);
