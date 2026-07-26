@@ -43,6 +43,50 @@ export interface InstanceContext {
  *  job-state rules. Re-exported here for existing importers. */
 export { extractAwaitingInputEvent };
 
+/** Cap on persisted call arguments — this is a debugging breadcrumb, not a
+ *  replay log, and some tool args carry long free text. */
+const TOOL_ARGS_MAX_CHARS = 2000;
+
+/**
+ * Persist one executed tool call for the admin timeline. Fire-and-forget: a
+ * failure to record must never break the agent's turn, so this deliberately
+ * does not await and swallows its own errors.
+ */
+export function recordToolCall(input: {
+  ctx: InstanceContext;
+  toolName: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  resultBytes?: number;
+  errorMessage?: string;
+  latencyMs: number;
+}): void {
+  let args: unknown = input.args;
+  try {
+    const json = JSON.stringify(input.args ?? {});
+    if (json.length > TOOL_ARGS_MAX_CHARS) {
+      args = { _truncated: true, _bytes: json.length, preview: json.slice(0, TOOL_ARGS_MAX_CHARS) };
+    }
+  } catch {
+    args = { _unserializable: true };
+  }
+  void prisma.agentToolCall
+    .create({
+      data: {
+        instanceId: input.ctx.instanceId,
+        userId: input.ctx.userId,
+        toolName: input.toolName,
+        args: args as object,
+        ok: input.ok,
+        resultBytes: input.resultBytes ?? null,
+        errorMessage: input.errorMessage?.slice(0, 500) ?? null,
+        latencyMs: input.latencyMs,
+        autonomy: input.ctx.autonomyLevel,
+      },
+    })
+    .catch((err) => logger.warn({ err, toolName: input.toolName }, 'tool_call_record_failed'));
+}
+
 /** The coworker fields the tool's own description promises. */
 export interface ProjectedCoworker {
   id?: string;
@@ -575,6 +619,14 @@ async function handle(c: Context): Promise<Response> {
         },
         'sokosumi_mcp_tool_done',
       );
+      recordToolCall({
+        ctx: auth.ctx,
+        toolName,
+        args,
+        ok: true,
+        resultBytes: text.length,
+        latencyMs: Date.now() - t0,
+      });
       return rpcResult(id, { content: [{ type: 'text', text }] });
     } catch (err) {
       logger.warn(
@@ -582,6 +634,14 @@ async function handle(c: Context): Promise<Response> {
         'sokosumi_mcp_tool_failed',
       );
       const message = err instanceof Error ? err.message : String(err);
+      recordToolCall({
+        ctx: auth.ctx,
+        toolName,
+        args,
+        ok: false,
+        errorMessage: message,
+        latencyMs: Date.now() - t0,
+      });
       return rpcResult(id, {
         content: [{ type: 'text', text: `tool error: ${message}${grantErrorHint(message)}` }],
         isError: true,

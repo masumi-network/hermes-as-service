@@ -34,6 +34,7 @@ export function layout(opts: { title: string; body: string; active?: string }): 
       ${nav('/admin/instances', 'Instances')}
       ${nav('/admin/usage', 'Usage')}
       ${nav('/admin/chats', 'Chats')}
+      ${nav('/admin/tools', 'Tool calls')}
       ${nav('/admin/confirmations', 'Confirmations')}
       ${nav('/admin/events', 'Events')}
       ${nav('/admin/crons', 'Crons')}

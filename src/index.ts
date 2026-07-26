@@ -46,6 +46,7 @@ import {
   startEodReportCron,
   startPoolReplenishCron,
   startNativePromptReconcilerCron,
+  startToolCallPruneCron,
   startMcpToolsRollCron,
 } from './cron.js';
 
@@ -116,6 +117,7 @@ startInputResponderCron();
 startEodReportCron();
 startPoolReplenishCron();
 startNativePromptReconcilerCron();
+startToolCallPruneCron();
 startMcpToolsRollCron();
 
 // On boot, resume any onboarding pipelines that died with a previous pod.

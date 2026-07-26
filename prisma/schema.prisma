@@ -180,6 +180,7 @@ model HermesInstance {
   updatedAt      DateTime @updatedAt
 
   messages              ChatMessage[]
+  toolCalls             AgentToolCall[]
   provisionEvents       ProvisionEvent[]
   llmUsage              LlmUsage[]
   schedules             ScheduledTask[]
@@ -350,6 +351,41 @@ model ChatMessage {
   @@index([scheduledTaskId])
   // Cron-turn history prefix: WHERE userId+kind ORDER BY createdAt desc.
   @@index([userId, kind, createdAt])
+}
+
+/// Every MCP tool the agent actually executed.
+///
+/// The chat proxy only ever saw the OUTER turn — the user's message and the
+/// final reply — because the agent's tool loop runs against the LLM proxy on a
+/// different route. So the admin chat view could show WHAT the agent answered
+/// but never WHY, which made "it raised three approval cards and explained
+/// none of them" impossible to debug from the dashboard.
+///
+/// Correlated to a chat turn by (userId, createdAt) window, same as
+/// confirmations — there is still no hard requestId link across the two routes.
+model AgentToolCall {
+  id           String   @id @default(uuid())
+  instanceId   String
+  userId       String
+  toolName     String
+  /// Call arguments, truncated. Read-only debugging aid — never replayed.
+  args         Json?
+  ok           Boolean  @default(true)
+  /// Size of the tool's response. The signal that caught a 534KB
+  /// list_coworkers eating half the context window.
+  resultBytes  Int?
+  errorMessage String?
+  latencyMs    Int?
+  /// Autonomy at call time — explains why a write became a confirmation.
+  autonomy     String?
+  createdAt    DateTime @default(now())
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([instanceId, createdAt])
+  @@index([createdAt])
+  @@index([toolName, createdAt])
 }
 
 model OutboxMessage {

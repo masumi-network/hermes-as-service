@@ -1478,16 +1478,20 @@ router.get('/admin/chats/:requestId', async (c) => {
   const windowMs = 60_000;
   const winStart = new Date(first.createdAt.getTime() - windowMs);
   const winEnd = new Date((msgs[msgs.length - 1]?.createdAt ?? first.createdAt).getTime() + windowMs);
-  const relatedConfs = await prisma.pendingConfirmation.findMany({
-    where: {
-      userId: first.userId,
-      createdAt: { gte: winStart, lte: winEnd },
-    },
-    orderBy: { createdAt: 'asc' },
-  });
+  const [relatedConfs, toolCalls] = await Promise.all([
+    prisma.pendingConfirmation.findMany({
+      where: { userId: first.userId, createdAt: { gte: winStart, lte: winEnd } },
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.agentToolCall.findMany({
+      where: { userId: first.userId, createdAt: { gte: winStart, lte: winEnd } },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    }),
+  ]);
   const confSection = relatedConfs.length === 0
     ? ''
-    : `<h2>Tool calls / confirmations during this turn</h2>
+    : `<h2>Confirmations during this turn</h2>
        <div class="card">
          <table>
            <thead><tr><th>Tool</th><th>Status</th><th>Summary</th><th>When</th></tr></thead>
@@ -1504,6 +1508,43 @@ router.get('/admin/chats/:requestId', async (c) => {
        </div>
        <div style="height:12px"></div>`;
 
+  // What the agent actually DID between your message and its reply. Without
+  // this the dashboard showed the answer but never the reasoning path — you
+  // could see three approval cards appear and not what led to them.
+  const BIG_RESULT = 50_000; // flag anything that meaningfully eats the context
+  const toolSection = toolCalls.length === 0
+    ? ''
+    : `<h2>Tool calls during this turn <span class="dim">(${toolCalls.length})</span></h2>
+       <div class="card">
+         <table>
+           <thead><tr><th>#</th><th>Tool</th><th>Arguments</th><th>Result</th><th>Took</th><th>When</th></tr></thead>
+           <tbody>
+             ${toolCalls.map((t, i) => {
+               const argStr = t.args === null || t.args === undefined ? '' : JSON.stringify(t.args);
+               const big = (t.resultBytes ?? 0) >= BIG_RESULT;
+               return `
+               <tr>
+                 <td class="dim mono" style="font-size:11px">${i + 1}</td>
+                 <td class="mono" style="font-size:12px">${esc(t.toolName)}${t.ok ? '' : ' <span class="badge danger">error</span>'}</td>
+                 <td class="mono" style="font-size:11px;max-width:420px;word-break:break-all">${esc(argStr.slice(0, 300))}${argStr.length > 300 ? '…' : ''}</td>
+                 <td class="mono" style="font-size:11px">${
+                   t.ok
+                     ? `${(t.resultBytes ?? 0).toLocaleString()} B${big ? ` <span class="badge danger">~${Math.round((t.resultBytes ?? 0) / 4 / 1000)}k tok</span>` : ''}`
+                     : `<span class="dim">${esc((t.errorMessage ?? '').slice(0, 120))}</span>`
+                 }</td>
+                 <td class="mono" style="font-size:11px">${t.latencyMs ?? '-'}ms</td>
+                 <td class="mono" style="font-size:11px">${esc(relTime(t.createdAt))}</td>
+               </tr>`;
+             }).join('')}
+           </tbody>
+         </table>
+         <p class="dim" style="font-size:11px;margin:10px 0 0">
+           Repeated identical calls, or a result flagged in red, are the usual cause of an agent
+           losing the thread mid-turn.
+         </p>
+       </div>
+       <div style="height:12px"></div>`;
+
   const body = `
     <h1>Chat detail</h1>
     <p class="dim">
@@ -1515,9 +1556,129 @@ router.get('/admin/chats/:requestId', async (c) => {
       ${userMeta?.sokosumiEnv ? ` · env=${esc(userMeta.sokosumiEnv)}` : ''}
     </p>
     ${msgs.map(renderFull).join('')}
+    ${toolSection}
     ${confSection}
     <p class="dim"><a href="/admin/chats">← Back to chats</a></p>`;
   return c.html(layout({ title: 'Chat detail', body, active: '/admin/chats' }));
+});
+
+// ---------- Tool-call firehose ----------
+
+/**
+ * Every MCP tool the agents actually ran, newest first.
+ *
+ * Built after a session where the agent called list_coworkers four times in
+ * twenty-two minutes at 534KB a call — roughly half its context window each
+ * time — and nothing in the dashboard showed it. The two things worth looking
+ * at here are the payload column (red = big enough to damage the turn) and
+ * runs of the same tool repeated back to back.
+ */
+router.get('/admin/tools', async (c) => {
+  const userFilter = c.req.query('user') ?? '';
+  const toolFilter = c.req.query('tool') ?? '';
+  const bigOnly = c.req.query('big') === '1';
+  const errorsOnly = c.req.query('errors') === '1';
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 200), 10), 500);
+  const BIG_RESULT = 50_000;
+
+  const where: Record<string, unknown> = {};
+  if (userFilter) where['userId'] = userFilter;
+  if (toolFilter) where['toolName'] = toolFilter;
+  if (bigOnly) where['resultBytes'] = { gte: BIG_RESULT };
+  if (errorsOnly) where['ok'] = false;
+
+  const calls = await prisma.agentToolCall.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+
+  // Aggregate over the window shown so the expensive tools are obvious.
+  const byTool = new Map<string, { n: number; bytes: number; ms: number; errors: number }>();
+  for (const t of calls) {
+    const e = byTool.get(t.toolName) ?? { n: 0, bytes: 0, ms: 0, errors: 0 };
+    e.n += 1;
+    e.bytes += t.resultBytes ?? 0;
+    e.ms += t.latencyMs ?? 0;
+    if (!t.ok) e.errors += 1;
+    byTool.set(t.toolName, e);
+  }
+  const ranked = [...byTool.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 12);
+
+  const q = (over: Record<string, string | null>): string => {
+    const p = new URLSearchParams({
+      ...(userFilter ? { user: userFilter } : {}),
+      ...(toolFilter ? { tool: toolFilter } : {}),
+      ...(bigOnly ? { big: '1' } : {}),
+      ...(errorsOnly ? { errors: '1' } : {}),
+      limit: String(limit),
+    });
+    for (const [k, v] of Object.entries(over)) {
+      if (v === null) p.delete(k);
+      else p.set(k, v);
+    }
+    return `/admin/tools?${p.toString()}`;
+  };
+
+  const body = `
+    <h1>Tool calls</h1>
+    <p class="dim">
+      What the agents actually executed. Payload size is the number that matters —
+      a single oversized result can consume most of a model's context and make the
+      rest of the turn incoherent.
+    </p>
+    <div class="row" style="gap:8px;margin-bottom:12px">
+      <a class="btn" href="${esc(q({ big: bigOnly ? null : '1' }))}">${bigOnly ? '✓ ' : ''}Large payloads only</a>
+      <a class="btn" href="${esc(q({ errors: errorsOnly ? null : '1' }))}">${errorsOnly ? '✓ ' : ''}Errors only</a>
+      ${toolFilter ? `<a class="btn" href="${esc(q({ tool: null }))}">✕ ${esc(toolFilter)}</a>` : ''}
+      ${userFilter ? `<a class="btn" href="${esc(q({ user: null }))}">✕ ${esc(userFilter)}</a>` : ''}
+    </div>
+
+    ${ranked.length === 0 ? '' : `
+    <div class="card">
+      <table>
+        <thead><tr><th>Tool</th><th>Calls</th><th>Total payload</th><th>≈ tokens</th><th>Avg ms</th><th>Errors</th></tr></thead>
+        <tbody>
+          ${ranked.map(([name, s]) => `
+            <tr>
+              <td class="mono" style="font-size:12px"><a href="${esc(q({ tool: name }))}">${esc(name)}</a></td>
+              <td>${s.n}</td>
+              <td class="mono">${s.bytes.toLocaleString()} B</td>
+              <td class="mono">${s.bytes >= BIG_RESULT ? `<span class="badge danger">~${Math.round(s.bytes / 4 / 1000)}k</span>` : `~${Math.round(s.bytes / 4 / 1000)}k`}</td>
+              <td class="mono">${s.n ? Math.round(s.ms / s.n) : 0}</td>
+              <td>${s.errors > 0 ? `<span class="badge danger">${s.errors}</span>` : '0'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="height:16px"></div>`}
+
+    <div class="card">
+      ${calls.length === 0 ? '<div class="empty">No tool calls recorded yet.</div>' : `
+      <table>
+        <thead><tr><th>When</th><th>Tool</th><th>User</th><th>Arguments</th><th>Result</th><th>ms</th></tr></thead>
+        <tbody>
+          ${calls.map((t) => {
+            const argStr = t.args === null || t.args === undefined ? '' : JSON.stringify(t.args);
+            const big = (t.resultBytes ?? 0) >= BIG_RESULT;
+            return `
+            <tr>
+              <td class="mono" style="font-size:11px">${esc(relTime(t.createdAt))}</td>
+              <td class="mono" style="font-size:12px"><a href="${esc(q({ tool: t.toolName }))}">${esc(t.toolName)}</a>${t.ok ? '' : ' <span class="badge danger">err</span>'}${t.autonomy ? ` <span class="dim" style="font-size:10px">${esc(t.autonomy)}</span>` : ''}</td>
+              <td class="mono" style="font-size:11px"><a href="/admin/instances/${encodeURIComponent(t.userId)}">${esc(t.userId.slice(0, 10))}…</a></td>
+              <td class="mono" style="font-size:11px;max-width:380px;word-break:break-all">${esc(argStr.slice(0, 220))}${argStr.length > 220 ? '…' : ''}</td>
+              <td class="mono" style="font-size:11px">${
+                t.ok
+                  ? `${(t.resultBytes ?? 0).toLocaleString()} B${big ? ` <span class="badge danger">~${Math.round((t.resultBytes ?? 0) / 4 / 1000)}k tok</span>` : ''}`
+                  : `<span class="dim">${esc((t.errorMessage ?? '').slice(0, 140))}</span>`
+              }</td>
+              <td class="mono" style="font-size:11px">${t.latencyMs ?? '-'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`}
+    </div>`;
+  return c.html(layout({ title: 'Tool calls', body, active: '/admin/tools' }));
 });
 
 // ---------- Pending / resolved confirmations firehose ----------

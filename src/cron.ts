@@ -263,3 +263,22 @@ export function startPoolReplenishCron(): void {
   register('pool_replenish_cron', '*/2 * * * *', runPoolReplenishSweep);
   schedulePoolReplenishSoon();
 }
+
+/** How long executed tool calls stay queryable in the admin dashboard. Long
+ *  enough to debug "what happened in that session last week", short enough
+ *  that a busy fleet doesn't accumulate rows forever. */
+const TOOL_CALL_RETENTION_DAYS = 30;
+
+/**
+ * Daily — prune the tool-call timeline. Every MCP call writes a row; without
+ * this the table only ever grows.
+ */
+export function startToolCallPruneCron(): void {
+  register('tool_call_prune_cron', '40 3 * * *', async () => {
+    const cutoff = new Date(Date.now() - TOOL_CALL_RETENTION_DAYS * 24 * 60 * 60_000);
+    const { count } = await prisma.agentToolCall.deleteMany({
+      where: { createdAt: { lt: cutoff } },
+    });
+    return { scanned: count, acted: count, cutoff: cutoff.toISOString() };
+  });
+}
