@@ -22,6 +22,7 @@ import {
 } from '../integrations/manager.js';
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { withMachineTurn } from './machine-lease.js';
 import { loadConfig } from '../config.js';
 import { findImageVersion, tagFromRef } from '../images/manifest.js';
 import { listPendingConfirmations } from '../confirmations/store.js';
@@ -259,13 +260,26 @@ async function notifyPersonaChanged(instanceId: string): Promise<void> {
   const prompt = directive
     ? `Internal — your reply is discarded. The user updated your persona settings. ${directive}\n\nReply only "ok".`
     : `Internal — your reply is discarded. The user cleared your custom persona settings. Remove the memory key user.persona and revert to your default name and default voice (balanced length, friendly-professional tone). Reply only "ok".`;
-  await postNudge(row.endpointUrl, apiKey, prompt);
+  await postNudge(row.id, row.endpointUrl, apiKey, prompt);
 }
 
 /** Single-turn internal nudge to the machine. Deliberately NO res.ok check —
  *  these are best-effort memory updates and a non-2xx must keep passing
  *  silently (callers fire-and-forget with their own catch). */
-async function postNudge(endpointUrl: string, apiKey: string, prompt: string): Promise<void> {
+/** Settings-change nudge. Holds the machine lease: these are cosmetic, so a
+ *  busy machine skips rather than running a second agent loop alongside it. */
+async function postNudge(
+  instanceId: string,
+  endpointUrl: string,
+  apiKey: string,
+  prompt: string,
+): Promise<void> {
+  await withMachineTurn(instanceId, 'settings_nudge', () => postNudgeInner(endpointUrl, apiKey, prompt), {
+    onBusy: undefined,
+  });
+}
+
+async function postNudgeInner(endpointUrl: string, apiKey: string, prompt: string): Promise<void> {
   await fetch(`${endpointUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -283,7 +297,7 @@ async function notifyAutonomyChanged(instanceId: string, newLevel: string): Prom
   if (!row || !row.endpointUrl) return;
   const apiKey = await decryptSecret(row.apiServerKey);
   const prompt = `Internal — your reply is discarded. Your autonomy level has changed to "${newLevel}". Update your memory with this fact. At low you may only read; at medium your write/spend tool calls are intercepted by the orchestrator and require user approval before executing; at high you may act autonomously while respecting the cost rules in your SOUL. Reply only "ok".`;
-  await postNudge(row.endpointUrl, apiKey, prompt);
+  await postNudge(row.id, row.endpointUrl, apiKey, prompt);
 }
 
 router.get('/v1/instances/:userId', async (c) => {

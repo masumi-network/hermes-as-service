@@ -133,6 +133,32 @@ export async function renewMachineTurn(
 }
 
 /**
+ * Run `fn` holding the machine, or return `onBusy` without running it.
+ *
+ * For best-effort turns — settings nudges, integration greetings, native-cron
+ * reconciliation. All of them are either idempotent or purely cosmetic, so
+ * skipping a busy machine is strictly better than interleaving a second agent
+ * loop with whatever is already running.
+ */
+export async function withMachineTurn<T>(
+  instanceId: string,
+  kind: string,
+  fn: () => Promise<T>,
+  opts: { onBusy: T; ttlMs?: number },
+): Promise<T> {
+  const claim = await acquireMachineTurn(instanceId, kind, opts.ttlMs);
+  if (!claim.ok) {
+    logger.info({ instanceId, kind, heldBy: claim.busy.kind }, 'machine_turn_skipped_busy');
+    return opts.onBusy;
+  }
+  try {
+    return await fn();
+  } finally {
+    await releaseMachineTurn(claim.handle);
+  }
+}
+
+/**
  * Boot-time sweep: a lease held by a process that no longer exists would block
  * its instance until expiry. We cannot tell a dead holder from a live one in
  * another replica, so we do NOT clear leases here — that would reintroduce the

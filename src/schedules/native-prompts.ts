@@ -1,5 +1,6 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { withMachineTurn } from '../routes/machine-lease.js';
 import { decryptSecret } from '../crypto.js';
 import { normalizeAutonomy } from '../config.js';
 
@@ -161,6 +162,15 @@ export function localCronToUtc(cronExpr: string, timezone: string): string {
  * and return false; the next sync (autonomy change / admin resync) retries.
  */
 export async function syncNativePromptCrons(instanceId: string): Promise<boolean> {
+  // Drives an agent turn (the agent writes its own cronjobs), so it must not
+  // join a turn already in flight. Idempotent + reconciled hourly, so skipping
+  // a busy machine just means the next tick does it.
+  return withMachineTurn(instanceId, 'native_prompt_sync', () => syncNativePromptCronsInner(instanceId), {
+    onBusy: false,
+  });
+}
+
+async function syncNativePromptCronsInner(instanceId: string): Promise<boolean> {
   const row = await prisma.hermesInstance.findUnique({ where: { id: instanceId } });
   if (!row || row.destroyedAt || !row.endpointUrl) return false;
   if (row.status !== 'ready' && row.status !== 'running' && row.status !== 'suspended') return false;
@@ -343,6 +353,18 @@ export async function runNativePromptReconcilerSweep(): Promise<{ scanned: numbe
  *    propagation, so failures are logged loudly.
  */
 export async function propagateCronToggleToMachine(
+  instanceId: string,
+  opts: { name: string; enable: boolean; cronExpr?: string; mirrorPrompt?: string },
+): Promise<boolean> {
+  return withMachineTurn(
+    instanceId,
+    'native_prompt_toggle',
+    () => propagateCronToggleToMachineInner(instanceId, opts),
+    { onBusy: false },
+  );
+}
+
+async function propagateCronToggleToMachineInner(
   instanceId: string,
   opts: { name: string; enable: boolean; cronExpr?: string; mirrorPrompt?: string },
 ): Promise<boolean> {

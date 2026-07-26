@@ -1,5 +1,6 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { withMachineTurn } from '../routes/machine-lease.js';
 import { decryptSecret } from '../crypto.js';
 
 /**
@@ -24,6 +25,19 @@ import { decryptSecret } from '../crypto.js';
  * shouldn't make Sokosumi's POST appear to fail.
  */
 export async function notifyIntegrationConnected(
+  instanceId: string,
+  provider: string,
+): Promise<void> {
+  // A greeting turn — nice to have, never worth interleaving with live work.
+  await withMachineTurn(
+    instanceId,
+    'integration_greeting',
+    () => notifyIntegrationConnectedInner(instanceId, provider),
+    { onBusy: undefined },
+  );
+}
+
+async function notifyIntegrationConnectedInner(
   instanceId: string,
   provider: string,
 ): Promise<void> {
