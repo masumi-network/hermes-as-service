@@ -1,5 +1,3 @@
-import { logger } from '../logger.js';
-
 /**
  * One agent turn at a time, per instance.
  *
@@ -22,55 +20,24 @@ import { logger } from '../logger.js';
  * am") instead of starting a second agent.
  */
 
-interface ActiveTurn {
-  startedAt: number;
-  requestId: string;
-  /** First ~120 chars of the message that started it, for the status reply. */
-  prompt: string;
+export interface LeaseHolderInfo {
+  /** Human phrase for what holds the machine, from describeLeaseHolder. */
+  holder: string;
+  /** When it started, when derivable — omitted rather than guessed. */
+  since?: Date;
 }
 
-/**
- * Hard ceiling on how long a turn may hold the slot. Real turns have been
- * observed at ~12 minutes; past this we assume the tracking leaked (a crash
- * between acquire and release) and let the next message through rather than
- * wedging the instance forever.
- */
-const MAX_TURN_MS = 20 * 60_000;
-
-const active = new Map<string, ActiveTurn>();
-
-/** Try to claim the turn slot. Returns null on success, or the turn already
- *  running. */
-export function acquireTurn(
-  instanceId: string,
-  turn: { requestId: string; prompt: string },
-): ActiveTurn | null {
-  const existing = active.get(instanceId);
-  if (existing) {
-    if (Date.now() - existing.startedAt < MAX_TURN_MS) return existing;
-    logger.warn(
-      { instanceId, staleRequestId: existing.requestId, ageMs: Date.now() - existing.startedAt },
-      'turn_guard_stale_slot_reclaimed',
-    );
-  }
-  active.set(instanceId, {
-    startedAt: Date.now(),
-    requestId: turn.requestId,
-    prompt: turn.prompt.slice(0, 120),
-  });
-  return null;
-}
-
-/** Release the slot. Safe to call twice; only clears the turn that owns it. */
-export function releaseTurn(instanceId: string, requestId: string): void {
-  const existing = active.get(instanceId);
-  if (existing && existing.requestId !== requestId) return;
-  active.delete(instanceId);
-}
-
-/** Test seam. */
-export function resetTurnGuard(): void {
-  active.clear();
+/** Human phrasing for whatever holds the machine lease. */
+export function describeLeaseHolder(kind: string | null): string {
+  if (!kind || kind === 'chat') return 'your previous message';
+  const named: Record<string, string> = {
+    board_sweep: 'a background check of your task board',
+    approval_continuation: 'the action you just approved',
+    native_prompt: 'a scheduled task',
+    inbox_refresh: 'a background inbox refresh',
+    sokosumi_sync: 'a background workspace sync',
+  };
+  return named[kind] ?? `a background task (${kind})`;
 }
 
 /**
@@ -125,12 +92,15 @@ function humanDuration(ms: number): string {
 }
 
 /**
- * The reply sent instead of starting a second agent. Says what is running, how
- * long it has been going, and what it is doing right now when the progress bus
- * knows — the information the user was actually asking for.
+ * The reply sent instead of starting a second agent. Says WHAT is running, how
+ * long it has been going when we can tell, and what it is doing right now when
+ * the progress bus knows — the information the user was actually asking for.
+ *
+ * Note the holder may be a background sweep, not the user's own last message,
+ * so the wording must not assume "your previous message".
  */
-export function busyMessage(turn: ActiveTurn, currentActivity?: string | null): string {
-  const elapsed = humanDuration(Date.now() - turn.startedAt);
+export function busyMessage(info: LeaseHolderInfo, currentActivity?: string | null): string {
+  const elapsed = info.since ? ` (started ${humanDuration(Date.now() - info.since.getTime())} ago)` : '';
   const doing = currentActivity ? `\n\nRight now: ${currentActivity}` : '';
-  return `I'm still working on your previous message — "${turn.prompt}" — started ${elapsed} ago.${doing}\n\nI haven't started on this new message yet; send it again once I've replied, and I'll pick it up. (Starting a second run in parallel would duplicate the work.)`;
+  return `I'm still busy with ${info.holder}${elapsed}, so I haven't started on this yet — running two things at once would make a mess of both.${doing}\n\nSend this again once I've replied and I'll pick it up.`;
 }

@@ -8,8 +8,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const findMany = vi.fn();
+// The continuation now claims the machine lease first (one agent turn per
+// machine — see src/routes/machine-lease.ts), so the mock has to serve it.
+const leaseUpdateMany = vi.fn(async () => ({ count: 1 }));
 vi.mock('../src/db.js', () => ({
-  prisma: { chatMessage: { findMany: (...a: unknown[]) => findMany(...a) } },
+  prisma: {
+    chatMessage: { findMany: (...a: unknown[]) => findMany(...a) },
+    hermesInstance: {
+      updateMany: (...a: unknown[]) => leaseUpdateMany(...a),
+      findUnique: async () => ({ turnLeaseUntil: null, turnLeaseKind: null }),
+    },
+  },
 }));
 vi.mock('../src/crypto.js', () => ({ decryptSecret: async () => 'api-key' }));
 

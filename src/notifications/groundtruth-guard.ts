@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { recordEvent } from '../audit.js';
 import { decryptSecret } from '../crypto.js';
 import { loadConfig } from '../config.js';
-import { runCronAgentTurn } from './cron-agent-turn.js';
+import { MachineBusyError, runCronAgentTurn } from './cron-agent-turn.js';
 
 /**
  * Ground-truth guard for chat turns.

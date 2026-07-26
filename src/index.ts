@@ -47,6 +47,7 @@ import {
   startToolCallPruneCron,
   startMcpToolsRollCron,
 } from './cron.js';
+import { reportHeldLeasesOnBoot } from './routes/machine-lease.js';
 
 const cfg = loadConfig();
 
@@ -115,6 +116,10 @@ startPoolReplenishCron();
 startNativePromptReconcilerCron();
 startToolCallPruneCron();
 startMcpToolsRollCron();
+
+// Surface any machine lease still held from a previous process — an orphaned
+// turn should look like an orphaned turn in the logs, not a silent agent.
+void reportHeldLeasesOnBoot();
 
 // On boot, resume any onboarding pipelines that died with a previous pod.
 void (async () => {

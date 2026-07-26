@@ -6,7 +6,7 @@ import { SokosumiClient, mapLimit, resolveSokosumiTarget } from '../sokosumi/cli
 import { awaitingInputTimestamp, couldBeAwaitingInput } from '../sokosumi/job-state.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { isSystemSweepEnabled } from '../schedules/system-schedules.js';
-import { runCronAgentTurn } from './cron-agent-turn.js';
+import { MachineBusyError, runCronAgentTurn } from './cron-agent-turn.js';
 
 /**
  * Board sweep — ONE 5-minute pass over everything that changed on a user's
@@ -394,6 +394,13 @@ export async function sweepBoardForInstance(
     });
     requestId = turn.requestId;
   } catch (err) {
+    if (err instanceof MachineBusyError) {
+      // The turn PROVABLY never started, so give the items back — otherwise a
+      // busy machine would permanently swallow whatever this tick claimed.
+      await releaseClaims();
+      log.info({ heldBy: err.heldBy }, 'board_sweep_skipped_machine_busy');
+      return { handled: 0, reason: 'machine_busy' };
+    }
     log.warn({ err }, 'board_sweep_agent_turn_failed');
     return { handled: 0, reason: 'agent_turn_failed' };
   }

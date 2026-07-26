@@ -9,8 +9,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const findMany = vi.fn();
 const create = vi.fn();
+// runCronAgentTurn now claims the machine lease before running (one agent turn
+// per machine — src/routes/machine-lease.ts), so the mock must serve it.
 vi.mock('../src/db.js', () => ({
-  prisma: { chatMessage: { findMany: (...a: unknown[]) => findMany(...a), create: (...a: unknown[]) => create(...a) } },
+  prisma: {
+    chatMessage: { findMany: (...a: unknown[]) => findMany(...a), create: (...a: unknown[]) => create(...a) },
+    hermesInstance: {
+      updateMany: async () => ({ count: 1 }),
+      findUnique: async () => ({ turnLeaseUntil: null, turnLeaseKind: null }),
+    },
+  },
 }));
 
 let fetchMock: ReturnType<typeof vi.fn>;

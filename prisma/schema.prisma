@@ -85,6 +85,23 @@ model HermesInstance {
   /// inside the window. Multiple events in the same window get batched
   /// into a single message at the next eligible tick.
   lastUrgentInterruptAt DateTime?
+
+  /// Machine-turn lease. A Hermes machine runs ONE agent loop well; two
+  /// concurrent turns interleave their tool calls and starve each other's
+  /// session. Observed in production 2026-07-26: a cron turn was orphaned by a
+  /// redeploy (its process died mid-fetch, the machine kept looping), the new
+  /// process's in-memory guard started empty, and a second sweep turn joined —
+  /// two loops, context climbing past 117k, and the user got nothing.
+  ///
+  /// Deliberately in the DB, not memory: the whole failure mode is a process
+  /// restart, which an in-memory guard cannot survive. `turnLeaseUntil` is an
+  /// expiry so a crashed holder can't wedge the instance forever; the owner
+  /// token makes release idempotent and prevents a stale holder from freeing
+  /// someone else's lease.
+  turnLeaseUntil DateTime?
+  turnLeaseOwner String?
+  /// What holds it — 'chat' | a sweep source. Surfaced in the busy reply.
+  turnLeaseKind  String?
   /// Per-status watermarks for the urgent-interrupt cron's
   /// completion/awaiting-input/failed scans. Separate from lastJobNoticeAt
   /// (which tracks COMPLETED only) so a flood of completions doesn't

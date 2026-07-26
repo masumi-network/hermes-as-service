@@ -9,7 +9,8 @@ import { HttpError, notFound, problemJson, upstream } from '../errors.js';
 import { recordEvent } from '../audit.js';
 import { runGroundTruthGuard } from '../notifications/groundtruth-guard.js';
 import { lastProgressEvent, subscribeProgress, type ProgressEvent } from './progress-bus.js';
-import { acquireTurn, busyMessage, busyResponse, releaseTurn } from './turn-guard.js';
+import { busyMessage, busyResponse, describeLeaseHolder } from './turn-guard.js';
+import { acquireMachineTurn, releaseMachineTurn, type LeaseHandle } from './machine-lease.js';
 
 const router = new Hono();
 
@@ -69,8 +70,8 @@ export function clampReplayMessages(messages: OpenAIMessage[] | undefined): bool
 router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
   const userId = c.req.param('userId');
   const t0 = Date.now();
-  // Mutable so the catch below can release a slot claimed inside the try.
-  const guardKey = { instanceId: '', requestId: '' };
+  // Held so the catch below can release a lease claimed inside the try.
+  let lease: LeaseHandle | null = null;
 
   try {
     const row = await prisma.hermesInstance.findUnique({
@@ -109,27 +110,21 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
     const lastUser = findLastByRole(parsed.messages, 'user');
     const lastSystem = findLastByRole(parsed.messages, 'system');
 
-    // One turn at a time per instance. A second message arriving mid-turn used
-    // to start a parallel agent that redid the whole job from scratch — see
-    // ./turn-guard.ts for the session that motivated this.
-    const busy = acquireTurn(row.id, {
-      requestId,
-      prompt: lastUser ? contentToText(lastUser.content) : '',
-    });
-    if (busy) {
+    // One turn at a time per MACHINE — including turns started by sweeps, and
+    // including across a redeploy. See ./machine-lease.ts for the incident.
+    const claim = await acquireMachineTurn(row.id, 'chat');
+    if (!claim.ok) {
       const activity = lastProgressEvent(row.id);
       const detail = activity
         ? [activity.label, activity.detail].filter(Boolean).join(' — ')
         : null;
-      const text = busyMessage(busy, detail);
+      const text = busyMessage(
+        { holder: describeLeaseHolder(claim.busy.kind), ...(claim.busy.since ? { since: claim.busy.since } : {}) },
+        detail,
+      );
       logger.info(
-        {
-          userId,
-          requestId,
-          blockedBy: busy.requestId,
-          runningForMs: Date.now() - busy.startedAt,
-        },
-        'turn_guard_rejected_concurrent',
+        { userId, requestId, heldBy: claim.busy.kind, until: claim.busy.until },
+        'machine_lease_rejected_concurrent',
       );
       // Persist so the exchange is visible in the admin transcript.
       await prisma.chatMessage
@@ -146,8 +141,7 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         .catch(() => {});
       return busyResponse(text, isStreaming, parsed.model);
     }
-    guardKey.instanceId = row.id;
-    guardKey.requestId = requestId;
+    lease = claim.handle;
 
     // Persist the user message now so it's visible even if upstream hangs.
     // The two message inserts stay SEQUENTIAL (admin chat detail orders by
@@ -216,7 +210,7 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
         // signal that the agent's turn is over. Releasing on the CLIENT branch
         // instead would free the slot when the user closes the tab, letting a
         // follow-up start a parallel run — the exact bug this guards.
-        .finally(() => releaseTurn(row.id, requestId));
+        .finally(() => releaseMachineTurn(lease));
 
       // When the caller opts in (Sokosumi sends `X-Hermes-Progress: 1`), we
       // inject `event: hermes.status` frames so the UI can show what the
@@ -250,7 +244,7 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
       startedAt: t0,
       upstreamStatus: upstreamRes.status,
     }).catch((err) => logger.error({ err, userId, requestId }, 'capture_failed'));
-    releaseTurn(row.id, requestId);
+    await releaseMachineTurn(lease);
 
     const contentType = upstreamRes.headers.get('Content-Type') ?? 'application/json';
     return new Response(respText, {
@@ -258,9 +252,10 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
       headers: { 'Content-Type': contentType },
     });
   } catch (err) {
-    // Never strand the slot on a failure between acquire and the release
-    // points above — the next message would be told "still working" forever.
-    releaseTurn(guardKey.instanceId, guardKey.requestId);
+    // Never strand the lease on a failure between acquire and the release
+    // points above — the next message would be told "still working" until the
+    // TTL lapsed.
+    await releaseMachineTurn(lease);
     logger.error({ err, userId }, 'proxy_error');
     if (err instanceof HttpError) return problemJson(c, err);
     return problemJson(

@@ -1,5 +1,6 @@
 import { prisma } from '../db.js';
 import { logger } from '../logger.js';
+import { acquireMachineTurn, releaseMachineTurn } from '../routes/machine-lease.js';
 import { decryptSecret } from '../crypto.js';
 import { isCronNoOp } from '../routes/outbox.js';
 
@@ -75,6 +76,19 @@ export async function runApprovalContinuation(args: {
     return null;
   }
 
+  // Don't join a turn already in flight — two loops on one machine is the
+  // failure in ../routes/machine-lease.ts. The user's approval is already
+  // recorded, so skipping the continuation turn costs only immediacy: the
+  // caller falls back to the canned announcement.
+  const claim = await acquireMachineTurn(instance.id, 'approval_continuation');
+  if (!claim.ok) {
+    logger.info(
+      { userId: instance.userId, heldBy: claim.busy.kind },
+      'approval_continuation_skipped_machine_busy',
+    );
+    return null;
+  }
+
   try {
     const res = await fetch(`${instance.endpointUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -97,5 +111,7 @@ export async function runApprovalContinuation(args: {
   } catch (err) {
     logger.warn({ err, userId: instance.userId }, 'approval_continuation_failed');
     return null;
+  } finally {
+    await releaseMachineTurn(claim.handle);
   }
 }

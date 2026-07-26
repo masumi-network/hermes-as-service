@@ -2,6 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../db.js';
 import { parseChatCompletion } from '../llm/hermes-chat.js';
 import { logger } from '../logger.js';
+import { acquireMachineTurn, releaseMachineTurn } from '../routes/machine-lease.js';
+
+/** Thrown when the machine is already running a turn. Callers should SKIP the
+ *  tick, not queue — a sweep will come round again in five minutes, and
+ *  stacking turns is the failure this prevents. */
+export class MachineBusyError extends Error {
+  constructor(readonly heldBy: string | null) {
+    super(`machine busy (${heldBy ?? 'unknown'})`);
+    this.name = 'MachineBusyError';
+  }
+}
 
 /**
  * Drive a single agent turn from a background sweep AND capture it durably
@@ -53,6 +64,19 @@ export async function runCronAgentTurn(opts: {
   }
   messages.push({ role: 'user', content: prompt });
 
+  // Claim the machine BEFORE persisting anything. A sweep must never join a
+  // turn already in flight — that's what produced two interleaved agent loops
+  // on one machine (see ../routes/machine-lease.ts). Skipping is safe: the
+  // sweep runs again in five minutes and its work is dedup-guarded.
+  const claim = await acquireMachineTurn(instanceId, source, timeoutMs + 60_000);
+  if (!claim.ok) {
+    logger.info(
+      { instanceId, source, heldBy: claim.busy.kind },
+      'cron_turn_skipped_machine_busy',
+    );
+    throw new MachineBusyError(claim.busy.kind);
+  }
+
   // Persist the prompt first so it survives even if the call hangs.
   await prisma.chatMessage
     .create({
@@ -91,6 +115,8 @@ export async function runCronAgentTurn(opts: {
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
   }
+
+  await releaseMachineTurn(claim.handle);
 
   await prisma.chatMessage
     .create({
