@@ -120,6 +120,23 @@ RUN chmod +x /usr/local/bin/hermes-user-launcher /opt/hermes-hooks/cron-outbox-b
 RUN apt-get update && apt-get install -y --no-install-recommends jq \
  && rm -rf /var/lib/apt/lists/*
 
+# Skip upstream's per-boot config-schema migration (stage2-hook runs
+# scripts/docker_config_migrate.py unless this is set).
+#
+# It is pure waste for this image and it LEAKS FILES. Our launcher rewrites
+# config.yaml from /opt/hermes-user-config on every boot, so the persisted
+# config is always schema 0 again by the time Hermes reads it — the migration
+# runs, reports "Migrating config schema 0 -> 33", writes a timestamped
+# config.yaml.bak-<ts> (and sometimes .env.bak-<ts>) to the DURABLE volume,
+# and its output is then overwritten by us and discarded. Measured: exactly
+# one backup file per boot, forever, on a volume that outlives every image
+# roll, deploy and crash-restart.
+#
+# The orchestrator profile IS the source of truth for config.yaml here, so
+# there is nothing for a schema migration to preserve. Re-enable this (drop
+# the ENV) only if the launcher ever stops overwriting config.yaml.
+ENV HERMES_SKIP_CONFIG_MIGRATION=1
+
 VOLUME ["/opt/data"]
 EXPOSE 8642
 
