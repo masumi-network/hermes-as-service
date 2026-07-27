@@ -306,6 +306,30 @@ const TOOLS_ALL: ToolDef[] = [
   },
   {
     access: 'read',
+    name: 'sokosumi_list_projects',
+    description:
+      "List the user's PROJECTS — named groupings of tasks on the board (e.g. \"Masumi Landing & Marketing\"). Spans every workspace, and each entry says which one it belongs to. Call this to get a project id before filing a task under it: sokosumi_create_task takes project_id, and sokosumi_set_task_project moves an existing task in or out. Projects are workspace-scoped, so a task can only join a project in ITS OWN workspace.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    // write-light: adding a task to a project is free, reversible and has no
+    // side effects — same class as a comment or a link.
+    access: 'write-light',
+    name: 'sokosumi_set_task_project',
+    description:
+      "Put an EXISTING task into a project, or take it out. Free and reversible. Pass project_id to file it there; pass project_id=null (or omit it) with remove_from=<id> to take it out. The task and project must be in the SAME workspace. For a task you are creating right now, use sokosumi_create_task's project_id instead — one call rather than two.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'The task to move.' },
+        project_id: { type: 'string', description: 'Project to file it under. Get ids from sokosumi_list_projects.' },
+        remove_from: { type: 'string', description: 'Project id to REMOVE the task from instead.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    access: 'read',
     name: 'sokosumi_get_task_links',
     description:
       "List the tasks a given task is connected to. Each link has a relation and the peer task's name + status, so this answers \"what is this blocked on / what came out of it\" in one call. Relations, read FROM this task TO the peer: parent (this task came out of the peer), child (the peer came out of this one), blocks (this one blocks the peer), blocked_by (this one is waiting on the peer), related (loose connection), duplicate. sokosumi_get_task already embeds these — use this tool only when you want the links alone.",
@@ -518,6 +542,11 @@ const TOOLS_ALL: ToolDef[] = [
           type: 'string',
           enum: ['DRAFT', 'READY'],
           description: 'Initial status. DRAFT for in-progress drafting, READY for finalized and ready for the coworker to pick up.',
+        },
+        project_id: {
+          type: 'string',
+          description:
+            'Group the new task under a project (from sokosumi_list_projects). The project must be in the same workspace the task is filed in. Prefer this over creating the task and moving it afterwards.',
         },
         linked_task_id: {
           type: 'string',
@@ -987,6 +1016,72 @@ export async function executeTool(
       }
     }
 
+    case 'sokosumi_list_projects': {
+      // Projects are workspace-scoped, so the user's full set needs a fan-out —
+      // the same reason list_tasks spans every workspace.
+      const scopes = await client.listWorkspaceScopes();
+      const settled = await Promise.allSettled(
+        scopes.map((org) =>
+          client
+            .withOrganization(org.id)
+            .listProjects({ limit: 50 })
+            .then((projects) => ({ org, projects })),
+        ),
+      );
+      const all: Array<{ orgId: string | null; orgName?: string; id: string; name?: string; description?: string | null }> = [];
+      for (const r of settled) {
+        if (r.status !== 'fulfilled') continue;
+        for (const p of r.value.projects) {
+          all.push({
+            orgId: r.value.org.id,
+            ...(r.value.org.name ? { orgName: r.value.org.name } : {}),
+            id: p.id,
+            ...(p.name ? { name: p.name } : {}),
+            ...(p.description ? { description: p.description } : {}),
+          });
+        }
+      }
+      return JSON.stringify(
+        {
+          count: all.length,
+          projects: all,
+          note:
+            all.length === 0
+              ? 'This user has no projects in any workspace. That is a complete answer — do not retry. Tasks simply live on the board ungrouped.'
+              : 'A task can only join a project in ITS OWN workspace (matching orgId).',
+        },
+        null,
+        2,
+      );
+    }
+
+    case 'sokosumi_set_task_project': {
+      const taskId = String(args['task_id'] ?? '');
+      if (!taskId) throw new Error('missing required arg: task_id');
+      const removeFrom = typeof args['remove_from'] === 'string' ? args['remove_from'] : '';
+      const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : '';
+      if (!removeFrom && !projectId) {
+        throw new Error('pass project_id to file the task under a project, or remove_from to take it out');
+      }
+      const scoped = await scopedClientForTask(client, taskId);
+      if (removeFrom) {
+        await scoped.removeTaskFromProject(removeFrom, taskId);
+        return JSON.stringify({ ok: true, taskId, removedFrom: removeFrom }, null, 2);
+      }
+      try {
+        await scoped.addTaskToProject(projectId, taskId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('404')) {
+          throw new Error(
+            `Could not file task ${taskId} under project ${projectId}. A project only accepts tasks from ITS OWN workspace, and Sokosumi reports a mismatch as a 404. Check sokosumi_list_projects for the project's orgId and compare it with the task's workspace.`,
+          );
+        }
+        throw err;
+      }
+      return JSON.stringify({ ok: true, taskId, projectId }, null, 2);
+    }
+
     case 'sokosumi_get_task_links': {
       const taskId = String(args['task_id'] ?? args['id'] ?? '');
       if (!taskId) throw new Error('missing required arg: task_id');
@@ -1432,6 +1527,7 @@ export async function executeTool(
       // invisible to coworkers (Hermes included) after creation, so only use
       // DRAFT when the user explicitly wants a not-yet-started draft.
       const status: 'DRAFT' | 'READY' = args['status'] === 'DRAFT' ? 'DRAFT' : 'READY';
+      const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : '';
 
       if (!name) throw new Error('missing required arg: name');
       if (!coworkerId) {
@@ -1462,7 +1558,7 @@ export async function executeTool(
             `Refusing to assign task to coworker '${match.name ?? 'Hermes'}' (slug=hermes) — Hermes is the coordinator, not the executor. Pick a different coworker.`,
           );
         }
-        const result = await client.createTask({ name, description, status, coworkerId });
+        const result = await client.createTask({ name, description, status, coworkerId, ...(projectId ? { projectId } : {}) });
         const note = createResultNote(result);
         const link = await attachProvenanceLink(client, null, result, args);
         return JSON.stringify(
@@ -1558,6 +1654,7 @@ export async function executeTool(
         description,
         status,
         coworkerId,
+        ...(projectId ? { projectId } : {}),
       });
       const note = createResultNote(result);
 

@@ -264,3 +264,98 @@ describe('cross-workspace links', () => {
     expect(out.note).toMatch(/visible from BOTH tasks/);
   });
 });
+
+describe('projects', () => {
+  it('lists projects across every workspace, tagged with the one they belong to', async () => {
+    // The agent claimed "the API has no projectId". It does — POST /tasks
+    // accepts it, PATCH /tasks/{id} accepts it, and /projects/{id}/tasks moves
+    // an existing one. The gap was ours.
+    stubApi((path) => {
+      if (path.endsWith('/organizations')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: 'org_1', name: 'utxo AG' }] }),
+          text: async () => '',
+        };
+      }
+      if (path === '/projects') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: 'prj_1', name: 'Masumi Landing & Marketing' }] }),
+          text: async () => '',
+        };
+      }
+      return undefined;
+    });
+    const { executeTool } = await load();
+    const out = JSON.parse(await executeTool('sokosumi_list_projects', {}, CTX));
+    // personal + org_1, each returning the project
+    expect(out.count).toBe(2);
+    expect(out.projects.map((p: { orgId: string | null }) => p.orgId)).toEqual([null, 'org_1']);
+    expect(out.projects[1].orgName).toBe('utxo AG');
+  });
+
+  it('tells the agent an empty project list is complete', async () => {
+    stubApi();
+    const { executeTool } = await load();
+    const out = JSON.parse(await executeTool('sokosumi_list_projects', {}, CTX));
+    expect(out.count).toBe(0);
+    expect(out.note).toMatch(/do not retry/i);
+  });
+
+  it('files a NEW task under a project in the same create call', async () => {
+    stubApi();
+    const { executeTool } = await load();
+    await executeTool(
+      'sokosumi_create_task',
+      { name: 'T', coworker_id: 'cw_1', project_id: 'prj_1' },
+      CTX,
+    );
+    const post = calls.find((c) => c.method === 'POST' && c.path === '/tasks');
+    expect(post?.body).toMatchObject({ projectId: 'prj_1' });
+  });
+
+  it('sends assigneeId alongside the deprecated coworkerId', async () => {
+    // Sokosumi's spec marks coworkerId deprecated. Sending both means the
+    // eventual removal cannot silently start creating unassigned tasks.
+    stubApi();
+    const { executeTool } = await load();
+    await executeTool('sokosumi_create_task', { name: 'T', coworker_id: 'cw_1' }, CTX);
+    const post = calls.find((c) => c.method === 'POST' && c.path === '/tasks');
+    expect(post?.body).toMatchObject({ coworkerId: 'cw_1', assigneeId: 'cw_1' });
+  });
+
+  it('moves an existing task into a project', async () => {
+    stubApi();
+    const { executeTool } = await load();
+    const out = JSON.parse(
+      await executeTool('sokosumi_set_task_project', { task_id: 'tsk_1', project_id: 'prj_1' }, CTX),
+    );
+    expect(out.ok).toBe(true);
+    expect(calls.some((c) => c.method === 'POST' && c.path === '/projects/prj_1/tasks')).toBe(true);
+  });
+
+  it('takes a task back out', async () => {
+    stubApi();
+    const { executeTool } = await load();
+    const out = JSON.parse(
+      await executeTool('sokosumi_set_task_project', { task_id: 'tsk_1', remove_from: 'prj_1' }, CTX),
+    );
+    expect(out.removedFrom).toBe('prj_1');
+    expect(calls.some((c) => c.method === 'DELETE' && c.path === '/projects/prj_1/tasks/tsk_1')).toBe(true);
+  });
+
+  it('explains the cross-workspace 404 instead of passing it through', async () => {
+    stubApi((path, method) =>
+      path === '/projects/prj_1/tasks' && method === 'POST'
+        ? { ok: false, status: 404, json: async () => ({}), text: async () => 'Not found' }
+        : undefined,
+    );
+    const { executeTool } = await load();
+    await expect(
+      executeTool('sokosumi_set_task_project', { task_id: 'tsk_1', project_id: 'prj_1' }, CTX),
+    ).rejects.toThrow(/ITS OWN workspace/);
+  });
+});

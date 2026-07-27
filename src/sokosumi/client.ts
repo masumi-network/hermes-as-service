@@ -173,6 +173,15 @@ export const TASK_LINK_RELATIONS = [
 ] as const;
 export type TaskLinkRelation = (typeof TASK_LINK_RELATIONS)[number];
 
+/** A project — a workspace-scoped grouping of tasks. */
+export interface SokosumiProject {
+  id: string;
+  workspaceId?: string;
+  name?: string;
+  description?: string | null;
+  createdAt?: string;
+}
+
 /** A link as Sokosumi returns it — the peer's name and status come embedded,
  *  so listing links needs no second fetch per peer. */
 export interface TaskLink {
@@ -429,6 +438,35 @@ export class SokosumiClient {
     return unwrapData(await this.post(`/tasks/${encodeURIComponent(taskId)}/events`, args));
   }
 
+  // ---------- projects ----------
+
+  /** Projects in THIS workspace. Projects are workspace-scoped, so callers
+   *  wanting the user's full set must fan out over listWorkspaceScopes(). */
+  async listProjects(opts: { limit?: number } = {}): Promise<SokosumiProject[]> {
+    const qs = new URLSearchParams();
+    qs.set('limit', String(opts.limit ?? 50));
+    const body = await this.get<{ data?: SokosumiProject[]; items?: SokosumiProject[] }>(
+      `/projects?${qs}`,
+    );
+    return body.data ?? body.items ?? [];
+  }
+
+  /** Put an EXISTING task into a project. */
+  async addTaskToProject(projectId: string, taskId: string): Promise<unknown> {
+    return unwrapData(
+      await this.post(`/projects/${encodeURIComponent(projectId)}/tasks`, { taskId }),
+    );
+  }
+
+  /** Take a task back out of a project. */
+  async removeTaskFromProject(projectId: string, taskId: string): Promise<unknown> {
+    return unwrapData(
+      await this.del(
+        `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+      ),
+    );
+  }
+
   // ---------- task links ----------
 
   /**
@@ -472,8 +510,16 @@ export class SokosumiClient {
     description?: string | null;
     coworkerId?: string | null;
     status?: 'DRAFT' | 'READY';
+    /** Group the task under a project at creation time. */
+    projectId?: string | null;
   }): Promise<unknown> {
-    return unwrapData(await this.post('/tasks', args));
+    // Sokosumi's spec marks `coworkerId` deprecated in favour of `assigneeId`.
+    // Send BOTH, same value: the current API still honours coworkerId (it is
+    // what every task we have created uses), and adding assigneeId means the
+    // eventual removal can't silently start creating unassigned tasks.
+    const body: Record<string, unknown> = { ...args };
+    if (args.coworkerId) body['assigneeId'] = args.coworkerId;
+    return unwrapData(await this.post('/tasks', body));
   }
 
   /**
