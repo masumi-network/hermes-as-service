@@ -28,6 +28,7 @@ github-issues
 github-pr-workflow
 github-repo-management
 codebase-inspection
+simplify-code
 python-debugpy
 node-inspect-debugger
 debugging-hermes-tui-commands
@@ -69,6 +70,7 @@ ascii-art
 ascii-video
 manim-video
 pretext
+petdex
 
 # --- brand / safety risk ---
 godmode

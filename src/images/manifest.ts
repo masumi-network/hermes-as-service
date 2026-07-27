@@ -59,10 +59,37 @@ const DENYLIST_V21 = [
   'baoyu-comic', 'baoyu-infographic',
 ];
 
+// v28 adds the two skills upstream newly bundled between v2026.5.16 and
+// v2026.7.20 that are off-product for a Marketing PA. Note that 16 of the
+// inherited entries are now no-ops: upstream moved those skills from bundled
+// to optional in v2026.6.5, so the `find -name <slug>` prune simply matches
+// nothing. Harmless, and left in place so a future upstream re-bundle is
+// still covered.
+const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
+
 /**
  * Version history, NEWEST FIRST. When you cut a new image, prepend an entry.
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
+  {
+    tag: 'v28',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Base bumped 9 releases (v0.14.0 -> v0.19.0) — the s6 blocker was never real.',
+    changes: [
+      'Base moves v2026.5.16 -> v2026.7.20. We had been pinned since May on the belief that s6-overlay ignores the container CMD and crash-loops. It does not: upstream ships ENTRYPOINT ["/init","/opt/hermes/docker/main-wrapper.sh"] with an EMPTY CMD, so a downstream CMD is appended as main-wrapper argv. main-wrapper routes a first-arg-that-is-an-executable straight through and drops to the hermes user via s6-setuidgid — the same contract the pre-s6 entrypoint.sh gave us via gosu.',
+      'Launcher now ends in `hermes gateway run --no-supervise`. Inside the s6 image a plain `gateway run` is auto-redirected to the supervised s6 service; that redirect returns, which would let the main program exit and take the container down. --no-supervise restores the documented foreground contract (gateway IS the main process, container exits with its code) that Fly restart:always and the machine-roll path already assume. The flag only exists on s6 bases, so the launcher and the FROM must move together.',
+      'No competing gateway: upstream docker/s6-rc.d/main-hermes/run is `exec sleep infinity`, a deliberate no-op slot that exists only because s6-rc requires a non-empty user bundle.',
+      'No extra process: the new `dashboard` s6 service self-disables unless HERMES_DASHBOARD is truthy (run exits 0, finish returns 125). We never set it.',
+      'Fly machine spec needed no change — buildMachineConfig sets no init.entrypoint / init.cmd, so the image contract applies as-is.',
+      'Carried in from upstream: ~80% agent cold-start cut (~4.3s -> ~0.9s) that applies to cron turns; partial-stream stub responses now treated as length truncation rather than a clean stop (a candidate cause of the "agent goes silent" reports); ~195ms off every tool call; MCP tools exposed to the agent between turns without a gateway restart; Node 22 LTS; Debian 13; hindsight-client baked into the image so it survives image rolls.',
+      'Skill set shrinks 36 -> 33. Upstream trimmed its bundle 91 -> 74 (v2026.6.5 moved many skills bundled -> optional). Five we ship today disappear: creative-ideation, linear, research, training, vector-databases — none are deleted upstream, they are one `hermes skills install` away. creative-ideation is the one with real Marketing-PA relevance; re-add it to docker/hermes-user/skills/ if the agent misses it. Two newly-bundled skills (simplify-code, petdex) are denylisted here as off-product.',
+      'NOT fixed by this bump: the fabricated-tool-call bug (agent says "Task created" with no create_task call). Upstream ships an execution-discipline block that stops exactly that, but it is applied per model family — GPT/Codex, extended to Grok/xai-oauth in v2026.5.28 — and nothing indicates it covers xiaomi/mimo. The orchestrator-side narration guard is still required.',
+    ],
+  },
   {
     tag: 'v27',
     releasedAt: 'unreleased',

@@ -10,18 +10,34 @@
 #       -t registry.fly.io/hermes-user-image:v21 .
 #   docker push registry.fly.io/hermes-user-image:v21
 #
-# Base is PINNED to v2026.5.16 — the newest tini-based (pre-s6) upstream tag.
-# Why pinned, not :latest:
-#   - :latest switched to s6-overlay (PID1 = /init) ~2026-05-28, which breaks
-#     our custom-launcher CMD (s6 ignores CMD; the container crash-loops).
-#   - v17's Hermes predates `agent.tool_use_enforcement` (added 2026-03-28), so
-#     that config key was silently ignored — the tool-call hallucination fix
-#     never applied.
-#   v2026.5.16 is the sweet spot: tini entrypoint (our launcher works) AND it
-#   honors tool_use_enforcement. Do NOT bump to :latest without porting the
-#   launcher to s6 first.
+# Base is PINNED to an exact upstream tag (never :latest) so an upstream cut
+# can't silently change what the fleet boots. Currently v2026.7.20.
+#
+# s6-overlay (PID1 = /init) landed upstream in v2026.5.28. We stayed on
+# v2026.5.16 until 2026-07-27 believing s6 dropped our CMD — it does not.
+# Upstream splits it deliberately:
+#
+#   ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
+#   CMD        [ ]
+#
+# so a downstream CMD is APPENDED as arguments to main-wrapper.sh, whose
+# routing is: no args -> `hermes`; first arg is an executable -> exec it
+# directly; anything else -> `hermes <args>`. Our CMD below is on PATH, so it
+# takes the bare-executable branch and main-wrapper drops to the hermes user
+# via `s6-setuidgid hermes` — the same privilege drop the pre-s6
+# entrypoint.sh gave us through gosu.
+#
+# Two upstream details this image depends on:
+#   - docker/s6-rc.d/main-hermes/run is `exec sleep infinity` (a deliberate
+#     no-op slot), so nothing competes with the gateway our launcher starts.
+#   - the `dashboard` s6 service self-disables unless HERMES_DASHBOARD is
+#     truthy. We never set it, so it exits 0 and stays down — no extra
+#     process and nothing else binding a port.
+#
+# Do NOT bump this tag without re-reading upstream's Dockerfile ENTRYPOINT /
+# main-wrapper.sh routing — that contract is what makes our CMD work.
 
-FROM nousresearch/hermes-agent:v2026.5.16
+FROM nousresearch/hermes-agent:v2026.7.20
 
 USER root
 
@@ -86,6 +102,13 @@ COPY docker/hermes-user/cron-outbox-bridge.sh /opt/hermes-hooks/cron-outbox-brid
 
 COPY docker/hermes-user/hermes-user-launcher /usr/local/bin/hermes-user-launcher
 
+# ----- cont-init hook: keep the gateway foreground across restarts -----
+# Must sort AFTER upstream's 015-supervise-perms and BEFORE its
+# 02-reconcile-profiles ("018" < "02" lexicographically). Without it a
+# container RESTART auto-starts a supervised gateway and our foreground one
+# refuses to start — see the script's header for the full failure chain.
+COPY --chmod=0755 docker/hermes-user/018-foreground-gateway-reset /etc/cont-init.d/018-foreground-gateway-reset
+
 # Permissions in one layer so the upstream `chown -R hermes:hermes /opt/hermes`
 # from the base image's RUN steps doesn't fight us. We make our config dir
 # world-readable; the volume mount will be world-writable for the hermes
@@ -100,7 +123,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends jq \
 VOLUME ["/opt/data"]
 EXPOSE 8642
 
-# We do NOT override ENTRYPOINT — upstream's /opt/hermes/docker/entrypoint.sh
-# handles uid/gid remap and privilege drop. It sees `hermes-user-launcher`
-# on PATH and exec's it directly (see upstream entrypoint's tail logic).
+# We do NOT override ENTRYPOINT. Upstream's is `/init main-wrapper.sh`, so
+# this CMD arrives as main-wrapper's argv. Because the launcher is on PATH,
+# main-wrapper takes its bare-executable branch and exec's it under
+# `s6-setuidgid hermes`. Boot order is therefore:
+#
+#   /init
+#     -> /etc/cont-init.d/01-hermes-setup  (upstream stage2-hook.sh: uid/gid
+#        remap, volume chown, FIRST-BOOT-ONLY seeding of SOUL.md/config.yaml,
+#        config-schema migration)
+#     -> s6 services (main-hermes = no-op, dashboard = down)
+#     -> main program: hermes-user-launcher   <-- ours, overwrites the seeded
+#        SOUL.md/config.yaml with the orchestrator profile, then exec's the
+#        gateway in the FOREGROUND so the container's lifetime is the
+#        gateway's (see --no-supervise in the launcher).
 CMD ["hermes-user-launcher"]

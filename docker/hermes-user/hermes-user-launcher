@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # hermes-user-launcher
 #
-# Runs as PID-2 inside the Fly Machine, after upstream's
-# /opt/hermes/docker/entrypoint.sh has done uid/gid remapping and dropped
-# to the `hermes` user via gosu. Our job here:
+# Runs as the container's MAIN PROGRAM under s6-overlay: upstream's
+# ENTRYPOINT is `/init /opt/hermes/docker/main-wrapper.sh`, our Dockerfile
+# CMD is this script, and main-wrapper exec's it under `s6-setuidgid hermes`
+# once /etc/cont-init.d/01-hermes-setup (uid/gid remap, volume chown,
+# first-boot config seeding) has finished. Same position the pre-s6
+# entrypoint.sh + gosu gave us. Our job here:
 #   1. Compose /opt/data/.env from Fly env vars (so Hermes' subprocess
 #      sandbox sees them — they're NOT inherited otherwise).
 #   2. Sync /opt/hermes-user-config/{SOUL.md,config.yaml,skills/} →
@@ -151,5 +154,17 @@ fi
 mkdir -p "$HERMES_HOME"/{sessions,logs,memories,workspace,home,cron,cron/output}
 
 # ---- 3. exec hermes gateway ----
+#
+# `gateway run` (bare `gateway` defaults to it) is AUTO-REDIRECTED to the
+# supervised s6 service inside the s6-overlay image. That would be wrong for
+# us: the redirect returns, this exec would fall through, the main program
+# would exit and /init would tear the container down. --no-supervise keeps
+# the documented pre-s6 contract — the gateway is the container's main
+# process and the container exits with its exit code — which is what Fly's
+# `restart: policy always` and our machine-roll logic already assume.
+#
+# NOTE: --no-supervise only exists on the s6 bases (v2026.5.28+). This line
+# and the Dockerfile's FROM must move together; reverting one alone breaks
+# boot.
 cd "$HERMES_HOME"
-exec /opt/hermes/.venv/bin/hermes gateway "$@"
+exec /opt/hermes/.venv/bin/hermes gateway run --no-supervise "$@"
