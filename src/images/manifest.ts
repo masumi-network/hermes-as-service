@@ -72,6 +72,23 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v29',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Re-add creative-ideation, which the v28 base bump would have deleted.',
+    changes: [
+      'Bakes creative-ideation back into the curated packs. Upstream unbundled it in v2026.6.5 (skills/ -> optional-skills/), so a NEW machine on the v2026.7.20 base never gets it.',
+      'CORRECTION to the v28 entry: existing machines do NOT lose it. Bundled skills live under category dirs on the volume (skills/creative/creative-ideation), the v28 check looked for a flat skills/creative-ideation that never existed, and Hermes does not prune skills that leave the bundle. Re-verified on an upgraded volume: creative-ideation, linear, research, training and vector-databases are all still present under their categories. The v28 note claiming five skills disappear applies to fresh volumes only.',
+      'Because the old copy survives on upgraded volumes, the launcher now deletes skills/creative/creative-ideation so our 28-file version does not sit alongside the stale 2-file one under the same name. The denylist cannot express this — `find -name creative-ideation` would match ours too.',
+      'Copied out of the base image (/opt/hermes/optional-skills/creative/creative-ideation) rather than fetched, so it always matches the pinned upstream tag exactly and adds no build-time network dependency.',
+      'The v2026.7.20 copy is substantially richer than what we shipped pre-v28: 28 files vs 5, adding anti-slop, heuristics, method-catalog and exercises references alongside the prompt library.',
+      'No other change from v28 — same base, same denylist, same s6 wiring.',
+    ],
+  },
+  {
     tag: 'v28',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

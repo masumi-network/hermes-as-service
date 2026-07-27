@@ -137,6 +137,15 @@ for src in /opt/hermes-user-config/skills/meta/*/; do
   fi
 done
 
+# Our baked creative-ideation supersedes the stale bundled copy that older
+# volumes still carry at skills/creative/creative-ideation. Upstream unbundled
+# it in v2026.6.5 but Hermes does NOT prune skills that leave the bundle, so an
+# upgraded volume keeps the old 2-file version alongside our 28-file one and
+# the index shows the same skill twice. Delete the nested one only — the
+# denylist can't express this because `find -name creative-ideation` would
+# match ours too.
+rm -rf "$HERMES_HOME/skills/creative/creative-ideation"
+
 # Prune off-product bundled skills from the volume (Marketing PA). The image
 # already deletes these from the bundle source so Hermes won't re-sync them;
 # this cleans EXISTING /opt/data volumes (persisted across an image roll).

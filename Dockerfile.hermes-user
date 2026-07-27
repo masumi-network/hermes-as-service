@@ -81,6 +81,22 @@ RUN mkdir -p /opt/hermes-user-config/skills /opt/hermes-user-config/skills/meta 
  && rm -rf /tmp/marketingskills /tmp/avoid-ai-writing /tmp/hermes-skill-factory /tmp/claude-ads /tmp/toprank \
  && chmod -R a+rX /opt/hermes-user-config/skills
 
+# ----- re-add creative-ideation (unbundled upstream in v2026.6.5) -----
+# Upstream moved it from skills/ to optional-skills/ when it trimmed the
+# default bundle 91 -> 74. Hermes prunes the volume to match the bundle, so
+# without this it vanishes from EXISTING machines on upgrade, not just new
+# ones (verified on the v27 -> v28 volume test). It is the one unbundled
+# skill with real Marketing-PA relevance, and the v2026.7.20 copy is much
+# richer than the one we shipped before (28 files vs 5: anti-slop,
+# heuristics, method-catalog, exercises, full prompt library).
+#
+# Copied from the BASE IMAGE rather than fetched, so it is always the exact
+# version that matches the pinned upstream tag and the build needs no
+# network for it.
+RUN cp -r /opt/hermes/optional-skills/creative/creative-ideation \
+      /opt/hermes-user-config/skills/creative-ideation \
+ && chmod -R a+rX /opt/hermes-user-config/skills/creative-ideation
+
 # ----- orchestrator-owned skills (schedule-task mirror, outbox-send) -----
 # Layered AFTER the third-party packs so ours win on any name collision.
 
