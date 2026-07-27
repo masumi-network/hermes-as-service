@@ -72,6 +72,23 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v30',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Bypass s6-overlay entirely — it cannot run on Fly. v28/v29 were unbootable there.',
+    changes: [
+      'v28 and v29 CANNOT BOOT ON FLY and must never be deployed. They boot perfectly under `docker run`, which is why every local test passed. s6-overlay\'s suexec hard-requires PID 1; under Docker /init IS pid 1, but on Fly flyd\'s init owns pid 1 and runs the image entrypoint as a child, so /init aborts immediately: "s6-overlay-suexec: fatal: can only run as pid 1", exit code 100, 13 restarts, machine stopped. Observed on a live instance 2026-07-27. Pre-s6 tini only WARNED about not being pid 1, which is why v27 was unaffected.',
+      'This image REPLACES upstream\'s ENTRYPOINT (/init + main-wrapper.sh) with the launcher itself, which now starts as root and re-creates the pre-s6 contract: run upstream stage2-hook.sh (uid/gid remap, volume chown, first-boot seeding), apply the orchestrator profile, chown what it wrote, then drop via /command/s6-setuidgid and exec the gateway in the foreground.',
+      'The launcher must prepend /command and /package/admin/s6/command to PATH before calling stage2-hook: the hook invokes `s6-setuidgid` by bare name and /init normally supplies that PATH. Without it the hook dies "s6-setuidgid: not found" and the container exits 127 (caught locally before deploy).',
+      'Removes the 018-foreground-gateway-reset cont-init hook v28 added. With /init bypassed, cont-init never runs at all, so 02-reconcile-profiles cannot auto-start a competing supervised gateway — the collision it worked around no longer exists.',
+      'VERIFIED ON FLY, not just Docker: throwaway app hermes-v30-canary, real volume, three boots, HTTP 401 on the public gateway each time (401 = serving, auth required), machine events exit_code=0 restarts=0, no s6 fatal. Local Docker additionally confirmed gateway running as the hermes user with zero s6 services.',
+      'Lesson for future base bumps: a passing `docker run` test says nothing about Fly. Any change touching the entrypoint or init model must be canaried on a throwaway Fly machine before any live instance.',
+    ],
+  },
+  {
     tag: 'v29',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

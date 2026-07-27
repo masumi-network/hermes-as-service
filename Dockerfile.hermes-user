@@ -118,12 +118,11 @@ COPY docker/hermes-user/cron-outbox-bridge.sh /opt/hermes-hooks/cron-outbox-brid
 
 COPY docker/hermes-user/hermes-user-launcher /usr/local/bin/hermes-user-launcher
 
-# ----- cont-init hook: keep the gateway foreground across restarts -----
-# Must sort AFTER upstream's 015-supervise-perms and BEFORE its
-# 02-reconcile-profiles ("018" < "02" lexicographically). Without it a
-# container RESTART auto-starts a supervised gateway and our foreground one
-# refuses to start — see the script's header for the full failure chain.
-COPY --chmod=0755 docker/hermes-user/018-foreground-gateway-reset /etc/cont-init.d/018-foreground-gateway-reset
+# NOTE: we deliberately install NO /etc/cont-init.d hook. Because the
+# ENTRYPOINT below bypasses /init entirely, cont-init never runs — including
+# upstream's 02-reconcile-profiles, whose supervised-gateway auto-start was
+# the collision an earlier revision of this image needed a hook to suppress.
+# No /init, no reconciler, no collision.
 
 # Permissions in one layer so the upstream `chown -R hermes:hermes /opt/hermes`
 # from the base image's RUN steps doesn't fight us. We make our config dir
@@ -156,18 +155,24 @@ ENV HERMES_SKIP_CONFIG_MIGRATION=1
 VOLUME ["/opt/data"]
 EXPOSE 8642
 
-# We do NOT override ENTRYPOINT. Upstream's is `/init main-wrapper.sh`, so
-# this CMD arrives as main-wrapper's argv. Because the launcher is on PATH,
-# main-wrapper takes its bare-executable branch and exec's it under
-# `s6-setuidgid hermes`. Boot order is therefore:
+# We REPLACE upstream's ENTRYPOINT (`/init /opt/hermes/docker/main-wrapper.sh`)
+# rather than layering a CMD onto it.
 #
-#   /init
-#     -> /etc/cont-init.d/01-hermes-setup  (upstream stage2-hook.sh: uid/gid
-#        remap, volume chown, FIRST-BOOT-ONLY seeding of SOUL.md/config.yaml,
-#        config-schema migration)
-#     -> s6 services (main-hermes = no-op, dashboard = down)
-#     -> main program: hermes-user-launcher   <-- ours, overwrites the seeded
-#        SOUL.md/config.yaml with the orchestrator profile, then exec's the
-#        gateway in the FOREGROUND so the container's lifetime is the
-#        gateway's (see --no-supervise in the launcher).
-CMD ["hermes-user-launcher"]
+# s6-overlay's suexec hard-requires PID 1. Under `docker run` /init IS pid 1,
+# so the stock entrypoint works and every local test passes. On Fly it never
+# is — flyd's init owns pid 1 and runs the image entrypoint as a child — so
+# /init dies instantly with `s6-overlay-suexec: fatal: can only run as pid 1`
+# and exit code 100, boot-looping until Fly gives up. Verified in production
+# 2026-07-27 (see the launcher header). Since these machines only ever run on
+# Fly, the s6 supervision tree is unusable here and we skip it.
+#
+# The launcher re-creates the pre-s6 contract itself: it starts as root, runs
+# upstream's stage2-hook, applies the orchestrator profile, then drops to the
+# hermes user via s6-setuidgid and exec's the gateway in the foreground. The
+# container's lifetime is the gateway's, which is what Fly's
+# `restart: policy always` and the machine-roll path assume.
+#
+# ENTRYPOINT (not CMD) so `docker run <image> <args>` still forwards args to
+# the gateway, and so no orchestration layer can accidentally drop it.
+ENTRYPOINT ["hermes-user-launcher"]
+CMD []
