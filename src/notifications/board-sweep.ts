@@ -558,7 +558,7 @@ JUST FINISHED (COMPLETED / CANCELED / FAILED) → two jobs, in this order.
     - CANCELED / FAILED: say so plainly, with what is known about why. Do not dress up a failure as progress. For a FAILED paid job, mention they can ask you to request a refund.
 
  2. THEN consider a follow-up. Search memory and the recent conversation for a next step that was actually agreed or clearly implied by the plan this belongs to.
-    - If there IS one and it is now unblocked: check sokosumi_list_tasks for an existing task already covering it — if so, do nothing. Otherwise create it with sokosumi_create_task, assigned to the right coworker (sokosumi_list_coworkers), in the same workspace, with a description that references what just finished. ${followupGating}
+    - If there IS one and it is now unblocked: FIRST check whether a follow-up already exists — the finished item's links (in sokosumi_get_task output) show any task already spawned from it, which is more reliable than searching sokosumi_list_tasks by name. If one exists, do nothing. Otherwise create it with sokosumi_create_task, assigned to the right coworker (sokosumi_list_coworkers), in the same workspace, passing linked_task_id = the finished task's id so the board records where it came from. ${followupGating}
     - The follow-up is a task FOR A COWORKER. Never assign it to yourself and never do the work yourself.
     - If there is NO agreed or clearly-implied next step: do not invent one. A completion is not a plan. Mention in your chat message what you think the natural next step would be and let the user decide.
     - Create AT MOST ONE follow-up task this turn. If several finished items all suggest work, tell the user and let them pick.
@@ -582,7 +582,7 @@ NEWLY CREATED task → comment ONLY if you have real, specific context the creat
 `
       : ''
   }
-Tools: sokosumi_get_task / get_job / get_job_input_request / list_tasks / list_jobs / list_coworkers, sokosumi_add_task_comment, sokosumi_provide_job_input${anyDone ? ', sokosumi_create_task (follow-ups only, at most one)' : ''}, outbox-send, memory/mail/calendar. Do NOT start jobs (sokosumi_create_job) and do NOT spend credits.
+Tools: sokosumi_get_task / get_job / get_job_input_request / list_tasks / list_jobs / list_coworkers / get_task_links, sokosumi_add_task_comment, sokosumi_link_tasks, sokosumi_provide_job_input${anyDone ? ', sokosumi_create_task (follow-ups only, at most one)' : ''}, outbox-send, memory/mail/calendar. Do NOT start jobs (sokosumi_create_job) and do NOT spend credits.
 
 Nothing warrants action? Reply "skip".`;
 }

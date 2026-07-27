@@ -6,7 +6,7 @@ import { authenticateInstanceBearer } from './instance-auth.js';
 import { logger } from '../logger.js';
 
 import { recordEvent } from '../audit.js';
-import { SokosumiClient, mapLimit } from '../sokosumi/client.js';
+import { SokosumiClient, mapLimit, TASK_LINK_RELATIONS, type TaskLinkRelation } from '../sokosumi/client.js';
 import { extractAwaitingInputEvent } from '../sokosumi/job-state.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 
@@ -85,6 +85,79 @@ export function recordToolCall(input: {
       },
     })
     .catch((err) => logger.warn({ err, toolName: input.toolName }, 'tool_call_record_failed'));
+}
+
+/**
+ * A client scoped to whatever workspace the task actually lives in.
+ *
+ * Tasks are org-scoped, and sokosumi_list_tasks spans EVERY workspace — so a
+ * task id the agent just read may not be reachable from the personal scope.
+ * Verified the hard way: linking a task surfaced by list_tasks 404'd until this
+ * existed. Same personal-first-then-race-the-orgs shape as sokosumi_get_task.
+ */
+async function scopedClientForTask(
+  client: SokosumiClient,
+  taskId: string,
+): Promise<SokosumiClient> {
+  try {
+    await client.getTask(taskId);
+    return client;
+  } catch {
+    const orgs = (await client.listWorkspaceScopes()).filter((o) => o.id);
+    try {
+      return await Promise.any(
+        orgs.map(async (org) => {
+          const oc = client.withOrganization(org.id);
+          await oc.getTask(taskId);
+          return oc;
+        }),
+      );
+    } catch {
+      throw new Error(
+        `task ${taskId} not found in any workspace you can reach — check the id with sokosumi_list_tasks.`,
+      );
+    }
+  }
+}
+
+/**
+ * Optionally record where a newly-created task came from.
+ *
+ * Lives here rather than in the two create_task return paths because there ARE
+ * two (personal workspace and org workspace) and the first version only patched
+ * one — the tests caught it. Doing it inside the handler also means the link
+ * survives the confirmation replay, which re-runs the handler with stored args,
+ * and that the agent cannot forget a second tool call.
+ *
+ * Best-effort by design: a task that exists without its link is a far better
+ * outcome than a failed create, so a link error is REPORTED, not thrown.
+ */
+async function attachProvenanceLink(
+  client: SokosumiClient,
+  orgId: string | null,
+  created: unknown,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; relation: string; toTaskId: string; error?: string } | undefined> {
+  const linkedTaskId = typeof args['linked_task_id'] === 'string' ? args['linked_task_id'] : '';
+  const newTaskId = (created as { id?: string } | null)?.id;
+  if (!linkedTaskId || !newTaskId || linkedTaskId === newTaskId) return undefined;
+  const relation = (
+    TASK_LINK_RELATIONS.includes(args['link_relation'] as TaskLinkRelation)
+      ? args['link_relation']
+      : 'parent'
+  ) as TaskLinkRelation;
+  try {
+    await client.withOrganization(orgId).createTaskLink(newTaskId, { toTaskId: linkedTaskId, relation });
+    return { ok: true, relation, toTaskId: linkedTaskId };
+  } catch (err) {
+    logger.warn({ err, newTaskId, linkedTaskId }, 'sokosumi_create_task_link_failed');
+    return {
+      ok: false,
+      relation,
+      toTaskId: linkedTaskId,
+      error: err instanceof Error ? err.message.slice(0, 200) : 'link failed',
+    };
+  }
 }
 
 /** The coworker fields the tool's own description promises. */
@@ -222,13 +295,24 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'read',
     name: 'sokosumi_get_task',
     description:
-      'Fetch a single Sokosumi task by id. Returns the full body: description, status, embedded jobs[], events[], coworker assignment. Use when the user references a specific task and you need the full context.',
+      'Fetch a single Sokosumi task by id. Returns the full body: description, status, embedded jobs[], events[], coworker assignment, plus links[] — the OTHER tasks this one is connected to (parent/child/blocks/blocked_by/related/duplicate), each with the peer\'s name and status. Use when the user references a specific task and you need the full context.',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'Task id (e.g. tsk_abc or a UUID).' },
       },
       required: ['id'],
+    },
+  },
+  {
+    access: 'read',
+    name: 'sokosumi_get_task_links',
+    description:
+      "List the tasks a given task is connected to. Each link has a relation and the peer task's name + status, so this answers \"what is this blocked on / what came out of it\" in one call. Relations, read FROM this task TO the peer: parent (this task came out of the peer), child (the peer came out of this one), blocks (this one blocks the peer), blocked_by (this one is waiting on the peer), related (loose connection), duplicate. sokosumi_get_task already embeds these — use this tool only when you want the links alone.",
+    inputSchema: {
+      type: 'object',
+      properties: { task_id: { type: 'string', description: 'The task whose links you want.' } },
+      required: ['task_id'],
     },
   },
   {
@@ -434,6 +518,17 @@ const TOOLS_ALL: ToolDef[] = [
           type: 'string',
           enum: ['DRAFT', 'READY'],
           description: 'Initial status. DRAFT for in-progress drafting, READY for finalized and ready for the coworker to pick up.',
+        },
+        linked_task_id: {
+          type: 'string',
+          description:
+            "The task this new one comes OUT OF, when there is one — e.g. the finished task whose result prompted this follow-up. Linking it here is better than describing the connection in the description: the board shows it, and you cannot forget a second call. Defaults to a 'parent' relation (new task's parent is that task).",
+        },
+        link_relation: {
+          type: 'string',
+          enum: ['related', 'blocks', 'blocked_by', 'parent', 'child', 'duplicate'],
+          description:
+            "How the NEW task relates to linked_task_id. Defaults to 'parent'. Use 'blocked_by' if the new task cannot start until that one is done.",
         },
       },
       required: ['name', 'coworker_id'],
@@ -866,7 +961,14 @@ export async function executeTool(
       // racing all orgs in parallel — the first to resolve with a real task
       // wins, the others get cancelled by Promise.any logic.
       try {
-        return JSON.stringify(await client.getTask(id), null, 2);
+        const [task, links] = await Promise.all([
+          client.getTask(id),
+          // Links are cheap and answer "what is this blocked on / what came out
+          // of it" without a second round trip. A failure here must not fail
+          // the task read.
+          client.listTaskLinks(id).catch(() => [] as unknown[]),
+        ]);
+        return JSON.stringify({ ...(task as object), links }, null, 2);
       } catch {
         const orgs = await client.listWorkspaceScopes();
         const attempts = orgs.map((org) =>
@@ -874,11 +976,82 @@ export async function executeTool(
         );
         try {
           const found = await Promise.any(attempts);
-          return JSON.stringify(found, null, 2);
+          const orgLinks = await client
+            .withOrganization(found.orgId)
+            .listTaskLinks(id)
+            .catch(() => [] as unknown[]);
+          return JSON.stringify({ ...found, links: orgLinks }, null, 2);
         } catch {
           throw new Error(`task ${id} not found in any org`);
         }
       }
+    }
+
+    case 'sokosumi_get_task_links': {
+      const taskId = String(args['task_id'] ?? args['id'] ?? '');
+      if (!taskId) throw new Error('missing required arg: task_id');
+      const links = await (await scopedClientForTask(client, taskId)).listTaskLinks(taskId);
+      return JSON.stringify(
+        {
+          taskId,
+          count: links.length,
+          links,
+          ...(links.length === 0
+            ? { note: 'This task is not linked to any other task. That is a complete answer — do not retry.' }
+            : {}),
+        },
+        null,
+        2,
+      );
+    }
+
+    case 'sokosumi_link_tasks': {
+      const taskId = String(args['task_id'] ?? '');
+      const toTaskId = String(args['to_task_id'] ?? '');
+      const relation = String(args['relation'] ?? '') as TaskLinkRelation;
+      if (!taskId) throw new Error('missing required arg: task_id');
+      if (!toTaskId) throw new Error('missing required arg: to_task_id');
+      if (!TASK_LINK_RELATIONS.includes(relation)) {
+        throw new Error(
+          `invalid relation "${relation}". Must be one of: ${TASK_LINK_RELATIONS.join(', ')}. ` +
+            'The relation reads FROM task_id TO to_task_id.',
+        );
+      }
+      if (taskId === toTaskId) throw new Error('a task cannot be linked to itself');
+      const note = typeof args['note'] === 'string' ? (args['note'] as string).slice(0, 500) : undefined;
+      const scoped = await scopedClientForTask(client, taskId);
+      let created: unknown;
+      try {
+        created = await scoped.createTaskLink(taskId, {
+          toTaskId,
+          relation,
+          ...(note ? { note } : {}),
+        });
+      } catch (err) {
+        // Sokosumi answers a cross-workspace link with a bare 404 "Task not
+        // found" that names neither task — verified: linking a personal task to
+        // an org task fails this way even though BOTH read fine individually.
+        // Translate it, or the agent retries against the wrong id forever.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('404')) {
+          throw new Error(
+            `Could not link these tasks. Sokosumi only links tasks that live in the SAME workspace, and it reports a cross-workspace attempt as "Task not found" (referring to ${toTaskId}, not ${taskId}). Check both tasks are in one workspace with sokosumi_list_tasks — if they aren't, say so rather than retrying.`,
+          );
+        }
+        throw err;
+      }
+      return JSON.stringify(
+        {
+          ok: true,
+          taskId,
+          toTaskId,
+          relation,
+          link: created,
+          note: 'The link is visible from BOTH tasks — no need to create the inverse.',
+        },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_get_task_attachments': {
@@ -1263,7 +1436,7 @@ export async function executeTool(
       if (!name) throw new Error('missing required arg: name');
       if (!coworkerId) {
         throw new Error(
-          "missing required arg: coworker_id. Tasks must be assigned to a coworker who will do the work. Call sokosumi_list_coworkers first to see who's available, then pick the right one for this task (e.g., research → Hannah, project management → Elena). DO NOT assign tasks to Hermes (slug=hermes) — Hermes is the coordinator, not the executor.",
+          "missing required arg: coworker_id. Tasks must be assigned to a coworker who will do the work. Call sokosumi_list_coworkers first and pick by each coworker's CAPTION and DESCRIPTION — those carry the specialty. (The `capabilities` field only says which channels they support, chat/tasks; it tells you nothing about what they are good at.) DO NOT assign tasks to Hermes (slug=hermes) — Hermes is the coordinator, not the executor.",
         );
       }
 
@@ -1291,12 +1464,14 @@ export async function executeTool(
         }
         const result = await client.createTask({ name, description, status, coworkerId });
         const note = createResultNote(result);
+        const link = await attachProvenanceLink(client, null, result, args);
         return JSON.stringify(
           {
             orgId: null,
             scope: 'personal',
             assignedTo: { id: coworkerId, slug: match.slug, name: match.name },
             task: result,
+            ...(link ? { link } : {}),
             ...(note ? { note } : {}),
           },
           null,
@@ -1385,11 +1560,15 @@ export async function executeTool(
         coworkerId,
       });
       const note = createResultNote(result);
+
+      const link = await attachProvenanceLink(client, targetOrgId, result, args);
+
       return JSON.stringify(
         {
           orgId: targetOrgId,
           assignedTo: { id: coworkerId, slug: coworkerSlug, name: coworkerName },
           task: result,
+          ...(link ? { link } : {}),
           ...(note ? { note } : {}),
         },
         null,

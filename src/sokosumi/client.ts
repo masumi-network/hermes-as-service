@@ -156,6 +156,34 @@ export interface WorkspaceScope {
 }
 
 /**
+ * How two tasks relate. Verified against Sokosumi's OpenAPI spec
+ * (components.schemas.TaskLinkRelation) — these six, exactly.
+ *
+ * The relation reads FROM the task you call the endpoint on TO the peer:
+ * creating a link on task A with relation 'parent' and toTaskId B means
+ * "A's parent is B".
+ */
+export const TASK_LINK_RELATIONS = [
+  'related',
+  'blocks',
+  'blocked_by',
+  'parent',
+  'child',
+  'duplicate',
+] as const;
+export type TaskLinkRelation = (typeof TASK_LINK_RELATIONS)[number];
+
+/** A link as Sokosumi returns it — the peer's name and status come embedded,
+ *  so listing links needs no second fetch per peer. */
+export interface TaskLink {
+  id: string;
+  relation: TaskLinkRelation;
+  note?: string | null;
+  createdAt?: string;
+  peerTask?: { id: string; name?: string; status?: string; archivedAt?: string | null };
+}
+
+/**
  * True when a request failed because it hit `/v1/users/{id}/*`, which
  * Sokosumi #3394 ("block coworker impersonation via user context") made
  * session-only: `requireAccessToTargetUserData` now calls
@@ -401,6 +429,39 @@ export class SokosumiClient {
     return unwrapData(await this.post(`/tasks/${encodeURIComponent(taskId)}/events`, args));
   }
 
+  // ---------- task links ----------
+
+  /**
+   * Links between this task and others. The response embeds the peer task's
+   * name and status, so reading links needs no follow-up fetch.
+   */
+  async listTaskLinks(taskId: string): Promise<TaskLink[]> {
+    const body = await this.get<{ data?: TaskLink[]; items?: TaskLink[]; links?: TaskLink[] }>(
+      `/tasks/${encodeURIComponent(taskId)}/links`,
+    );
+    return body.data ?? body.items ?? body.links ?? [];
+  }
+
+  /**
+   * Link two tasks. Free and reversible, like a comment.
+   *
+   * `relation` reads from THIS task to the peer: linking A with
+   * relation 'parent' means "A's parent is B" — so a follow-up task naming
+   * the work it came out of uses 'parent' on the follow-up.
+   */
+  async createTaskLink(
+    taskId: string,
+    args: { toTaskId: string; relation: TaskLinkRelation; note?: string | null },
+  ): Promise<unknown> {
+    return unwrapData(await this.post(`/tasks/${encodeURIComponent(taskId)}/links`, args));
+  }
+
+  async deleteTaskLink(taskId: string, linkId: string): Promise<unknown> {
+    return unwrapData(
+      await this.del(`/tasks/${encodeURIComponent(taskId)}/links/${encodeURIComponent(linkId)}`),
+    );
+  }
+
   /** Create a new task. Free — only the jobs spawned under it cost credits.
    *  Sokosumi wraps POST /tasks responses in {data: {...}} like most v1
    *  endpoints. We unwrap so downstream consumers (orchestrator outbox →
@@ -509,6 +570,37 @@ export class SokosumiClient {
       throw new Error(`sokosumi POST ${path} → ${res.status}: ${respBody.slice(0, 300)}`);
     }
     return (await res.json()) as T;
+  }
+
+  private async del<T>(path: string): Promise<T> {
+    const sokoCfg = getSokosumiConfig(this.env);
+    if (!sokoCfg) {
+      throw new Error(`Sokosumi env '${this.env ?? 'mainnet'}' not configured`);
+    }
+    const url = `${sokoCfg.baseUrl.replace(/\/$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${sokoCfg.apiKey}`,
+      'X-Delegation-User-Id': this.userId,
+      'X-Context-User-Id': this.userId,
+      Accept: 'application/json',
+    };
+    if (this.organizationId) {
+      headers['X-Delegation-Organization-Id'] = this.organizationId;
+      headers['X-Context-Organization-Id'] = this.organizationId;
+    }
+    const t0 = Date.now();
+    const res = await fetch(url, { method: 'DELETE', headers, signal: AbortSignal.timeout(30_000) });
+    logger.info(
+      { method: 'DELETE', path, ms: Date.now() - t0, status: res.status, env: this.env ?? 'mainnet' },
+      'sokosumi_http',
+    );
+    if (!res.ok) {
+      const respBody = await res.text().catch(() => '');
+      throw new Error(`sokosumi DELETE ${path} → ${res.status}: ${respBody.slice(0, 300)}`);
+    }
+    // 204 has no body.
+    const text = await res.text();
+    return (text ? JSON.parse(text) : { deleted: true }) as T;
   }
 
   // ---------- conversations ----------
