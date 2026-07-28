@@ -72,6 +72,21 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v32',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Pin model.base_url to the LLM proxy — v30/v31 turns died at OpenRouter with 401.',
+    changes: [
+      'v30 could boot but NO TURN could complete: on the v2026.7.20 base the runtime routes models through its provider catalog and no longer consults OPENROUTER_BASE_URL per-request, so every call went straight to https://openrouter.ai/api/v1/ carrying our proxy token — rejected in 40ms, usage.prompt_tokens=0, surfaced to users as "Your assistant returned an empty response".',
+      'The working lever (verified with a fake URL locally before shipping): model.base_url + model.api_key in config.yaml with model.provider left unset — the runtime_provider issue-#3846 path honours a config base_url whose host is not a known cloud root. The launcher injects the per-instance proxy URL via a python3 YAML round-trip (a heredoc append would duplicate the existing top-level model: key).',
+      'Two plausible-looking surfaces that DO NOT work on this base, both tested and rejected: a config.yaml providers: entry (consulted for provider lookup by name only, not catalog-routed models — this was v31, which is dead: never deploy it), and `hermes auth add openrouter` (persists under credential_pool["custom:openrouter"], which the openrouter runtime path never reads).',
+      'Verified locally from clean boot: agent calls the pinned URL; config round-trip preserves tool_use_enforcement, hooks, cron, gateway; combined output parses with the hindsight memory and mcp_servers appends active.',
+    ],
+  },
+  {
     tag: 'v30',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

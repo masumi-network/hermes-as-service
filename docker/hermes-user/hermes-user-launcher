@@ -88,6 +88,62 @@ chmod 0600 "$HERMES_HOME/.env"
 cp -f /opt/hermes-user-config/SOUL.md  "$HERMES_HOME/SOUL.md"
 cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
 
+# ---- 2a. Pin the LLM endpoint to the orchestrator's proxy ----
+#
+# The agent MUST reach the LLM through the orchestrator (metering, the
+# per-user spend cap, and the real OpenRouter key never landing on a
+# machine). Until v2026.5.16 the OPENROUTER_BASE_URL env var was enough:
+# the runtime read it per-request. On v2026.7.20 it is NOT: the runtime
+# resolves the provider through its catalog and only consults that env var
+# far down a precedence chain it never reaches for a catalog-routed model.
+# Observed in production 2026-07-28 — every turn died in 40ms:
+#
+#   Provider: openrouter  Endpoint: https://openrouter.ai/api/v1/
+#   HTTP 401: Missing Authentication header      (usage.prompt_tokens = 0)
+#
+# i.e. it went STRAIGHT to OpenRouter carrying our proxy token, which
+# OpenRouter has never seen. Failing closed, so nothing leaked — but no
+# turn could complete and the user just saw "empty response".
+#
+# THE lever that works (verified empirically with a fake URL before
+# shipping): `model.base_url` + `model.api_key` in config.yaml, with
+# `model.provider` left unset. runtime_provider.py honours that
+# combination directly (the issue-#3846 path: a config base_url whose host
+# is not a known cloud root is routed to as-is, and _resolve_openrouter_
+# runtime's use_config_base_url branch requires provider empty/auto).
+# Two config surfaces that look right but DO NOT work on this base, both
+# tested: a config.yaml `providers:` entry (only consulted for provider
+# LOOKUP BY NAME, not catalog-routed models) and `hermes auth add
+# openrouter` (stores under credential_pool["custom:openrouter"], which
+# the openrouter runtime path never reads).
+#
+# python3 round-trip instead of a heredoc append: `model:` already exists
+# in the baked config, and a second `model:` mapping would be a duplicate
+# top-level key — PyYAML would take the last one silently today and break
+# loudly the day upstream switches loaders.
+if [ -n "${OPENROUTER_BASE_URL:-}" ]; then
+  OPENROUTER_BASE_URL="$OPENROUTER_BASE_URL" OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}" \
+  python3 - "$HERMES_HOME/config.yaml" <<'PYEOF'
+import os, sys, yaml
+path = sys.argv[1]
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+model = cfg.get("model")
+if not isinstance(model, dict):
+    model = {"default": model} if isinstance(model, str) and model.strip() else {}
+model["base_url"] = os.environ["OPENROUTER_BASE_URL"]
+key = os.environ.get("OPENROUTER_API_KEY", "")
+if key:
+    model["api_key"] = key
+# provider must stay unset/auto — an explicit provider disables the
+# use_config_base_url branch and the whole pin silently stops working.
+model.pop("provider", None)
+cfg["model"] = model
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+PYEOF
+fi
+
 # ---- 2b. Hindsight long-term memory (native provider, mode local_external) ----
 # The orchestrator passes HINDSIGHT_API_URL (its own per-instance proxy) and
 # HINDSIGHT_BANK_ID (this user's id). We write the provider's config.json and
