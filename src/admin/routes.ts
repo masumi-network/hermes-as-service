@@ -26,7 +26,7 @@ import { reconcileImageTags } from '../images/reconcile.js';
 import { TEST_SUITES, findSuite } from '../bench/suites.js';
 import { startSuiteRun } from '../bench/runner.js';
 import { getCronRegistry } from '../cron.js';
-import { decryptSecret } from '../crypto.js';
+import { decryptSecret, encryptSecret, generateApiServerKey } from '../crypto.js';
 import { runEodReportForInstance } from '../eod-report/sweep.js';
 import { FlyClient } from '../fly/client.js';
 import { notifyIntegrationConnected } from '../integrations/notify-connected.js';
@@ -1037,6 +1037,90 @@ const retryOnboarding = async (c: Context) => {
   return c.json({ ok: true, userId, retried: true });
 };
 router.post('/admin/instances/:userId/retry-onboarding', retryOnboarding);
+
+/**
+ * Re-key an instance's API_SERVER_KEY on BOTH sides so the orchestrator can
+ * talk to its machine again.
+ *
+ * Why this exists: the orchestrator authenticates every machine call with
+ * `Authorization: Bearer <decrypted apiServerKey>` (routes/proxy.ts). If the
+ * stored value and the machine's env ever diverge, every chat and cron turn
+ * comes back `HTTP 401: Missing Authentication header` and the user sees
+ * "Your assistant returned an empty response" — while the machine itself is
+ * perfectly healthy and answers 200 to its own key.
+ *
+ * Observed 2026-07-28 on a live instance: Fly env and /opt/data/.env agreed
+ * with each other but not with the DB. It had almost certainly been wrong for
+ * a while and stayed invisible because the pre-v2026.7.20 API server did not
+ * enforce the key under GATEWAY_ALLOW_ALL_USERS; the base bump made it fatal.
+ *
+ * Order is deliberate: patch the MACHINE first and only persist once it is
+ * back up. patchMachineEnv replaces + restarts the machine, and our launcher
+ * rewrites /opt/data/.env from the new env on boot, so the machine is the
+ * slower, likelier-to-fail side. Writing the DB first would risk a green
+ * database row pointing at a machine that never took the new key.
+ *
+ * Finally it VERIFIES over the public endpoint with the new key before
+ * reporting success — the check whose absence let a broken roll look healthy.
+ */
+const rotateApiKey = async (c: Context) => {
+  const userId = c.req.param('userId');
+  const row = await prisma.hermesInstance.findUnique({ where: { userId } });
+  if (!row) return c.json({ error: 'instance not found' }, 404);
+  if (row.destroyedAt || !row.spriteId || !row.spriteName || !row.endpointUrl) {
+    return c.json({ error: 'instance has no machine' }, 409);
+  }
+
+  const key = await generateApiServerKey();
+  const fly = new FlyClient();
+  try {
+    await fly.patchMachineEnv(row.spriteName, row.spriteId, { API_SERVER_KEY: key });
+    await fly.waitForState(row.spriteName, row.spriteId, 'started', 90);
+  } catch (err) {
+    logger.error({ err, userId }, 'rotate_api_key_machine_patch_failed');
+    return c.json({ error: `machine patch failed: ${err instanceof Error ? err.message : String(err)}` }, 502);
+  }
+
+  // Boot + gateway start takes a while; poll rather than guess a sleep.
+  const deadline = Date.now() + 180_000;
+  let verified = false;
+  let lastStatus = 0;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${row.endpointUrl}/v1/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      lastStatus = res.status;
+      if (res.ok) {
+        verified = true;
+        break;
+      }
+    } catch {
+      /* machine still booting */
+    }
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+
+  if (!verified) {
+    // Do NOT persist a key the machine never accepted — that would swap one
+    // mismatch for another and lose the ability to diagnose this one.
+    logger.error({ userId, lastStatus }, 'rotate_api_key_verify_failed');
+    return c.json({ error: `machine did not accept the new key (last status ${lastStatus})` }, 502);
+  }
+
+  await prisma.hermesInstance.update({
+    where: { id: row.id },
+    data: { apiServerKey: await encryptSecret(key) },
+  });
+  logger.info({ userId, spriteName: row.spriteName }, 'rotate_api_key_done');
+
+  if ((c.req.header('accept') ?? '').includes('text/html')) {
+    return c.redirect(`/admin/instances/${encodeURIComponent(userId ?? '')}`);
+  }
+  return c.json({ ok: true, userId, verified: true });
+};
+router.post('/admin/instances/:userId/rotate-api-key', rotateApiKey);
 
 router.post('/admin/instances/:userId/sync-config', async (c) => {
   const userId = c.req.param('userId');
