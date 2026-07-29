@@ -44,6 +44,7 @@ import {
   startEodReportCron,
   startPoolReplenishCron,
   startNativePromptReconcilerCron,
+  startMonitorCronReaperCron,
   startToolCallPruneCron,
   startMcpToolsRollCron,
 } from './cron.js';
@@ -114,6 +115,7 @@ startBoardSweepCron();
 startEodReportCron();
 startPoolReplenishCron();
 startNativePromptReconcilerCron();
+startMonitorCronReaperCron();
 startToolCallPruneCron();
 startMcpToolsRollCron();
 

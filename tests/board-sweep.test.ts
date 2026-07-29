@@ -229,3 +229,23 @@ describe('prompt — the delegation defects stay fixed', () => {
     expect(out).toContain('beats a comment with no content');
   });
 });
+
+describe('stall escalation (input_stalled)', () => {
+  it('outranks everything, including fresh blocked tasks', () => {
+    const stalled = task({ kind: 'input_stalled' });
+    expect(rankOf(stalled)).toBeLessThan(rankOf(task({ kind: 'input' })));
+    expect(dedupKind(stalled)).toBe('task_input_stalled');
+  });
+
+  it('prompt names the stall and makes the user message non-optional', () => {
+    const out = buildBoardPrompt([task({ kind: 'input_stalled' })], 'high');
+    expect(out).toContain('STILL BLOCKED');
+    expect(out).toContain('cooldown does not apply');
+    expect(out).toContain('do NOT guess an answer');
+  });
+
+  it('does not leak the stalled section into ordinary batches', () => {
+    const out = buildBoardPrompt([task({ kind: 'input' }), task({ id: 't9', kind: 'done' })], 'high');
+    expect(out).not.toContain('STILL BLOCKED (12h+)');
+  });
+});

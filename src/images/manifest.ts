@@ -72,6 +72,20 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v33',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'SOUL: scheduling hygiene — loops must end (--repeat, no per-task polling crons).',
+    changes: [
+      'New SOUL section "Scheduling hygiene — loops must end": watching a single task needs NO cron (the 5-minute board sweep already wakes the agent); temporary checks must use `cronjob --repeat N` so they self-expire; only real routines get unbounded crons; and when a monitored task reaches a terminal state the monitor gets deleted that same turn.',
+      'Motivated by monitor-x402-aioncardano-post: the agent promised "up to 4 checks", created an unbounded */15 cron, and it was still firing ~96×/day days after the watched task COMPLETED. The orchestrator now also reaps such monitors hourly (monitor-cron-reaper), but the SOUL rule is the prevention; the reaper is the backstop.',
+      'No other change from v32 — same base, same LLM-proxy pin, same denylist.',
+    ],
+  },
+  {
     tag: 'v32',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

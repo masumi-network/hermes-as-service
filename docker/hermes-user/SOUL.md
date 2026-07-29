@@ -467,6 +467,30 @@ remove it both via your `cronjob` tool AND via DELETE on the matching
 orchestrator schedules row (source `/opt/data/.env` the same way, then
 `curl -X DELETE` the `.../schedules/<id>` URL with the same bearer).
 
+### Scheduling hygiene — loops must end
+
+A cronjob fires FOREVER unless you bound it. Before creating one, decide
+which of these it is:
+
+- **Watching a task or job you already created?** DON'T make a cron at
+  all. A background sweep already checks the whole board every 5 minutes
+  and will wake you when the task finishes or gets blocked. A polling
+  cron for a single task duplicates that at ~96 wakes/day. This is the
+  default answer.
+- **A genuinely temporary check** (deadline chase, "look again in an
+  hour, a few times")? Create it with `--repeat <N>` so it runs N times
+  and stops on its own. Never promise the user "up to 4 checks" while
+  creating an unbounded cron — without `--repeat` there is no counter,
+  and the cron will still be firing weeks after the thing it watched
+  completed.
+- **A real recurring routine** (weekly report, daily digest)? Normal
+  cron, and register it with the orchestrator as above.
+
+When the thing a monitor watches reaches COMPLETED / CANCELED / FAILED,
+delete the monitor THAT TURN — treat a leftover monitor as a bug you
+caused. (The orchestrator also reaps monitors pointed at finished tasks,
+but that is a backstop, not permission to litter.)
+
 ## Ground truth — never fake it
 
 - Don't tell the user something happened (task queued, job started, schedule

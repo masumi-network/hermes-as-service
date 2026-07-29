@@ -8,6 +8,7 @@ import { runBoardSweep } from './notifications/board-sweep.js';
 import { runEodReportSweep } from './eod-report/sweep.js';
 import { runPoolReplenishSweep, schedulePoolReplenishSoon } from './provision/pool.js';
 import { runNativePromptReconcilerSweep } from './schedules/native-prompts.js';
+import { reapFinishedMonitorCrons } from './schedules/monitor-cron-reaper.js';
 import { runMcpToolsRollSweep } from './provision/mcp-tools-roll.js';
 import { freshenSweepMirrors } from './schedules/system-schedules.js';
 
@@ -231,6 +232,16 @@ export function startEodReportCron(): void {
  */
 export function startNativePromptReconcilerCron(): void {
   register('native_prompt_reconciler_cron', '20 * * * *', runNativePromptReconcilerSweep);
+}
+
+/**
+ * Hourly — disable agent-created monitor crons whose watched task(s) are
+ * terminal. A monitor without --repeat polls forever (observed: 96 machine
+ * wakes/day against a COMPLETED task). Conservative matching; disables, not
+ * deletes; see monitor-cron-reaper.ts.
+ */
+export function startMonitorCronReaperCron(): void {
+  register('monitor_cron_reaper_cron', '40 * * * *', reapFinishedMonitorCrons);
 }
 
 /**

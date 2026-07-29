@@ -58,6 +58,12 @@ const AGENT_TURN_TIMEOUT_MS = 4 * 60_000;
 const NEW_TASK_WINDOW_MS = 6 * 60 * 60_000;
 /** Finished work stays reportable for a day — dedup makes it at-most-once. */
 const DONE_WINDOW_MS = 24 * 60 * 60_000;
+/** A task still INPUT_REQUIRED this long after the sweep first assisted it
+ *  gets escalated to the USER once — the sweep's one shot at unblocking it
+ *  didn't work, so the call is now genuinely the user's. Pheme's social task
+ *  sat blocked 29h with the sweep unable to say so again (dedup = handle
+ *  once); this is the second tier that closes that gap. */
+const STALL_ESCALATE_MS = 12 * 60 * 60_000;
 /** Minimum gap between unsolicited chat interrupts about completions. */
 const NOTIFY_COOLDOWN_MS = 2 * 60 * 60_000;
 /** Per-workspace ceiling on job-detail probes in one tick. */
@@ -72,7 +78,7 @@ const DONE_TASK_STATUSES = new Set(['completed', 'canceled', 'cancelled', 'faile
  *  ../sokosumi/job-state.ts for why awaiting_input is NOT among them. */
 const DONE_JOB_STATUSES = new Set(['completed', 'failed']);
 
-export type ItemKind = 'input' | 'done' | 'new';
+export type ItemKind = 'input' | 'input_stalled' | 'done' | 'new';
 
 export interface BoardItem {
   /** Tasks are the primary view; jobs fill the gap tasks can't see. */
@@ -106,11 +112,12 @@ export function dedupKind(item: Pick<BoardItem, 'source' | 'kind'>): string {
  * the lowest-value case ("silence beats noise").
  */
 const RANK: Record<string, number> = {
-  task_input: 0,
-  task_done: 1,
-  job_input: 2,
-  job_done: 3,
-  task_new: 4,
+  task_input_stalled: 0,
+  task_input: 1,
+  task_done: 2,
+  job_input: 3,
+  job_done: 4,
+  task_new: 5,
 };
 
 export function rankOf(item: Pick<BoardItem, 'source' | 'kind'>): number {
@@ -323,15 +330,35 @@ export async function sweepBoardForInstance(
 
   // Reconcile the two levels, then drop anything already handled.
   const reconciled = dropJobsCoveredByTasks(found);
-  const seen = new Set(
-    (
-      await prisma.hermesTaskAssist.findMany({
-        where: { instanceId, taskId: { in: reconciled.map((i) => i.id) } },
-        select: { taskId: true, kind: true },
-      })
-    ).map((r) => `${r.taskId}:${r.kind}`),
-  );
-  const fresh = reconciled.filter((i) => !seen.has(`${i.id}:${dedupKind(i)}`));
+  const seenRows = await prisma.hermesTaskAssist.findMany({
+    where: { instanceId, taskId: { in: reconciled.map((i) => i.id) } },
+    select: { taskId: true, kind: true, assistedAt: true },
+  });
+  const seen = new Set(seenRows.map((r) => `${r.taskId}:${r.kind}`));
+  // assistedAt per dedup key — feeds the stall check below.
+  const seenAt = new Map(seenRows.map((r) => [`${r.taskId}:${r.kind}`, r.assistedAt.getTime()]));
+  const fresh = reconciled.filter((i) => {
+    const key = `${i.id}:${dedupKind(i)}`;
+    if (!seen.has(key)) return true;
+    // Stall escalation: a task the sweep already assisted ('task_input'
+    // claimed) but which is STILL blocked 12h+ later gets ONE second pass as
+    // kind 'input_stalled' — its own dedup key, so exactly once. The first
+    // pass tried to settle it quietly; this one is explicitly "tell the
+    // user, this is their call now". Without it, dedup made the sweep's
+    // first (failed) attempt its only attempt, forever.
+    if (i.source === 'task' && i.kind === 'input') {
+      const firstAssist = seenAt.get(key);
+      if (
+        firstAssist !== undefined &&
+        now - firstAssist > STALL_ESCALATE_MS &&
+        !seen.has(`${i.id}:task_input_stalled`)
+      ) {
+        i.kind = 'input_stalled';
+        return true;
+      }
+    }
+    return false;
+  });
   if (fresh.length === 0) return { handled: 0, reason: 'all_already_handled' };
 
   const batch = orderItems(fresh).slice(0, MAX_ITEMS_PER_TICK);
@@ -343,7 +370,8 @@ export async function sweepBoardForInstance(
   const inCooldown =
     !!row.lastUrgentInterruptAt &&
     row.lastUrgentInterruptAt.getTime() > now - NOTIFY_COOLDOWN_MS;
-  const bypasses = (i: BoardItem): boolean => i.kind === 'input' || i.status === 'FAILED';
+  const bypasses = (i: BoardItem): boolean =>
+    i.kind === 'input' || i.kind === 'input_stalled' || i.status === 'FAILED';
   for (const item of batch) {
     if (inCooldown && !bypasses(item)) item.quiet = true;
   }
@@ -401,7 +429,18 @@ export async function sweepBoardForInstance(
       log.info({ heldBy: err.heldBy }, 'board_sweep_skipped_machine_busy');
       return { handled: 0, reason: 'machine_busy' };
     }
-    log.warn({ err }, 'board_sweep_agent_turn_failed');
+    // ANY other failure also releases the claims. This used to keep them
+    // (at-most-once: a timed-out turn may already have commented), which
+    // meant every failure permanently swallowed its items — during the
+    // 2026-07-28 outage a full day of completions and blocked tasks vanished
+    // this way, silently. The trade is deliberate now: a mid-turn timeout can
+    // cause the next tick to re-handle an item the agent had already touched,
+    // but the prompt's idempotence rules (check links / comments / the recent
+    // conversation before acting or re-telling) bound that to a rare
+    // duplicate, whereas the old behaviour turned every transient failure
+    // into permanent silent loss. Failures must be loud, not absorbing.
+    await releaseClaims();
+    log.warn({ err, items: batch.length }, 'board_sweep_agent_turn_failed_claims_released');
     return { handled: 0, reason: 'agent_turn_failed' };
   }
 
@@ -413,6 +452,7 @@ export async function sweepBoardForInstance(
 
   const counts = {
     taskInput: batch.filter((i) => i.source === 'task' && i.kind === 'input').length,
+    taskInputStalled: batch.filter((i) => i.kind === 'input_stalled').length,
     taskDone: batch.filter((i) => i.source === 'task' && i.kind === 'done').length,
     taskNew: batch.filter((i) => i.source === 'task' && i.kind === 'new').length,
     jobInput: batch.filter((i) => i.source === 'job' && i.kind === 'input').length,
@@ -500,7 +540,13 @@ export function buildBoardPrompt(
   opts: { inCooldown: boolean } = { inCooldown: false },
 ): string {
   const label = (i: BoardItem): string =>
-    i.kind === 'input' ? 'NEEDS INPUT to continue.' : i.kind === 'done' ? 'JUST FINISHED.' : 'newly created.';
+    i.kind === 'input_stalled'
+      ? 'STILL BLOCKED — has been waiting on input for over 12 hours, and your earlier attempt did not unstick it.'
+      : i.kind === 'input'
+        ? 'NEEDS INPUT to continue.'
+        : i.kind === 'done'
+          ? 'JUST FINISHED.'
+          : 'newly created.';
   const idField = (i: BoardItem): string => (i.source === 'task' ? 'task_id' : 'job_id');
   const block = items
     .map(
@@ -512,6 +558,7 @@ export function buildBoardPrompt(
   const kinds = new Set(items.map((i) => dedupKind(i)));
   const anyDone = kinds.has('task_done') || kinds.has('job_done');
   const anyInput = kinds.has('task_input') || kinds.has('job_input');
+  const anyStalled = kinds.has('task_input_stalled');
   const anyNew = kinds.has('task_new');
   const anyQuiet = items.some((i) => i.quiet);
   const anyJob = items.some((i) => i.source === 'job');
@@ -573,6 +620,15 @@ NEEDS INPUT → someone is blocked waiting on an answer. You are the user's AUTH
  - Fill a field ONLY from a real source you can point to: the recent conversation, the task's purpose, the user's earlier instructions, your memory, a prior result. If any required field has no source, treat it as unanswerable and leave it for the user — a fabricated answer is far worse than a paused job, and at high autonomy it submits unreviewed.
  - Escalate to the USER only when the decision truly needs them — it SPENDS credits, publishes / commits externally, or hinges on a preference only they hold. When it does: message the USER in chat (outbox-send) THIS SAME TURN, leading with your recommendation ("I'd approve the plan as-is because Y — ok?"). ONLY after you've actually sent that chat message may you note on the task that it's with the user. NEVER comment "getting the user's decision" without sending the message — a promise you don't keep is worse than silence.
  - If you genuinely cannot source an answer and it is not the user's call either, say so plainly rather than padding it — an honest "blocked on X, chasing it" beats a comment with no content.
+`
+      : ''
+  }${
+    anyStalled
+      ? `
+STILL BLOCKED (12h+) → your earlier attempt to settle this did not unstick it, so it is now the USER'S call. Do all of this, THIS turn:
+ 1. Read the task fresh (sokosumi_get_task) — if it actually moved on and only the status is stale, say so in chat and stop.
+ 2. Message the user via outbox-send: name the task the way they'd recognise it, say exactly what it is waiting on, how long it has been stuck, and give your concrete recommendation ("I'd answer X — want me to?"). This message is the POINT of this item — never skip it, cooldown does not apply.
+ 3. Do NOT repeat your earlier comment on the task, and do NOT guess an answer you couldn't source last time — that is precisely why it is being escalated.
 `
       : ''
   }${

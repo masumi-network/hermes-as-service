@@ -56,10 +56,21 @@ export function parseChatCompletion(text: string): ParsedChatCompletion {
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       model?: string;
       error?: { message?: string };
+      hermes?: { failed?: boolean; error?: string };
     };
     if (json.error?.message) out.errorMessage = json.error.message;
     out.content = json.choices?.[0]?.message?.content ?? '';
     out.finishReason = json.choices?.[0]?.finish_reason ?? null;
+    // Hermes reports agent-loop failure INSIDE a 200 body: finish_reason
+    // "error" plus a hermes.failed block, with the error text as the message
+    // content. During the 2026-07-28 outage every turn came back exactly like
+    // that ("HTTP 401: Missing Authentication header", prompt_tokens 0) and
+    // parsed here as a CLEAN reply — sweeps counted the turn as handled and
+    // permanently dropped the items they had claimed for it. Surface it as an
+    // error so callers treat the turn as failed.
+    if (!out.errorMessage && (json.hermes?.failed || out.finishReason === 'error')) {
+      out.errorMessage = json.hermes?.error || out.content.slice(0, 200) || 'agent_error';
+    }
     out.model = json.model ?? null;
     out.promptTokens = json.usage?.prompt_tokens ?? null;
     out.completionTokens = json.usage?.completion_tokens ?? null;
