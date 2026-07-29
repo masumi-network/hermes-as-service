@@ -72,6 +72,20 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v35',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'SOUL: task lifecycle rules — archive deletes drafts; rejections are answers, not outages.',
+    changes: [
+      'SOUL "How Sokosumi tasks work" gains explicit lifecycle rules: which statuses the assistant can set; DRAFT → CANCELED is always rejected and sokosumi_archive_task is THE draft-cleanup path; INPUT_REQUIRED/RUNNING move only when the assigned coworker resumes (unstick by answering, not transitioning); and a rejected transition must be reported as the rule it is — never as "the API is down / rate-limited" unless a plain read also fails.',
+      'Motivated by a live cleanup request: the agent hit three real DRAFT→CANCELED rejections (422s), then told the user draft deletion "can only be done in the UI" (false — DELETE /tasks/{id} archive existed all along, we had not exposed it) and that the API "went down" (false — the next sweep ran all-200 two minutes later). Pairs with the orchestrator-side sokosumi_archive_task tool and the reworded workspace-cleanup native prompt (NATIVE_PROMPTS_VERSION 4).',
+      'No other change from v34.',
+    ],
+  },
+  {
     tag: 'v34',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

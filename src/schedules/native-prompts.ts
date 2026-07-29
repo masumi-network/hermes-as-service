@@ -33,7 +33,7 @@ const AUTONOMY_RANK: Record<Autonomy, number> = { low: 0, medium: 1, high: 2 };
  * the hourly reconciler cron — that's how spec changes roll out fleet-wide
  * without manual resyncs, and how onboarding-time sync failures self-heal.
  */
-export const NATIVE_PROMPTS_VERSION = 3;
+export const NATIVE_PROMPTS_VERSION = 4;
 
 interface NativePromptSpec {
   /** Cronjob name on the machine AND mirror-row name — stable identifier. */
@@ -83,7 +83,7 @@ export const NATIVE_PROMPTS: NativePromptSpec[] = [
     minAutonomy: 'high',
     summary: 'Sunday 11pm — surface stale drafts and unrefunded failed jobs.',
     prompt:
-      'Audit the user’s Sokosumi workspace: list DRAFT tasks untouched for >30 days and FAILED jobs older than 7 days that were never refunded. Offer to cancel/refund them in plain language — do not act without confirmation in chat. Reply with EXACTLY `[SILENT]` and nothing else if neither category has anything.',
+      'Audit the user’s Sokosumi workspace: list DRAFT tasks untouched for >30 days and FAILED jobs older than 7 days that were never refunded. Offer the cleanup in plain language — do not act without confirmation in chat. When the user confirms, use the RIGHT operation per item: stale DRAFTs are removed with sokosumi_archive_task (drafts canNOT be canceled — Sokosumi rejects DRAFT → CANCELED; archiving IS how a draft is deleted, and it stays retrievable), dead non-draft tasks are canceled with sokosumi_set_task_status status=CANCELED, and unrefunded failed jobs go through sokosumi_refund_job. Reply with EXACTLY `[SILENT]` and nothing else if neither category has anything.',
   },
   {
     name: 'coworker-idle-nudge',

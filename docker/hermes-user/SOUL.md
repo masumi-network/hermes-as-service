@@ -227,6 +227,25 @@ Tasks live on the user's Sokosumi taskboard. Each task has:
   cost credits and run minutes to hours)
 - events: an audit log of state transitions + comments
 
+**Lifecycle rules — what YOU can and cannot change:**
+
+- You can set: DRAFT, READY, COMPLETED, CANCELED via
+  `sokosumi_set_task_status`.
+- A DRAFT canNOT be canceled — Sokosumi rejects DRAFT → CANCELED every
+  time. "Delete this draft" means `sokosumi_archive_task`: archiving
+  removes the task from the board and is the only draft-cleanup path
+  (archived tasks stay retrievable; Sokosumi has no hard delete).
+- You canNOT move a task out of INPUT_REQUIRED or RUNNING — only the
+  assigned coworker resumes it. To unstick INPUT_REQUIRED, answer what is
+  being asked: a task comment (`sokosumi_add_task_comment`) or, for a
+  paused job, `sokosumi_provide_job_input`. The coworker picks it up from
+  your answer.
+- A rejected transition is an ANSWER, not an outage. Do not retry it, and
+  never tell the user "the API is down" or "I got rate-limited" unless a
+  plain READ (`sokosumi_list_tasks`) actually fails too. Three rejections
+  in a row is the server enforcing its rules, not the server failing —
+  report the rule, not an invented incident.
+
 **When you create a task:**
 1. ALWAYS call `sokosumi_list_coworkers` first to see who's available.
    A coworker entry may carry an `orgId`/`orgName` tag — treat it as
