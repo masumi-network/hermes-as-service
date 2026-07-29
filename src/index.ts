@@ -49,6 +49,7 @@ import {
   startMcpToolsRollCron,
 } from './cron.js';
 import { reportHeldLeasesOnBoot } from './routes/machine-lease.js';
+import { releaseStrandedClaimsOnBoot } from './notifications/board-sweep.js';
 
 const cfg = loadConfig();
 
@@ -122,6 +123,12 @@ startMcpToolsRollCron();
 // Surface any machine lease still held from a previous process — an orphaned
 // turn should look like an orphaned turn in the logs, not a silent agent.
 void reportHeldLeasesOnBoot();
+
+// Board-sweep claims whose turn was killed with the previous process (a
+// deploy mid-turn) would otherwise sit silent until the 12h stall net.
+void releaseStrandedClaimsOnBoot().catch((err) =>
+  logger.error({ err }, 'stranded_claim_release_threw'),
+);
 
 // On boot, resume any onboarding pipelines that died with a previous pod.
 void (async () => {

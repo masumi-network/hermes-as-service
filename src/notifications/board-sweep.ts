@@ -171,6 +171,52 @@ interface RawJob {
   result?: string;
 }
 
+/**
+ * Release dedup claims stranded by PROCESS DEATH — the one failure the
+ * in-process release (see the catch in sweepBoardForInstance) can never see.
+ *
+ * Observed 2026-07-29: a sweep claimed task_input at 18:45:01 and started its
+ * turn against a machine that was mid-image-roll; the orchestrator was then
+ * redeployed at ~18:45, killing the process while the request hung at Fly's
+ * edge proxy. No catch ran, no assistant ChatMessage was written, and the
+ * claim sat until the 12h stall net — the task's owner reasonably read that
+ * as "Codi ignored the task". Deploys are manual and frequent here, so this
+ * is a recurring class, not a freak.
+ *
+ * Detection is by SIGNATURE, not just age: a completed cron turn ALWAYS
+ * writes an assistant ChatMessage (even on error — see runCronAgentTurn), so
+ * a recent claim on an instance with NO cron assistant message at-or-after
+ * the claim time is a turn that provably never finished. Only claims young
+ * enough to belong to the dead process's final minutes are considered
+ * (turn timeout + deploy gap); everything older either completed or is
+ * already covered by the stall net. Worst case is one duplicate handling,
+ * bounded by the prompt's idempotence rules — same trade as the in-process
+ * release, and loud in the logs either way.
+ */
+export async function releaseStrandedClaimsOnBoot(): Promise<void> {
+  const windowStart = new Date(Date.now() - (AGENT_TURN_TIMEOUT_MS + 10 * 60_000));
+  const candidates = await prisma.hermesTaskAssist.findMany({
+    where: { assistedAt: { gte: windowStart } },
+  });
+  for (const claim of candidates) {
+    const finished = await prisma.chatMessage.findFirst({
+      where: {
+        instanceId: claim.instanceId,
+        kind: 'cron',
+        role: 'assistant',
+        createdAt: { gte: new Date(claim.assistedAt.getTime() - 5_000) },
+      },
+      select: { id: true },
+    });
+    if (finished) continue;
+    await prisma.hermesTaskAssist.delete({ where: { id: claim.id } }).catch(() => {});
+    logger.warn(
+      { instanceId: claim.instanceId, taskId: claim.taskId, kind: claim.kind },
+      'stranded_claim_released_on_boot',
+    );
+  }
+}
+
 export async function sweepBoardForInstance(
   instanceId: string,
 ): Promise<{ handled: number; reason?: string; requestId?: string }> {
