@@ -72,6 +72,20 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v34',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Add ste-writing (distilled ASD-STE100 anti-slop prose skill), user-requested.',
+    changes: [
+      'New baked skill ste-writing: distilled ASD-STE100 Simplified Technical English rules for docs/READMEs/PR text/error messages/release notes — explicitly NOT marketing copy (it strips voice by design). Complements avoid-ai-writing. Source: woosal1337/blog, videos/ep01-the-cure-for-ai-slop.',
+      'Shipped as exactly ONE reviewed file (ste-writing-skill.md -> skills/ste-writing/SKILL.md), fetched at a pinned commit with a frontmatter sanity check in the build — not a repo clone; the rest of that repo is video-companion experiment data and scripts we do not want on machines.',
+      'No other change from v33.',
+    ],
+  },
+  {
     tag: 'v33',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

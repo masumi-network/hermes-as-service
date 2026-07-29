@@ -81,6 +81,19 @@ RUN mkdir -p /opt/hermes-user-config/skills /opt/hermes-user-config/skills/meta 
  && rm -rf /tmp/marketingskills /tmp/avoid-ai-writing /tmp/hermes-skill-factory /tmp/claude-ads /tmp/toprank \
  && chmod -R a+rX /opt/hermes-user-config/skills
 
+# ----- ste-writing (anti-slop prose skill, user-requested 2026-07-29) -----
+# One file, fetched at a PINNED commit and fully reviewed before inclusion —
+# not a clone of the repo (it is a blog/video-companion repo; the rest is
+# experiment data and scripts we don't ship). Distilled ASD-STE100 writing
+# rules with its own frontmatter (name: ste-writing); complements
+# avoid-ai-writing for docs/PR/release-note prose.
+RUN mkdir -p /opt/hermes-user-config/skills/ste-writing \
+ && curl -fsSL --retry 3 \
+      https://raw.githubusercontent.com/woosal1337/blog/b912d5fa59f368253683af2ebfac64ad6d08312d/videos/ep01-the-cure-for-ai-slop/ste-writing-skill.md \
+      -o /opt/hermes-user-config/skills/ste-writing/SKILL.md \
+ && grep -q "^name: ste-writing" /opt/hermes-user-config/skills/ste-writing/SKILL.md \
+ && chmod -R a+rX /opt/hermes-user-config/skills/ste-writing
+
 # ----- re-add creative-ideation (unbundled upstream in v2026.6.5) -----
 # Upstream moved it from skills/ to optional-skills/ when it trimmed the
 # default bundle 91 -> 74. Hermes prunes the volume to match the bundle, so
