@@ -502,7 +502,7 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'write-light',
     name: 'sokosumi_set_task_status',
     description:
-      "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). FROM-STATE LIMITS: a task in INPUT_REQUIRED or RUNNING canNOT be transitioned by you — only the assigned coworker resumes it once its input is answered. Don't retry a rejected transition; answer the input (sokosumi_provide_job_input) or comment instead. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",
+      "Change an EXISTING task's status on the board — most often moving a DRAFT to READY so its assigned coworker can start it. FREE, and it keeps the task's assignee, description, jobs and history intact. ALWAYS use this instead of creating a replacement task: never duplicate a task just to change its status. Settable: DRAFT (put it back to a draft), READY (hand it to the assigned coworker), COMPLETED (mark it done), CANCELED (call it off). FROM-STATE LIMITS: a task in INPUT_REQUIRED or RUNNING canNOT be transitioned by you — only the assigned coworker resumes it once its input is answered. A DRAFT canNOT be CANCELED either (Sokosumi rejects DRAFT → CANCELED with a 422): to get rid of a draft, use sokosumi_archive_task — that IS the delete-a-draft operation. Don't retry a rejected transition; answer the input (sokosumi_provide_job_input) or comment instead. Optional comment is recorded alongside the change. Errors if the task is PARKED (frozen pending the user's approval).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -518,6 +518,19 @@ const TOOLS_ALL: ToolDef[] = [
         },
       },
       required: ['task_id', 'status'],
+    },
+  },
+  {
+    access: 'write',
+    name: 'sokosumi_archive_task',
+    description:
+      'ARCHIVE a task — removes it from the board. This is Sokosumi\'s "delete": owners can archive their own tasks in ANY status, and it is the ONLY way to clean up a DRAFT (drafts cannot be canceled — DRAFT → CANCELED is rejected). Archived tasks stay retrievable in Sokosumi; this is not a hard delete, but treat it as removal all the same. Use for board cleanup: stale drafts, duplicates, abandoned experiments. For live work prefer the lifecycle instead — cancel a READY task with sokosumi_set_task_status status=CANCELED so the record stays visible on the board.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task id to archive.' },
+      },
+      required: ['task_id'],
     },
   },
   {
@@ -1481,7 +1494,9 @@ export async function executeTool(
             'Sokosumi rejected this status transition. If the task is in INPUT_REQUIRED or ' +
             'RUNNING, you cannot move it — only the assigned coworker resumes it once its ' +
             'input is answered. Do NOT retry: answer the input (sokosumi_provide_job_input) ' +
-            'or leave a comment for the coworker instead.',
+            'or leave a comment for the coworker instead. If the task is a DRAFT you are ' +
+            'trying to get rid of: drafts cannot be canceled — archive it with ' +
+            'sokosumi_archive_task, which is the delete-a-draft operation.',
         );
       // A task id alone doesn't tell us its workspace: try personal first,
       // then any org scope we can still see (same shape as add_task_comment) —
@@ -1506,6 +1521,26 @@ export async function executeTool(
         // generic "not found in any org".
         throw err instanceof Error ? err : new Error(String(err));
       }
+    }
+
+    case 'sokosumi_archive_task': {
+      const taskId = String(args['task_id'] ?? '');
+      if (!taskId) throw new Error('missing required arg: task_id');
+      // Resolve the task's workspace first (a bare id doesn't carry it), then
+      // archive in that scope. scopedClientForTask throws a clear not-found
+      // if the id is bogus, so a typo can't silently no-op.
+      const scoped = await scopedClientForTask(client, taskId);
+      await scoped.archiveTask(taskId);
+      return JSON.stringify(
+        {
+          ok: true,
+          taskId,
+          archived: true,
+          note: 'Removed from the board. Sokosumi keeps archived tasks retrievable — this is not a hard delete.',
+        },
+        null,
+        2,
+      );
     }
 
     case 'sokosumi_create_task': {

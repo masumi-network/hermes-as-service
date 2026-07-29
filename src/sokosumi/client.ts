@@ -494,6 +494,15 @@ export class SokosumiClient {
     return unwrapData(await this.post(`/tasks/${encodeURIComponent(taskId)}/links`, args));
   }
 
+  /** Archive a task — DELETE /tasks/:id. Sokosumi's "remove from board":
+   *  owners may archive their own tasks in any status. This is the ONLY
+   *  cleanup path for DRAFT tasks (the DRAFT → CANCELED transition is
+   *  rejected with a 422); archived tasks stay retrievable, it is not a
+   *  hard delete. */
+  async archiveTask(taskId: string): Promise<unknown> {
+    return unwrapData(await this.del(`/tasks/${encodeURIComponent(taskId)}`));
+  }
+
   async deleteTaskLink(taskId: string, linkId: string): Promise<unknown> {
     return unwrapData(
       await this.del(`/tasks/${encodeURIComponent(taskId)}/links/${encodeURIComponent(linkId)}`),
