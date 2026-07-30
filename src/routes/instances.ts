@@ -34,6 +34,47 @@ import { syncSystemSchedules } from '../schedules/system-schedules.js';
 
 const router = new Hono();
 
+/**
+ * Accept the assistant-name field under any of the names an upstream caller
+ * might plausibly use, and SHOUT when a payload carries keys we don't model.
+ *
+ * Why: zod strips unknown keys silently. All five live instances had
+ * personaName = null while their users had in fact named their assistants —
+ * and we had no way to tell whether Sokosumi never sent a name or sent it
+ * under a key we don't read, because the provision/onboard audit records only
+ * {providers, researchDepth}, never the payload. A silently dropped field is
+ * indistinguishable from a field never sent. This makes the next signup
+ * answer that question in the logs instead of costing another investigation.
+ */
+const PERSONA_NAME_ALIASES = [
+  'personaName',
+  'assistantName',
+  'agentName',
+  'botName',
+  'displayName',
+  'persona_name',
+  'assistant_name',
+] as const;
+
+function pickPersonaName(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as Record<string, unknown>;
+  for (const k of PERSONA_NAME_ALIASES) {
+    const v = o[k];
+    if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 60);
+  }
+  return undefined;
+}
+
+function logUnknownKeys(raw: unknown, known: readonly string[], route: string, userId: string): void {
+  if (!raw || typeof raw !== 'object') return;
+  const extra = Object.keys(raw as Record<string, unknown>).filter((k) => !known.includes(k));
+  if (extra.length > 0) {
+    logger.warn({ route, userId, unknownKeys: extra }, 'payload_unknown_keys_dropped');
+  }
+}
+
+
 const provisionBody = z.object({
   userId: z.string().min(1).max(200),
   name: z.string().min(1).max(200).optional(),
@@ -127,7 +168,11 @@ router.post('/v1/instances', async (c) => {
     return problemJson(c, new HttpError(400, 'invalid_body', parsed.error.issues[0]?.message ?? 'invalid body'));
   }
   try {
-    const view = await provision(parsed.data);
+    logUnknownKeys(json, Object.keys(provisionBody.shape), 'POST /v1/instances', parsed.data.userId);
+    const view = await provision({
+      ...parsed.data,
+      personaName: parsed.data.personaName ?? pickPersonaName(json),
+    });
     return c.json(
       {
         instanceId: view.instanceId,
@@ -523,13 +568,15 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
       );
     }
 
+    logUnknownKeys(json, Object.keys(onboardBody.shape), 'POST onboard', userId);
+    const onboardPersonaName = parsed.data.personaName ?? pickPersonaName(json);
     // Patch name/email/role/company + persona if provided.
     if (
+      onboardPersonaName ||
       parsed.data.name ||
       parsed.data.email ||
       parsed.data.role ||
       parsed.data.company ||
-      parsed.data.personaName ||
       parsed.data.verbosity ||
       parsed.data.tone ||
       parsed.data.personality
@@ -541,7 +588,7 @@ router.post('/v1/instances/:userId/onboard', async (c) => {
           email: parsed.data.email?.slice(0, 254) ?? row.email,
           role: parsed.data.role?.slice(0, 64) ?? row.role,
           company: parsed.data.company?.slice(0, 120) ?? row.company,
-          personaName: parsed.data.personaName?.slice(0, 60) ?? row.personaName,
+          personaName: onboardPersonaName?.slice(0, 60) ?? row.personaName,
           verbosity: parsed.data.verbosity ?? row.verbosity,
           tone: parsed.data.tone ?? row.tone,
           personality: parsed.data.personality ?? row.personality ?? undefined,
