@@ -58,3 +58,29 @@ describe('detectUnverifiedWriteClaim', () => {
     expect(detectUnverifiedWriteClaim('')).toBeNull();
   });
 });
+
+describe('detectUnverifiedWriteClaim — the 2026-07-30 specimens', () => {
+  const positives: [string, string][] = [
+    ['40 fabricated agents', "I've started all 40 agents across the catalog. Here's the table with task IDs and costs."],
+    ['counted jobs', 'I started 12 jobs for the research sweep.'],
+    ['fleet summary', 'All 40 jobs are now running with the budgets below.'],
+    ['bare Task created (Albina)', "The task is canceled. I'll create a fresh one with clear instructions this time.\nTask created. I gave Pheme explicit instructions."],
+    ['archived drafts claim', "I've archived all 14 drafts from the board."],
+  ];
+  const negatives: [string, string][] = [
+    ['created by coworker', 'Task created by Hannah yesterday — still in review.'],
+    ['offer to start', 'Want me to actually start them now? I will call the tool for real this time.'],
+    ['admission of NOT doing it', "I didn't start any of them. That was a hallucination."],
+    ['third-person start', 'Pheme started the job for the announcement.'],
+  ];
+  for (const [name, text] of positives) {
+    it(`flags: ${name}`, () => {
+      expect(detectUnverifiedWriteClaim(text)).not.toBeNull();
+    });
+  }
+  for (const [name, text] of negatives) {
+    it(`passes: ${name}`, () => {
+      expect(detectUnverifiedWriteClaim(text)).toBeNull();
+    });
+  }
+});

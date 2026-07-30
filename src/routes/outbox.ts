@@ -7,6 +7,7 @@ import { authenticateInstanceBearer } from './instance-auth.js';
 import { logger } from '../logger.js';
 import { recordEvent } from '../audit.js';
 import { enqueueOutboxMessage } from '../outbox/enqueue.js';
+import { annotateUnverifiedOutboxClaims } from '../notifications/groundtruth-guard.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -195,10 +196,18 @@ sprite.post('/v1/llm/:instanceId/outbox', async (c) => {
     return c.json({ suppressed: true }, 200);
   }
   try {
+    // Cron reports and outbox-send messages bypass the chat proxy, so the
+    // ground-truth guard runs here: an unsubstantiated action claim gets a
+    // visible verification warning appended before it reaches the user.
+    const content = await annotateUnverifiedOutboxClaims(
+      auth.row.id,
+      auth.row.userId,
+      parsed.data.content,
+    );
     const result = await enqueueOutboxMessage({
       instanceId: auth.row.id,
       userId: auth.row.userId,
-      content: parsed.data.content,
+      content,
       kind: parsed.data.kind,
       source: parsed.data.source,
     });

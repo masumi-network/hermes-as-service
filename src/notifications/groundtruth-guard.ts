@@ -48,8 +48,19 @@ const WRITE_CLAIM_PATTERNS: RegExp[] = [
   /\bcommented on (?:the|that|this|her|his|their)\b/i,
   // Status / move: "I moved it to READY", "I set the status to DONE":
   /\bi(?:'ve| have)?\s+(?:moved|set|marked|transitioned|flipped|changed)\s+(?:it|the task|the status|that|this)\b[^.!?\n]{0,40}\b(?:to|as)\b/i,
-  // Created task/job: "I created the task", "I've kicked off the job":
-  /\bi(?:'ve| have)?\s+(?:created|kicked off|started|queued)\s+(?:the\s+|a\s+|your\s+)?(?:task|job)\b/i,
+  // Created/started task(s)/job(s)/agent(s) — singular AND plural, with
+  // optional counts. The 2026-07-30 incident was "I've started all 40
+  // agents" + a table of invented ids; the old singular task|job pattern
+  // let it straight through.
+  /\bi(?:'ve| have)?\s+(?:just\s+)?(?:created|kicked off|started|launched|queued|submitted)\s+(?:all\s+|the\s+|a\s+|your\s+|those\s+|these\s+)?(?:\d+\s+)?(?:tasks?|jobs?|agents?)\b/i,
+  // Archive/cancel claims (the cleanup tools):
+  /\bi(?:'ve| have)?\s+(?:archived|canceled|cancelled)\s+(?:(?:the|all|your|those|these|\d+)\s+){0,3}(?:tasks?|drafts?|jobs?)\b/i,
+  // Bare assertion with no "I": "Task created." (the Albina incident's exact
+  // wording). Guarded against "task created by Hannah" (someone else did it).
+  /(?:^|[.!?]\s+|\n)tasks? created\b(?![^.!?\n]{0,30}\bby\b)/im,
+  // Fleet-summary assertions: "all 40 jobs are now running", "12 tasks were
+  // queued" — the shape a fabricated results table ends with.
+  /\b(?:all\s+)?\d+\s+(?:jobs|agents|tasks)\s+(?:are|have been|were)\s+(?:now\s+)?(?:started|launched|created|queued|running)\b/i,
   // Provided job input (narrow to "input" so conversational "I provided the
   // answer" doesn't trip it):
   /\bi(?:'ve| have)?\s+(?:provided|submitted|supplied)\s+(?:the\s+)?(?:required\s+)?input\b/i,
@@ -169,5 +180,54 @@ export async function runGroundTruthGuard(args: GuardArgs): Promise<void> {
     );
   } catch (err) {
     logger.warn({ err, requestId: args.requestId }, 'groundtruth_guard_failed');
+  }
+}
+
+/** How far back an outbox push may look for the write that substantiates its
+ *  claim. Cron turns run minutes, not hours; generous but bounded. */
+const OUTBOX_CLAIM_WINDOW_MS = 15 * 60_000;
+
+/**
+ * Outbox-path guard: cron reports and outbox-send messages travel through
+ * POST /v1/llm/:instanceId/outbox, not the chat proxy, so the chat guard
+ * never sees them — which is exactly where the fabricated daily-brief
+ * results landed. There is no turn boundary here, so verification is
+ * window-based, and there is no self-heal (the message IS the delivery);
+ * instead the claim gets a visible verification warning appended before it
+ * reaches the user. Returns the content to enqueue. Never throws.
+ */
+export async function annotateUnverifiedOutboxClaims(
+  instanceId: string,
+  userId: string,
+  content: string,
+): Promise<string> {
+  try {
+    if (!loadConfig().GROUNDTRUTH_GUARD) return content;
+    const claim = detectUnverifiedWriteClaim(content);
+    if (!claim) return content;
+    const writeCount = await prisma.provisionEvent.count({
+      where: {
+        instanceId,
+        event: 'sokosumi_write',
+        createdAt: { gte: new Date(Date.now() - OUTBOX_CLAIM_WINDOW_MS) },
+      },
+    });
+    if (writeCount > 0) return content;
+    await recordEvent({
+      userId,
+      instanceId,
+      event: 'confabulation_suspected',
+      detail: { channel: 'outbox', claim: claim.slice(0, 200) },
+    });
+    logger.warn({ userId, claim }, 'confabulation_suspected_outbox');
+    return (
+      content +
+      `\n\n⚠️ Automatic verification: this message claims an action ("${claim.slice(0, 100)}") ` +
+      `but no matching Sokosumi tool call was recorded in the last 15 minutes. ` +
+      `Treat that claim as unverified — the board was most likely not changed.`
+    );
+  } catch (err) {
+    logger.warn({ err, instanceId }, 'groundtruth_outbox_guard_failed');
+    return content;
   }
 }
