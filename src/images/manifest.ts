@@ -72,6 +72,20 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v37',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'Launcher writes the user-chosen assistant name into SOUL (system prompt).',
+    changes: [
+      'Launcher appends a "## YOUR NAME" section to SOUL.md from HERMES_PERSONA_NAME, so the name the user chose lands in the SYSTEM PROMPT of every turn. v36 made SOUL name-agnostic but the actual name still only existed in memory, which loses to the system prompt — an assistant named Codi kept replying "I\'m Hermes" and correcting the user.',
+      'Unnamed instances are unaffected: with the env var absent the file stays byte-identical, so this is a no-op for anyone who has not set a name.',
+      'Orchestrator side (shipped separately): HERMES_PERSONA_NAME threaded through perInstanceEnv + buildMachineConfig for cold provision and pool-claim, and a name change via PATCH /v1/instances/:userId patches the machine env so it applies from the next turn.',
+    ],
+  },
+  {
     tag: 'v36',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',
