@@ -279,7 +279,7 @@ async function claimPoolPipeline(
     await fly.patchMachineEnv(
       pool.appName,
       pool.machineId,
-      perInstanceEnv(cfg, { instanceId, userId: row.userId, apiServerKey, llmProxyToken, mcpServersJson }),
+      perInstanceEnv(cfg, { instanceId, userId: row.userId, apiServerKey, llmProxyToken, mcpServersJson, personaName: row.personaName }),
     );
 
     // patchMachineEnv on a stopped machine leaves it stopped (config applies

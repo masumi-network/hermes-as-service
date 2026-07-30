@@ -25,6 +25,7 @@ import { logger } from '../logger.js';
 import { withMachineTurn } from './machine-lease.js';
 import { loadConfig } from '../config.js';
 import { findImageVersion, tagFromRef } from '../images/manifest.js';
+import { FlyClient } from '../fly/client.js';
 import { listPendingConfirmations } from '../confirmations/store.js';
 import { decryptSecret } from '../crypto.js';
 import { buildPersonaDirective } from '../provision/profile.js';
@@ -162,8 +163,9 @@ router.patch('/v1/instances/:userId', async (c) => {
     const normPersona = (v: string | undefined): string | null | undefined =>
       v === undefined ? undefined : v.trim() === '' ? null : v.trim().slice(0, 60);
     const personaName = normPersona(parsed.data.personaName);
+    const nameChanged = personaName !== undefined && personaName !== row.personaName;
     const personaChanged =
-      (personaName !== undefined && personaName !== row.personaName) ||
+      nameChanged ||
       (parsed.data.verbosity !== undefined && parsed.data.verbosity !== row.verbosity) ||
       (parsed.data.tone !== undefined && parsed.data.tone !== row.tone);
     const updated = await prisma.hermesInstance.update({
@@ -229,6 +231,24 @@ router.patch('/v1/instances/:userId', async (c) => {
       void notifyPersonaChanged(row.id).catch((err) =>
         logger.warn({ err, userId }, 'persona_memory_nudge_failed'),
       );
+      // The NAME additionally lives in the machine env, because the launcher
+      // writes it into SOUL.md (the system prompt) on boot — memory alone
+      // loses to the system prompt, which is how an assistant named "Codi"
+      // kept answering "I'm Hermes". patchMachineEnv replaces + restarts the
+      // machine, so the new name is in the system prompt from the next turn.
+      if (
+        nameChanged &&
+        updated.spriteName &&
+        updated.spriteId &&
+        !updated.destroyedAt
+      ) {
+        const persona = updated.personaName?.trim();
+        void new FlyClient()
+          .patchMachineEnv(updated.spriteName, updated.spriteId, {
+            HERMES_PERSONA_NAME: persona ? persona : null,
+          })
+          .catch((err: unknown) => logger.warn({ err, userId }, 'persona_name_env_patch_failed'));
+      }
     }
 
     return c.json({

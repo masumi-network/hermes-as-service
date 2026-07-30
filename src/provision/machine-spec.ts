@@ -19,6 +19,12 @@ export function perInstanceEnv(
     apiServerKey: string;
     llmProxyToken: string;
     mcpServersJson: string;
+    /** The name the user gave their assistant. Reaches the machine as env so
+     *  the launcher can put it in SOUL.md — i.e. in the SYSTEM PROMPT of every
+     *  turn. Previously the persona name existed only in the onboarding prompt
+     *  and thus only in memory, which loses to the system prompt: an agent
+     *  named "Codi" still answered "I'm Hermes" on every turn. */
+    personaName?: string | null;
   },
 ): Record<string, string> {
   const orch = cfg.ORCHESTRATOR_PUBLIC_URL.replace(/\/$/, '');
@@ -31,6 +37,7 @@ export function perInstanceEnv(
     ORCHESTRATOR_OUTBOX_TOKEN: args.llmProxyToken,
     // Composio MCP servers (empty array if the user hasn't connected anything)
     MCP_SERVERS_JSON: args.mcpServersJson,
+    ...(args.personaName?.trim() ? { HERMES_PERSONA_NAME: args.personaName.trim() } : {}),
     // Hermes' NATIVE hindsight memory provider (mode local_external). The
     // machine talks to our proxy, never to Hindsight directly, and never
     // holds the Hindsight credential. Empty API URL = provider left off.
@@ -79,6 +86,7 @@ export function buildMachineConfig(
     apiServerKey: string;
     llmProxyToken: string;
     mcpServersJson: string;
+    personaName?: string | null;
   },
 ): CreateMachineRequest {
   const config: FlyMachineConfig = {
@@ -97,6 +105,7 @@ export function buildMachineConfig(
         apiServerKey: args.apiServerKey,
         llmProxyToken: args.llmProxyToken,
         mcpServersJson: args.mcpServersJson,
+        personaName: args.personaName,
       }),
     },
     services: [

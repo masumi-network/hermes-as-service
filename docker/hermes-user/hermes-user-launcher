@@ -86,6 +86,20 @@ chmod 0600 "$HERMES_HOME/.env"
 # bootstraps a SOUL.md and config.yaml from /opt/hermes/docker/* on first
 # boot via the upstream entrypoint; we override that here.
 cp -f /opt/hermes-user-config/SOUL.md  "$HERMES_HOME/SOUL.md"
+
+# The user's chosen assistant name goes into SOUL — i.e. into the SYSTEM
+# PROMPT of every turn. It used to travel only in the onboarding prompt, so it
+# lived in memory alone; memory loses to the system prompt, and an assistant
+# the user had named "Codi" still answered "I'm Hermes" and corrected them.
+# Appended (not templated) so an unnamed instance keeps the file byte-identical.
+if [ -n "${HERMES_PERSONA_NAME:-}" ]; then
+  {
+    printf '\n## YOUR NAME\n\n'
+    printf 'The user named you **%s**. That is your name — introduce yourself\n' "$HERMES_PERSONA_NAME"
+    printf 'as %s, answer to it, and sign proactive messages with it. Never\n' "$HERMES_PERSONA_NAME"
+    printf 'reply "I am Hermes" to someone addressing you as %s.\n' "$HERMES_PERSONA_NAME"
+  } >> "$HERMES_HOME/SOUL.md"
+fi
 cp -f /opt/hermes-user-config/config.yaml "$HERMES_HOME/config.yaml"
 
 # ---- 2a. Pin the LLM endpoint to the orchestrator's proxy ----
