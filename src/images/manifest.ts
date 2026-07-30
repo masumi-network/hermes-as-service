@@ -72,6 +72,20 @@ const DENYLIST_V28 = [...DENYLIST_V21, 'simplify-code', 'petdex'];
  */
 export const IMAGE_VERSIONS: ImageVersion[] = [
   {
+    tag: 'v36',
+    releasedAt: 'unreleased',
+    baseImage: 'nousresearch/hermes-agent:v2026.7.20',
+    defaultModel: 'xiaomi/mimo-v2.5-pro',
+    toolUseEnforcement: true,
+    deniedSkills: DENYLIST_V28,
+    summary: 'SOUL: never retain an unverified event — memory poisoning made one lie permanent.',
+    changes: [
+      'SOUL "Ground truth" gains a memory-integrity block. Root cause of a multi-hour incident: the agent invented a Sokosumi error ("Pricing 25 (Fixed) is invalid for job creation") and RETAINED it to long-term memory twice. It then recalled its own fiction as background truth on every later turn, re-asserted the outage, proposed a retry cron for it, and diagnosed an empty org wallet — none of it real (zero sokosumi_create_job calls in 24h; balance read fine at 4,064.84). Ten poisoned memories were invalidated by operator audit.',
+      'New rules: never retain an event a tool result this turn does not prove — specifically never an error string not received verbatim, an inferred outage/"known issue", an unread balance, or an unconfirmed action; a real tool error is retainable only WITH provenance (verbatim message + tool name); and never diagnose an unobservable cause — "the wallet is empty" / "the platform is down" are theories, so report the raw error or say you do not know yet.',
+      'Pairs with the orchestrator-side guard extension for specimen #7 (invented error strings and platform-outage framing).',
+    ],
+  },
+  {
     tag: 'v35',
     releasedAt: 'unreleased',
     baseImage: 'nousresearch/hermes-agent:v2026.7.20',

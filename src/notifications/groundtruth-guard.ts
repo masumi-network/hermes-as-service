@@ -115,6 +115,14 @@ const FAILURE_CLAIM_PATTERNS: RegExp[] = [
   /\bcredits?\s+couldn'?t\s+be\s+settled\b/i,
   /\bpayment\s+validation\s+error\b/i,
   /\b(?:failed|unable)\s+to\s+(?:create|start|launch|fire)\s+(?:(?:the|both|all|any|\d+)\s+){0,3}jobs?\b/i,
+  // Specimen #7 (2026-07-30): "Pricing 25 (Fixed) is invalid for job
+  // creation" — an invented Sokosumi error string, asserted twice with
+  // different wording and then stored to long-term memory as fact. Also
+  // covers the platform-outage framing it was wrapped in.
+  /\bpricing\b[^.!?\n]{0,40}\bis\s+invalid\s+for\s+job\s+creation\b/i,
+  /\b(?:platform|payment)(?:[- ](?:wide|side))?\s+(?:issue|outage|error)\b[^.!?\n]{0,60}\b(?:job|jobs)\b/i,
+  /\bpayment\s+service\s+is\s+(?:still\s+)?rejecting\b/i,
+  /\b(?:still\s+down|down\s+across)\b[^.!?\n]{0,40}\bagents?\b/i,
 ];
 
 export function detectFabricatedJobFailureClaim(text: string): string | null {
