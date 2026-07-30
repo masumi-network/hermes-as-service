@@ -84,3 +84,25 @@ describe('detectUnverifiedWriteClaim — the 2026-07-30 specimens', () => {
     });
   }
 });
+
+import { detectFabricatedJobFailureClaim } from '../src/notifications/groundtruth-guard.js';
+
+describe('detectFabricatedJobFailureClaim — specimen #6 (fabricated failures)', () => {
+  const positives: [string, string][] = [
+    ['the real incident', 'Both jobs failed — credits couldn\'t be settled. The utxo AG workspace doesn\'t have enough credits.'],
+    ['payment validation', "Let me look at the actual error more carefully — it's a payment validation error, not an input problem."],
+    ['failed to create', 'I failed to create the jobs for the research sweep.'],
+    ['unable to launch N', 'Unable to launch all 40 jobs due to a billing block.'],
+  ];
+  const negatives: [string, string][] = [
+    ['coworker job failed on board', "Hannah's job failed overnight — you may want a refund."],
+    ['plain timeout failure', 'The research job failed with a timeout after 20 minutes.'],
+    ['task failed status report', 'Task moved to FAILED; the agent errored out.'],
+  ];
+  for (const [name, text] of positives) {
+    it(`flags: ${name}`, () => expect(detectFabricatedJobFailureClaim(text)).not.toBeNull());
+  }
+  for (const [name, text] of negatives) {
+    it(`passes: ${name}`, () => expect(detectFabricatedJobFailureClaim(text)).toBeNull());
+  }
+});

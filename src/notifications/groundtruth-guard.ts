@@ -99,6 +99,33 @@ export function detectUnverifiedWriteClaim(text: string): string | null {
   return null;
 }
 
+/**
+ * Fabricated FAILURE claims — specimen #6 (2026-07-30): "Both jobs failed —
+ * credits couldn't be settled", followed by a fake billing diagnosis, with
+ * ZERO sokosumi_create_job calls in 24h. The write-claim detector above
+ * deliberately vetoes failure phrasings (honest error reports must pass), so
+ * this class needs its own detector with its own verification: a claimed
+ * creation-failure is only real if a create_job CALL exists — any outcome —
+ * because AgentToolCall records failures too. Patterns are tied to
+ * creation/settlement vocabulary so reports of a coworker's job genuinely
+ * failing on the board ("Hannah's job failed overnight") never match.
+ */
+const FAILURE_CLAIM_PATTERNS: RegExp[] = [
+  /\bjobs?\s+(?:creation\s+)?failed\b[^.!?\n]{0,80}\b(?:credits?|settl\w*|payment|billing|wallet)/i,
+  /\bcredits?\s+couldn'?t\s+be\s+settled\b/i,
+  /\bpayment\s+validation\s+error\b/i,
+  /\b(?:failed|unable)\s+to\s+(?:create|start|launch|fire)\s+(?:(?:the|both|all|any|\d+)\s+){0,3}jobs?\b/i,
+];
+
+export function detectFabricatedJobFailureClaim(text: string): string | null {
+  if (!text) return null;
+  for (const re of FAILURE_CLAIM_PATTERNS) {
+    const m = re.exec(text);
+    if (m) return m[0].trim().slice(0, 160);
+  }
+  return null;
+}
+
 export interface GuardArgs {
   instanceId: string;
   userId: string;
@@ -117,20 +144,36 @@ export interface GuardArgs {
 export async function runGroundTruthGuard(args: GuardArgs): Promise<void> {
   try {
     if (!loadConfig().GROUNDTRUTH_GUARD) return;
-    const claim = detectUnverifiedWriteClaim(args.assistantText);
-    if (!claim) return;
-
-    // Did any real write execute during this turn? Agent turns are serialized
-    // per instance, so any sokosumi_write for this instance since the turn
-    // started belongs to this turn.
-    const writeCount = await prisma.provisionEvent.count({
-      where: {
-        instanceId: args.instanceId,
-        event: 'sokosumi_write',
-        createdAt: { gte: new Date(args.turnStartedAt) },
-      },
-    });
-    if (writeCount > 0) return; // claim is backed by a real write — leave it.
+    let claim = detectUnverifiedWriteClaim(args.assistantText);
+    let mode: 'write' | 'failure' = 'write';
+    if (claim) {
+      // Did any real write execute during this turn? Agent turns are
+      // serialized per instance, so any sokosumi_write for this instance
+      // since the turn started belongs to this turn.
+      const writeCount = await prisma.provisionEvent.count({
+        where: {
+          instanceId: args.instanceId,
+          event: 'sokosumi_write',
+          createdAt: { gte: new Date(args.turnStartedAt) },
+        },
+      });
+      if (writeCount > 0) return; // claim is backed by a real write — leave it.
+    } else {
+      claim = detectFabricatedJobFailureClaim(args.assistantText);
+      if (!claim) return;
+      mode = 'failure';
+      // A claimed creation-failure is real iff a create_job CALL exists —
+      // ANY outcome. AgentToolCall records rejected calls too, so zero rows
+      // means there was no attempt and therefore no such error.
+      const attempts = await prisma.agentToolCall.count({
+        where: {
+          instanceId: args.instanceId,
+          toolName: 'sokosumi_create_job',
+          createdAt: { gte: new Date(args.turnStartedAt) },
+        },
+      });
+      if (attempts > 0) return; // the failure genuinely happened — leave it.
+    }
 
     const instance = await prisma.hermesInstance.findUnique({ where: { id: args.instanceId } });
     if (!instance || !instance.endpointUrl) return;
@@ -158,13 +201,22 @@ export async function runGroundTruthGuard(args: GuardArgs): Promise<void> {
     }
 
     const prompt =
-      `[Automated integrity check — NOT a new message from the user. In your last reply you told the ` +
-      `user: "${claim}". Our records show you did NOT call the matching Sokosumi tool during that turn, ` +
-      `so that action did NOT actually happen. Put it right now: if you meant to do it, CALL THE TOOL ` +
-      `this turn (comments are free and immediate), then tell the user in ONE short line via your ` +
-      `outbox-send skill what you actually did. If you did not mean to act, send the user a ONE-line ` +
-      `correction via outbox-send. If our records are wrong and you genuinely already did it through a ` +
-      `tool, reply with EXACTLY [SILENT] and nothing else.]`;
+      mode === 'failure'
+        ? `[Automated integrity check — NOT a new message from the user. In your last reply you told the ` +
+          `user that job creation FAILED ("${claim}"). Our records show you never called ` +
+          `sokosumi_create_job in that turn at all — there was no attempt, so there was no such error, ` +
+          `and any diagnosis you gave for it (billing, credits, wallets) is unfounded. Send the user a ` +
+          `ONE-line correction via outbox-send saying no jobs were actually attempted yet. Do NOT ` +
+          `create any jobs on your own in this turn — jobs SPEND credits; ask the user before firing ` +
+          `them for real. If our records are wrong and you genuinely called the tool, reply with ` +
+          `EXACTLY [SILENT] and nothing else.]`
+        : `[Automated integrity check — NOT a new message from the user. In your last reply you told the ` +
+          `user: "${claim}". Our records show you did NOT call the matching Sokosumi tool during that turn, ` +
+          `so that action did NOT actually happen. Put it right now: if you meant to do it, CALL THE TOOL ` +
+          `this turn (comments are free and immediate), then tell the user in ONE short line via your ` +
+          `outbox-send skill what you actually did. If you did not mean to act, send the user a ONE-line ` +
+          `correction via outbox-send. If our records are wrong and you genuinely already did it through a ` +
+          `tool, reply with EXACTLY [SILENT] and nothing else.]`;
 
     await runCronAgentTurn({
       instanceId: args.instanceId,
