@@ -6,7 +6,7 @@ import { listIntegrations } from '../integrations/manager.js';
 import { fetchWorkspaceSnapshot, SokosumiClient } from '../sokosumi/client.js';
 import { isValidSokosumiEnv, type SokosumiEnv, normalizeAutonomy } from '../config.js';
 import { buildPersonaDirective, type Personality } from './profile.js';
-import { syncNativePromptCrons } from '../schedules/native-prompts.js';
+import { syncNativePromptCrons, DAILY_BRIEF_PROMPT } from '../schedules/native-prompts.js';
 import { syncSystemSchedules } from '../schedules/system-schedules.js';
 
 /** A single step in the onboarding loader UI. Mirrors the JSON we persist. */
@@ -630,34 +630,7 @@ chat. Your response is discarded — do not greet me.
 deliver to "local". Prompt content:
 
    <prompt>
-   Daily brief for ${name ?? 'the user'}. Pull together what's actually \
-   worth their attention this morning. Use memory + your sokosumi_* and \
-   mail/calendar tools as needed.
-
-   Structure the brief like this — concise prose, no markdown headings, \
-   skip any section that has nothing real to say:
-
-   1. One-sentence overview: "Here's the shape of today: ..."
-   2. Sokosumi workspace — any tasks with status changes, jobs that \
-      completed overnight (call sokosumi_list_jobs with status=COMPLETED \
-      to check), anything stalled or needing input. Per item, one-sentence \
-      summary of the result + whether it needs the user to read/act.
-   3. Mail since yesterday — highlight 2-4 threads that need their \
-      attention (sender, subject, one-line gist + suggested action). \
-      Use your Gmail/Outlook tools if connected.
-   4. Today's calendar — only mention meetings that need prep or that \
-      they might forget. Skip routine recurring blocks.
-   5. Other connected tools — if you have MCP tools for Slack, Linear, \
-      GitHub, Notion, HubSpot or similar, check each for unread mentions, \
-      items assigned to or awaiting the user, and review requests. Only \
-      items worth acting on today; silently skip tools you don't have.
-   6. One concrete next action — the single most valuable thing they \
-      could do in the next hour, with the exact prompt they could send \
-      you to start it.
-
-   Tone: warm but tight. Lead with what's interesting. No corporate \
-   filler ("I hope this finds you well", "as your AI assistant"). \
-   Address them by first name. 200-350 words total.
+   ${DAILY_BRIEF_PROMPT}
 
    If literally nothing notable arrived (truly quiet day), say so \
    honestly in two sentences and stop. Don't pad.

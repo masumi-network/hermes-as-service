@@ -33,7 +33,7 @@ const AUTONOMY_RANK: Record<Autonomy, number> = { low: 0, medium: 1, high: 2 };
  * the hourly reconciler cron — that's how spec changes roll out fleet-wide
  * without manual resyncs, and how onboarding-time sync failures self-heal.
  */
-export const NATIVE_PROMPTS_VERSION = 4;
+export const NATIVE_PROMPTS_VERSION = 5;
 
 interface NativePromptSpec {
   /** Cronjob name on the machine AND mirror-row name — stable identifier. */
@@ -48,15 +48,44 @@ interface NativePromptSpec {
   prompt: string;
 }
 
+/** Grounding contract shared by every prompt that REPORTS events to the user.
+ *  Observed live 2026-07-30: a daily brief invented a "Deepfake-Detector"
+ *  Sokosumi job with a made-up result — the old prompt said tools "as
+ *  needed", and the model decided memory was enough. Memory supplies MEANING
+ *  (what things are for, what the user cares about); it is never a source of
+ *  EVENTS. */
+const GROUNDING_RULE =
+  'HARD RULE — every event, task, job, email or meeting you mention MUST come from a tool call you made THIS RUN. Memory tells you why things matter; it is NEVER a source of events — if you did not fetch it this run, it does not exist for this report. If a fetch fails or a tool is unavailable, write "couldn\'t check X" for that section; never fill a gap from memory or plausibility. Inventing a result (a job that "completed", an outcome you did not fetch) is the worst failure this report can have.';
+
+/** The daily brief. Also installed at onboarding (same text — see
+ *  provision/onboarding.ts); listed here so the reconciler keeps EXISTING
+ *  machines current when the prompt improves. Before this it was created
+ *  once at onboarding and never touched again, so prompt fixes only ever
+ *  reached new users. */
+export const DAILY_BRIEF_PROMPT = `Daily brief for the user (address them by first name, from memory). Pull together what's actually worth their attention this morning. ${GROUNDING_RULE}
+
+MANDATORY FETCHES before you write a word: sokosumi_list_tasks (recent changes) AND sokosumi_list_jobs with status=COMPLETED; your mail tools if connected; calendar if connected.
+
+Structure — concise prose, no markdown headings, skip any section with nothing real: 1. One-sentence overview: "Here's the shape of today: ...". 2. Sokosumi workspace — status changes, overnight completions, anything stalled or needing input; one sentence per item plus whether the user must read/act, each item straight from what the tools returned. 3. Mail since yesterday — 2-4 threads needing attention (sender, subject, one-line gist, suggested action). 4. Today's calendar — only meetings that need prep or could be forgotten. 5. Other connected tools (Slack, Linear, GitHub, Notion, HubSpot...) — unread mentions and items awaiting the user, only what's worth acting on today; silently skip tools you don't have. 6. One concrete next action — the single most valuable thing for the next hour, with the exact prompt they could send you to start it.
+
+Tone: warm but tight. Lead with what's interesting. No corporate filler. 200-350 words total.`;
+
 export const NATIVE_PROMPTS: NativePromptSpec[] = [
+  {
+    name: 'daily-brief',
+    cronExpr: '0 7 * * *',
+    localTime: false,
+    minAutonomy: 'low',
+    summary: 'Daily 7:00 UTC brief — board, mail, calendar, next action. Tool-grounded.',
+    prompt: DAILY_BRIEF_PROMPT,
+  },
   {
     name: 'weekly-wrap',
     cronExpr: '0 16 * * 5',
     localTime: true,
     minAutonomy: 'medium',
     summary: 'Friday wrap-up — completions, credit spend, Monday priorities.',
-    prompt:
-      'Give the user a Friday wrap-up: (a) Sokosumi jobs completed this week with a 1-line takeaway per job, (b) total credits spent this week and the top 3 most expensive jobs, (c) open tasks that should move first thing Monday. Tight, scannable, under 200 words.',
+    prompt: `Give the user a Friday wrap-up. ${GROUNDING_RULE} FETCH FIRST: sokosumi_list_jobs with status=COMPLETED and sokosumi_list_tasks for the week, plus sokosumi_get_credits. Then: (a) Sokosumi jobs completed this week with a 1-line takeaway per job, (b) total credits spent this week and the top 3 most expensive jobs, (c) open tasks that should move first thing Monday. Tight, scannable, under 200 words.`,
   },
   {
     name: 'stuck-jobs-reminder',
@@ -225,7 +254,7 @@ DESIRED cronjobs (create any that are missing; if one exists under the same name
 
 ${desiredBlocks || '(none for your autonomy level)'}
 
-REMOVE these cronjobs if they exist (retired, disabled by the user, or above your autonomy level): ${removeNames.map((n) => `"${n}"`).join(', ')}. Do NOT touch "daily-brief" or any cronjob the user asked you to create.
+REMOVE these cronjobs if they exist (retired, disabled by the user, or above your autonomy level): ${removeNames.map((n) => `"${n}"`).join(', ')}. Do NOT touch any cronjob the user asked you to create. ("daily-brief" IS managed by this list now — update it like the others.)
 
 Then, for EVERY cronjob in the DESIRED list above (including ones you left alone), register/refresh its visibility mirror — this is how the orchestrator verifies the install, so do it for all of them. Your shell does NOT inherit the gateway env, so source /opt/data/.env first:
 
