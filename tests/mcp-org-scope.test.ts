@@ -17,6 +17,7 @@ interface Call {
   method: string;
   path: string;
   org: string | undefined;
+  body?: unknown;
 }
 let calls: Call[];
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -26,6 +27,15 @@ function router(method: string, pathname: string): unknown {
   if (pathname === '/coworkers') return { data: [{ id: 'cow_1', slug: 'hannah', name: 'Hannah' }] };
   if (pathname === '/tasks' && method === 'POST') return { data: { id: 'tsk_new', status: 'READY' } };
   if (pathname === '/agents/agent_1/jobs' && method === 'POST') return { data: { id: 'job_new' } };
+  if (pathname === '/agents/agent_1/input-schema')
+    return {
+      data: {
+        input_data: [
+          { id: 'intro', type: 'none', name: 'Information' },
+          { id: 'question', type: 'textarea', name: 'Research Question' },
+        ],
+      },
+    };
   if (pathname.endsWith('/credits'))
     return {
       data: {
@@ -40,10 +50,15 @@ beforeEach(() => {
   process.env['SOKOSUMI_ORCHESTRATOR_API_KEY_MAINNET'] = 'x'.repeat(32);
   process.env['SOKOSUMI_API_BASE_MAINNET'] = 'https://api.example.test/v1';
   calls = [];
-  fetchMock = vi.fn(async (url: string, init: { method?: string; headers?: Record<string, string> }) => {
+  fetchMock = vi.fn(async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string }) => {
     const u = new URL(url);
     const method = init.method ?? 'GET';
-    calls.push({ method, path: u.pathname.replace(/^\/v1/, ''), org: init.headers?.['X-Context-Organization-Id'] });
+    calls.push({
+      method,
+      path: u.pathname.replace(/^\/v1/, ''),
+      org: init.headers?.['X-Context-Organization-Id'],
+      body: init.body ? JSON.parse(init.body) : undefined,
+    });
     return { ok: true, status: 200, json: async () => router(method, u.pathname.replace(/^\/v1/, '')) };
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -101,7 +116,7 @@ describe('org-scoped create paths trust an explicit organization_id', () => {
   it('create_job honors an explicit organization_id instead of blindly using org[0]', async () => {
     const out = await run('sokosumi_create_job', {
       agent_id: 'agent_1',
-      input_schema: {},
+      input_data: { question: 'why?' },
       organization_id: 'org_a',
     });
     const jobCall = calls.find((c) => c.path === '/agents/agent_1/jobs');
@@ -110,10 +125,47 @@ describe('org-scoped create paths trust an explicit organization_id', () => {
   });
 
   it('create_job without an org runs in the personal workspace', async () => {
-    const out = await run('sokosumi_create_job', { agent_id: 'agent_1', input_schema: {} });
+    const out = await run('sokosumi_create_job', {
+      agent_id: 'agent_1',
+      input_data: { question: 'why?' },
+    });
     const jobCall = calls.find((c) => c.path === '/agents/agent_1/jobs');
     expect(jobCall?.org).toBeUndefined();
     expect(JSON.parse(out).orgId).toBeNull();
+  });
+
+  /**
+   * The regression that made create_job unusable from day one: the body carried
+   * only `inputSchema`, fed with the VALUES, so the required `inputData` was
+   * always absent and Sokosumi answered every shape with the same opaque
+   * "Key: inputSchema - Invalid input". Assert both halves, and assert the
+   * schema is the one WE fetched — the model never echoes it.
+   */
+  it('create_job sends the fetched schema AND the values as separate fields', async () => {
+    await run('sokosumi_create_job', {
+      agent_id: 'agent_1',
+      input_data: { question: 'why?' },
+      max_credits: 25,
+    });
+    const body = calls.find((c) => c.path === '/agents/agent_1/jobs')?.body as {
+      inputSchema?: { input_data?: unknown[] };
+      inputData?: Record<string, unknown>;
+      maxCredits?: number;
+    };
+    expect(body?.inputData).toEqual({ question: 'why?' });
+    expect(body?.inputSchema?.input_data).toHaveLength(2);
+    expect(body?.maxCredits).toBe(25);
+    expect(calls.some((c) => c.path === '/agents/agent_1/input-schema')).toBe(true);
+  });
+
+  it('create_job rejects unknown field ids locally, naming the real fields', async () => {
+    await expect(
+      run('sokosumi_create_job', {
+        agent_id: 'agent_1',
+        input_data: { 'Research Question': 'keyed by display name, not id' },
+      }),
+    ).rejects.toThrow(/unknown input_data field\(s\): Research Question.*question \(textarea/s);
+    expect(calls.some((c) => c.path === '/agents/agent_1/jobs')).toBe(false);
   });
 
   it('get_credits returns the real balance + plan (reopened by PR #3408)', async () => {

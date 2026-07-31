@@ -591,21 +591,28 @@ const TOOLS_ALL: ToolDef[] = [
     access: 'spend',
     name: 'sokosumi_create_job',
     description:
-      "Kick off a Sokosumi agent job. SPENDS CREDITS from the workspace owner's wallet (you for personal, the org for an org workspace) — and unlike tasks the price IS known up front. Before calling: (1) fetch the per-job price with sokosumi_get_agent_input_schema, (2) check the balance with sokosumi_get_credits (personal workspace), (3) apply your autonomy's cost rules. At MEDIUM the orchestrator surfaces a confirmation box — state the price in chat too. At HIGH, weigh the price against the balance and your cost rules; if a job later fails out-of-credits, relay that to the user.",
+      "Kick off a Sokosumi agent job. SPENDS CREDITS from the workspace owner's wallet (you for personal, the org for an org workspace) — and unlike tasks the price IS known up front. Before calling: (1) fetch the fields and per-job price with sokosumi_get_agent_input_schema, (2) check the balance with sokosumi_get_credits (personal workspace), (3) apply your autonomy's cost rules. Pass ONLY the values in input_data — a flat map of {field id: value} using the `id` of each field from the input schema (NOT the field's display name). You do NOT need to echo the schema back; the orchestrator attaches it for you. Set max_credits as a hard server-side spend ceiling: the job is rejected rather than overspent. At MEDIUM the orchestrator surfaces a confirmation box — state the price in chat too. At HIGH, weigh the price against the balance and your cost rules; if a job later fails out-of-credits, relay that to the user.",
     inputSchema: {
       type: 'object',
       properties: {
         agent_id: { type: 'string', description: 'The Sokosumi agent to run.' },
-        input_schema: {
+        input_data: {
           type: 'object',
-          description: 'The input payload, matching the agent_input_schema you just fetched.',
+          description:
+            'The VALUES only, as a flat map keyed by each field\'s `id` from sokosumi_get_agent_input_schema — e.g. {"question": "What do Gen Z in Germany watch?", "mediaType": "image"}. Values may be string, number, boolean, or an array of those. Fields of type "none" are display-only headings: never send them.',
         },
-        task_id: {
+        max_credits: {
+          type: 'number',
+          description:
+            'Hard spend ceiling in credits. Sokosumi rejects the job if it would cost more. Set this to the price you were quoted.',
+        },
+        name: { type: 'string', description: 'Optional human label for the job.' },
+        organization_id: {
           type: 'string',
-          description: 'Optional task id to attach this job to.',
+          description: 'Org workspace to spend from. Omit for the personal workspace.',
         },
       },
-      required: ['agent_id', 'input_schema'],
+      required: ['agent_id', 'input_data'],
     },
   },
   {
@@ -789,6 +796,66 @@ async function handle(c: Context): Promise<Response> {
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
 
+/**
+ * Spends run ONE AT A TIME per instance, and no more than SPEND_BURST_MAX
+ * inside SPEND_BURST_WINDOW_MS.
+ *
+ * ── The incident (2026-07-31) ────────────────────────────────────────────
+ *   10:21:12  one turn emitted TEN sokosumi_create_job tool_calls at once
+ *   → all ten hit Sokosumi concurrently. They happened to 422 (the payload
+ *     bug fixed in this same change), so nothing was charged. Had the payload
+ *     been right, that turn would have started ten paid jobs simultaneously,
+ *     with no human in the loop, because HIGH autonomy executes spends
+ *     immediately. Medium autonomy already had ConfirmationBurstError; high
+ *     had nothing.
+ *
+ * The agent then reported that the MCP server had been "overwhelmed" and was
+ * "down for about a minute". It was not — the orchestrator answered every one
+ * of those calls in 34–160 ms and kept serving get_credits, list_tasks and
+ * list_agents throughout. But a burst of parallel SPENDS is a real hazard on
+ * its own terms, independent of load, so we serialize them.
+ *
+ * Serialization (not just a cap) matters because the model checks the balance
+ * with sokosumi_get_credits and then spends: concurrent spends each read the
+ * same pre-spend balance and every one of them believes it is affordable.
+ */
+const SPEND_BURST_MAX = 3;
+const SPEND_BURST_WINDOW_MS = 60_000;
+const spendChains = new Map<string, Promise<unknown>>();
+const spendHistory = new Map<string, number[]>();
+
+class SpendBurstError extends Error {}
+
+async function runSpendGuarded<T>(
+  instanceId: string,
+  toolName: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prior = spendChains.get(instanceId) ?? Promise.resolve();
+  const run = prior.catch(() => {}).then(async () => {
+    const now = Date.now();
+    const recent = (spendHistory.get(instanceId) ?? []).filter(
+      (t) => now - t < SPEND_BURST_WINDOW_MS,
+    );
+    if (recent.length >= SPEND_BURST_MAX) {
+      throw new SpendBurstError(
+        `STOP. You have already started ${recent.length} paid ${toolName} calls in the last minute. ` +
+          `This one was NOT submitted and nothing was charged. Do not retry. Report to the user in plain ` +
+          `language what you have already started and ask before spending more.`,
+      );
+    }
+    recent.push(now);
+    spendHistory.set(instanceId, recent);
+    logger.info({ instanceId, toolName, inWindow: recent.length }, 'sokosumi_spend_admitted');
+    return fn();
+  });
+  spendChains.set(
+    instanceId,
+    run.catch(() => {}),
+  );
+  return run;
+}
+
 export async function callTool(
   name: string,
   args: Record<string, unknown>,
@@ -855,7 +922,10 @@ export async function callTool(
     // ledger entry BEFORE returning so the chat proxy's confabulation guard
     // can tell a real write from the agent merely narrating one. A throw from
     // executeTool (e.g. task not found) skips this — only real writes count.
-    const out = await executeTool(name, args, ctx);
+    const out =
+      toolDef.access === 'spend'
+        ? await runSpendGuarded(ctx.instanceId, name, () => executeTool(name, args, ctx))
+        : await executeTool(name, args, ctx);
     await recordEvent({
       userId: ctx.userId,
       instanceId: ctx.instanceId,
@@ -1717,11 +1787,11 @@ export async function executeTool(
 
     case 'sokosumi_create_job': {
       const agentId = String(args['agent_id'] ?? '');
-      const inputSchema = args['input_schema'];
-      const taskId = typeof args['task_id'] === 'string' ? (args['task_id'] as string) : undefined;
-      if (!agentId || !inputSchema) {
-        throw new Error('missing required args: agent_id, input_schema');
+      const rawInput = args['input_data'];
+      if (!agentId || !rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+        throw new Error('missing required args: agent_id, input_data (a flat {fieldId: value} map)');
       }
+      const inputData = rawInput as Record<string, unknown>;
       // Honor an explicit workspace: string = that org, null/absent =
       // personal (the only scope we can pick without enumeration). Sokosumi
       // validates org membership server-side, so no client-side pre-check.
@@ -1729,9 +1799,45 @@ export async function executeTool(
       // always resolves to personal AND dropped the user's workspace pick.
       const rawOrgArg = args['organization_id'];
       const targetOrgId = typeof rawOrgArg === 'string' ? rawOrgArg : null;
-      const result = await client
-        .withOrganization(targetOrgId)
-        .createJob({ agentId, inputSchema, taskId });
+      const scoped = client.withOrganization(targetOrgId);
+
+      // Fetch the schema OURSELVES rather than asking the model to reproduce
+      // it. The API wants the descriptor object echoed back byte-for-byte
+      // alongside the values; expecting an LLM to re-emit a nested structure
+      // it merely read is a guaranteed 422, and that is exactly what happened
+      // (ten create_job calls in one turn, every one rejected).
+      const schema = (await scoped.getAgentInputSchema(agentId)) as {
+        input_data?: Array<{ id?: string; type?: string; name?: string }>;
+      };
+      const fields = Array.isArray(schema?.input_data) ? schema.input_data : [];
+
+      // Fail LOCALLY with a message that names the real fields. Sokosumi's own
+      // error is "Key: inputSchema - Invalid input" for every possible mistake,
+      // which tells the agent nothing and invites it to guess again.
+      if (fields.length > 0) {
+        const valueFields = fields.filter((f) => f?.type !== 'none');
+        const known = new Set(valueFields.map((f) => String(f?.id ?? '')));
+        const unknown = Object.keys(inputData).filter((k) => !known.has(k));
+        if (unknown.length > 0) {
+          const catalog = valueFields
+            .map((f) => `${f?.id} (${f?.type}${f?.name ? `, "${f.name}"` : ''})`)
+            .join(', ');
+          throw new Error(
+            `unknown input_data field(s): ${unknown.join(', ')}. ` +
+              `Key input_data by field ID, not display name. This agent accepts: ${catalog || '(none)'}`,
+          );
+        }
+      }
+
+      const maxCredits = typeof args['max_credits'] === 'number' ? args['max_credits'] : undefined;
+      const name = typeof args['name'] === 'string' ? args['name'] : undefined;
+      const result = await scoped.createJob({
+        agentId,
+        inputSchema: schema,
+        inputData,
+        ...(maxCredits !== undefined ? { maxCredits } : {}),
+        ...(name !== undefined ? { name } : {}),
+      });
       return JSON.stringify({ orgId: targetOrgId, job: result }, null, 2);
     }
 

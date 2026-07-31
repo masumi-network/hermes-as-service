@@ -542,15 +542,42 @@ export class SokosumiClient {
    * orchestrator actor we get a flat 403 there. taskId is kept for logging /
    * caller ergonomics; it does not change the endpoint.
    */
+  /**
+   * Start an agent job.
+   *
+   * POST /agents/{id}/jobs requires BOTH halves and they are not the same
+   * thing (verified against https://api.sokosumi.com/v1/openapi.json):
+   *
+   *   inputSchema  the agent's schema echoed back VERBATIM — the exact
+   *                {input_data:[...descriptors...]} object that
+   *                GET /agents/{id}/input-schema returns.
+   *   inputData    the VALUES, as a flat map {fieldId: string|number|
+   *                boolean|string[]|number[]}.
+   *
+   * This used to send only `inputSchema`, fed with the values, plus an
+   * `identifierFromPurchaser` that is not in the spec at all — so `inputData`
+   * was always absent and every call 422'd with the unhelpful, shape-agnostic
+   * "Key: inputSchema - Invalid input". The tool had never once succeeded:
+   * AgentToolCall recorded zero successful sokosumi_create_job rows.
+   *
+   * `maxCredits` is a server-side spend ceiling — the API rejects the job
+   * rather than overspending it, which is a harder guarantee than asking the
+   * model to check the balance first.
+   */
   async createJob(args: {
     agentId: string;
     inputSchema: unknown;
-    taskId?: string | null;
-    identifierFromPurchaser?: string;
+    inputData: Record<string, unknown>;
+    maxCredits?: number;
+    projectId?: string | null;
+    name?: string;
   }): Promise<unknown> {
     const body = await this.post(`/agents/${encodeURIComponent(args.agentId)}/jobs`, {
       inputSchema: args.inputSchema,
-      identifierFromPurchaser: args.identifierFromPurchaser,
+      inputData: args.inputData,
+      ...(typeof args.maxCredits === 'number' ? { maxCredits: args.maxCredits } : {}),
+      ...(args.projectId ? { projectId: args.projectId } : {}),
+      ...(args.name ? { name: args.name } : {}),
     });
     return unwrapData(body);
   }
