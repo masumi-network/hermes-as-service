@@ -99,8 +99,31 @@ function humanDuration(ms: number): string {
  * Note the holder may be a background sweep, not the user's own last message,
  * so the wording must not assume "your previous message".
  */
-export function busyMessage(info: LeaseHolderInfo, currentActivity?: string | null): string {
-  const elapsed = info.since ? ` (started ${humanDuration(Date.now() - info.since.getTime())} ago)` : '';
+export function busyMessage(
+  info: LeaseHolderInfo,
+  currentActivity?: string | null,
+  /** Set ONLY when the message was actually persisted for replay. */
+  queued?: { position: number } | null,
+): string {
+  const elapsed = info.since
+    ? ` (running ${humanDuration(Date.now() - info.since.getTime())})`
+    : '';
   const doing = currentActivity ? `\n\nRight now: ${currentActivity}` : '';
-  return `I'm still busy with ${info.holder}${elapsed}, so I haven't started on this yet — running two things at once would make a mess of both.${doing}\n\nSend this again once I've replied and I'll pick it up.`;
+  // The closing line tracks what actually happened. It promises a pickup only
+  // when queue/turn-queue.ts really did persist the message — if the enqueue
+  // failed or the queue was full we fall back to asking for a resend, because
+  // an unkeepable "I'll get to it" is exactly the confabulation the
+  // ground-truth guard exists to catch.
+  const closing = queued
+    ? queued.position > 1
+      ? `\n\nI've saved your message — it's ${ordinal(queued.position)} in line and I'll answer it as soon as I'm free. No need to resend.`
+      : `\n\nI've saved your message and I'll answer it the moment this finishes. No need to resend.`
+    : `\n\nI haven't read your message yet. Send it again once I've replied and I'll pick it up.`;
+  return `I'm still finishing ${info.holder}${elapsed} — I don't want to run two things at once and make a mess of both.${doing}${closing}`;
+}
+
+function ordinal(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`;
 }

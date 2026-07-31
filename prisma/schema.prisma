@@ -102,6 +102,13 @@ model HermesInstance {
   turnLeaseOwner String?
   /// What holds it — 'chat' | a sweep source. Surfaced in the busy reply.
   turnLeaseKind  String?
+  /// When the CURRENT holder acquired it. Recorded rather than derived: the
+  /// busy reply used to reconstruct the start as `turnLeaseUntil - ttl` using
+  /// the WAITING caller's ttl, not the holder's. Chat waits with a 20-minute
+  /// ttl; a board sweep holds with 5 (AGENT_TURN_TIMEOUT_MS + 60s), so every
+  /// sweep-induced busy message overstated the elapsed time by exactly 15:00
+  /// — "still busy (started 17 min 8 s ago)" for a sweep 2 minutes old.
+  turnLeaseStartedAt DateTime?
   /// Per-status watermarks for the urgent-interrupt cron's
   /// completion/awaiting-input/failed scans. Separate from lastJobNoticeAt
   /// (which tracks COMPLETED only) so a flood of completions doesn't
@@ -207,9 +214,47 @@ model HermesInstance {
   installedSkills       InstalledSkill[]
   testRuns              TestRun[]
   taskAssists           HermesTaskAssist[]
+  queuedTurns           QueuedTurn[]
 
   @@index([status])
   @@index([lastActivityAt])
+}
+
+/// A user message that arrived while the machine was busy, held for replay.
+///
+/// Before this, a chat turn that collided with a background sweep was simply
+/// rejected: the busy reply told the user to type their message again, and the
+/// message itself was never persisted (the ChatMessage insert happens AFTER
+/// the lease is acquired). One agent turn per machine is a hard constraint —
+/// see routes/machine-lease.ts — but making the human retype is not the only
+/// way to honour it.
+///
+/// Drained FIFO the moment the machine frees up. `claimedAt`/`claimedBy` are
+/// an atomic compare-and-swap exactly like the machine lease, so two drainers
+/// (or a drainer racing the boot sweep) can never replay the same message.
+model QueuedTurn {
+  id         String   @id @default(uuid())
+  instanceId String
+  userId     String
+  /// The user's message, verbatim.
+  content    String
+  /// requestId of the busy exchange that queued it — joins to ChatMessage so
+  /// the admin transcript shows the collision and the eventual reply together.
+  requestId  String
+  createdAt  DateTime @default(now())
+
+  /// CAS fields. claimedAt is cleared on failure so the message is retried.
+  claimedAt   DateTime?
+  claimedBy   String?
+  /// Set once the reply has been pushed to the user's outbox.
+  deliveredAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?
+
+  instance HermesInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, deliveredAt, createdAt])
+  @@index([deliveredAt, createdAt])
 }
 
 /// A pre-provisioned Fly app+machine+volume kept warm so signup can claim

@@ -11,6 +11,7 @@ import { runNativePromptReconcilerSweep } from './schedules/native-prompts.js';
 import { reapFinishedMonitorCrons } from './schedules/monitor-cron-reaper.js';
 import { runMcpToolsRollSweep } from './provision/mcp-tools-roll.js';
 import { freshenSweepMirrors } from './schedules/system-schedules.js';
+import { sweepQueuedTurns } from './queue/turn-queue.js';
 
 const registered = new Map<string, cron.ScheduledTask>();
 
@@ -242,6 +243,18 @@ export function startNativePromptReconcilerCron(): void {
  */
 export function startMonitorCronReaperCron(): void {
   register('monitor_cron_reaper_cron', '40 * * * *', reapFinishedMonitorCrons);
+}
+
+/**
+ * Safety net for queued user messages. The drain normally fires the moment a
+ * lease is released (setLeaseReleaseHook), so this only catches the cases that
+ * hook cannot: the releasing process died, or the machine was busy on every
+ * attempt. Also clears claims stranded by a crash mid-replay.
+ */
+export function startQueuedTurnSweepCron(): void {
+  register('queued_turn_sweep_cron', '*/2 * * * *', async () => {
+    await sweepQueuedTurns();
+  });
 }
 
 /**

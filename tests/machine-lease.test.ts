@@ -19,9 +19,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 /** Minimal fake of the one Postgres behaviour we depend on: a conditional
  *  updateMany is an atomic compare-and-swap. */
 function fakeDb() {
-  const rows = new Map<string, { turnLeaseUntil: Date | null; turnLeaseOwner: string | null; turnLeaseKind: string | null }>();
-  rows.set('i1', { turnLeaseUntil: null, turnLeaseOwner: null, turnLeaseKind: null });
-  rows.set('i2', { turnLeaseUntil: null, turnLeaseOwner: null, turnLeaseKind: null });
+  const rows = new Map<string, { turnLeaseUntil: Date | null; turnLeaseOwner: string | null; turnLeaseKind: string | null; turnLeaseStartedAt: Date | null }>();
+  rows.set('i1', { turnLeaseUntil: null, turnLeaseOwner: null, turnLeaseKind: null, turnLeaseStartedAt: null });
+  rows.set('i2', { turnLeaseUntil: null, turnLeaseOwner: null, turnLeaseKind: null, turnLeaseStartedAt: null });
   return {
     rows,
     prisma: {
@@ -188,6 +188,64 @@ describe('renewMachineTurn', () => {
   });
 });
 
+describe('elapsed time in the busy reply', () => {
+  /**
+   * The bug: `since` was reconstructed as `turnLeaseUntil - ttlMs` using the
+   * WAITING caller's ttl. A board sweep holds with 5 minutes
+   * (AGENT_TURN_TIMEOUT_MS + 60s) while chat waits with 20, so every
+   * sweep-induced busy reply overstated elapsed time by exactly 15:00 — a
+   * sweep 4 seconds old was reported as "started 15 min 4 s ago".
+   */
+  it('reports the HOLDER\'s start time, not one derived from the waiter\'s ttl', async () => {
+    const { acquireMachineTurn } = await load();
+    const SWEEP_TTL = 5 * 60_000;
+    const CHAT_TTL = 20 * 60_000;
+
+    const held = await acquireMachineTurn('i1', 'board_sweep', SWEEP_TTL);
+    expect(held.ok).toBe(true);
+
+    const blocked = await acquireMachineTurn('i1', 'chat', CHAT_TTL);
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+
+    const elapsedMs = Date.now() - blocked.busy.since!.getTime();
+    expect(elapsedMs).toBeLessThan(5_000);
+    // The old derivation would have produced ~15 minutes here.
+    expect(elapsedMs).toBeLessThan(CHAT_TTL - SWEEP_TTL);
+  });
+
+  it('omits the start time entirely for a pre-migration row rather than guessing', async () => {
+    const { acquireMachineTurn } = await load();
+    await acquireMachineTurn('i1', 'board_sweep', 5 * 60_000);
+    db.rows.get('i1')!.turnLeaseStartedAt = null; // row written before the column existed
+    const blocked = await acquireMachineTurn('i1', 'chat');
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.busy.since).toBeUndefined();
+  });
+});
+
+describe('waiting for a busy machine', () => {
+  it('acquires once the holder releases, instead of bouncing immediately', async () => {
+    const { acquireMachineTurn, releaseMachineTurn, acquireMachineTurnWithWait } = await load();
+    const held = await acquireMachineTurn('i1', 'board_sweep', 5 * 60_000);
+    if (!held.ok) throw new Error('setup failed');
+
+    setTimeout(() => void releaseMachineTurn(held.handle), 300);
+    const claim = await acquireMachineTurnWithWait('i1', 'chat', { waitMs: 5_000, pollMs: 100 });
+    expect(claim.ok).toBe(true);
+  });
+
+  it('gives up and reports busy when the holder outlasts the wait', async () => {
+    const { acquireMachineTurn, acquireMachineTurnWithWait } = await load();
+    await acquireMachineTurn('i1', 'board_sweep', 5 * 60_000);
+    const claim = await acquireMachineTurnWithWait('i1', 'chat', { waitMs: 400, pollMs: 100 });
+    expect(claim.ok).toBe(false);
+    if (claim.ok) return;
+    expect(claim.busy.kind).toBe('board_sweep');
+  });
+});
+
 describe('the busy reply', () => {
   it('names a background holder rather than claiming it was your message', async () => {
     const { describeLeaseHolder, busyMessage } = await import('../src/routes/turn-guard.js');
@@ -197,9 +255,12 @@ describe('the busy reply', () => {
       'Searching the web',
     );
     expect(msg).toContain('a background check of your task board');
-    expect(msg).toContain('1 min 30 s ago');
+    expect(msg).toContain('running 1 min 30 s');
     expect(msg).toContain('Searching the web');
     expect(msg).not.toContain('your previous message');
+    // Must not promise a pickup it cannot deliver: the busy branch returns
+    // before the user's message is persisted, so nothing replays it.
+    expect(msg).not.toMatch(/no need to resend|I'll pick this up as soon/);
   });
 
   it('still reads correctly for the user\'s own earlier turn', async () => {

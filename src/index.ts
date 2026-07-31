@@ -47,9 +47,11 @@ import {
   startMonitorCronReaperCron,
   startToolCallPruneCron,
   startMcpToolsRollCron,
+  startQueuedTurnSweepCron,
 } from './cron.js';
-import { reportHeldLeasesOnBoot } from './routes/machine-lease.js';
+import { reportHeldLeasesOnBoot, setLeaseReleaseHook } from './routes/machine-lease.js';
 import { releaseStrandedClaimsOnBoot } from './notifications/board-sweep.js';
+import { scheduleDrain, sweepQueuedTurns } from './queue/turn-queue.js';
 
 const cfg = loadConfig();
 
@@ -123,6 +125,15 @@ startMcpToolsRollCron();
 // Surface any machine lease still held from a previous process — an orphaned
 // turn should look like an orphaned turn in the logs, not a silent agent.
 void reportHeldLeasesOnBoot();
+
+// Replay user messages that arrived while the machine was busy, the instant it
+// frees up. Registered here rather than inside machine-lease so that module
+// doesn't have to import the queue (which imports it back).
+setLeaseReleaseHook(scheduleDrain);
+startQueuedTurnSweepCron();
+
+// Messages queued by a process that died before draining them.
+void sweepQueuedTurns().catch((err) => logger.error({ err }, 'queued_turn_boot_sweep_threw'));
 
 // Board-sweep claims whose turn was killed with the previous process (a
 // deploy mid-turn) would otherwise sit silent until the 12h stall net.

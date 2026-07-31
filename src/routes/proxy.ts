@@ -10,7 +10,12 @@ import { recordEvent } from '../audit.js';
 import { runGroundTruthGuard } from '../notifications/groundtruth-guard.js';
 import { lastProgressEvent, subscribeProgress, type ProgressEvent } from './progress-bus.js';
 import { busyMessage, busyResponse, describeLeaseHolder } from './turn-guard.js';
-import { acquireMachineTurn, releaseMachineTurn, type LeaseHandle } from './machine-lease.js';
+import {
+  acquireMachineTurnWithWait,
+  releaseMachineTurn,
+  type LeaseHandle,
+} from './machine-lease.js';
+import { enqueueTurn } from '../queue/turn-queue.js';
 
 const router = new Hono();
 
@@ -30,6 +35,11 @@ const CHAT_PROXY_AGENT = new Agent({
 });
 
 const SSE_KEEPALIVE_MS = 20_000;
+
+/** How long a chat turn waits for a busy machine before giving the honest
+ *  "still working" reply. Comfortably inside any client-side HTTP timeout,
+ *  and long enough to absorb the tail of a typical background sweep. */
+const BUSY_WAIT_MS = 45_000;
 
 interface OpenAIMessage {
   role: string;
@@ -112,18 +122,53 @@ router.post('/v1/proxy/:userId/v1/chat/completions', async (c) => {
 
     // One turn at a time per MACHINE — including turns started by sweeps, and
     // including across a redeploy. See ./machine-lease.ts for the incident.
-    const claim = await acquireMachineTurn(row.id, 'chat');
+    // Wait for a busy machine rather than bouncing the user's message straight
+    // back at them. Most collisions are a short background sweep that finishes
+    // within seconds; only a genuinely long holder still reaches the reply.
+    const claim = await acquireMachineTurnWithWait(row.id, 'chat', { waitMs: BUSY_WAIT_MS });
     if (!claim.ok) {
+      // Only show "Right now: ..." when the progress event actually belongs to
+      // the turn that's blocking us. The bus is keyed by INSTANCE with a
+      // 30-minute TTL (see progress-bus.ts), so without this check a busy
+      // reply cheerfully reports a half-hour-old thought from a finished chat
+      // turn as the sweep's current activity — "Right now: Thinking — All
+      // three tasks created and linked" while the board sweep is doing
+      // something else entirely. Stale is worse than silent here.
       const activity = lastProgressEvent(row.id);
-      const detail = activity
-        ? [activity.label, activity.detail].filter(Boolean).join(' — ')
-        : null;
+      const belongsToHolder =
+        !!activity && !!claim.busy.since && activity.ts >= claim.busy.since.getTime();
+      const detail =
+        activity && belongsToHolder
+          ? [activity.label, activity.detail].filter(Boolean).join(' — ')
+          : null;
+      // Hold the user's message for replay instead of asking them to retype
+      // it. Only then can the reply honestly say we'll come back to it — the
+      // wording and the queue write have to stay in lockstep, which is why
+      // `queued` is threaded into busyMessage rather than assumed.
+      let queued: { position: number } | null = null;
+      const userText = lastUser ? contentToText(lastUser.content) : '';
+      if (userText.trim()) {
+        try {
+          const q = await enqueueTurn({
+            instanceId: row.id,
+            userId: row.userId,
+            content: userText,
+            requestId,
+          });
+          queued = { position: q.depth };
+        } catch (err) {
+          // QueueFullError or a DB failure: fall back to asking for a resend.
+          // Never claim a pickup we cannot perform.
+          logger.warn({ err, userId, requestId }, 'queued_turn_enqueue_failed');
+        }
+      }
       const text = busyMessage(
         { holder: describeLeaseHolder(claim.busy.kind), ...(claim.busy.since ? { since: claim.busy.since } : {}) },
         detail,
+        queued,
       );
       logger.info(
-        { userId, requestId, heldBy: claim.busy.kind, until: claim.busy.until },
+        { userId, requestId, heldBy: claim.busy.kind, until: claim.busy.until, queued: !!queued },
         'machine_lease_rejected_concurrent',
       );
       // Persist so the exchange is visible in the admin transcript.

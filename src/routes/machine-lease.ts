@@ -78,13 +78,14 @@ export async function acquireMachineTurn(
       turnLeaseUntil: new Date(now.getTime() + ttlMs),
       turnLeaseOwner: token,
       turnLeaseKind: kind,
+      turnLeaseStartedAt: now,
     },
   });
   if (res.count === 1) return { ok: true, handle: { instanceId, token } };
 
   const row = await prisma.hermesInstance.findUnique({
     where: { id: instanceId },
-    select: { turnLeaseUntil: true, turnLeaseKind: true },
+    select: { turnLeaseUntil: true, turnLeaseKind: true, turnLeaseStartedAt: true },
   });
   // Lost the race but the holder vanished in between — treat as busy rather
   // than retrying, so a caller can never end up doubling a turn.
@@ -94,10 +95,45 @@ export async function acquireMachineTurn(
     busy: {
       kind: row?.turnLeaseKind ?? null,
       until,
-      // Acquire stamps until = start + ttl, so this recovers the start time.
-      since: new Date(until.getTime() - ttlMs),
+      // The holder's own stamp. NEVER derive this from `until - ttlMs`: ttlMs
+      // belongs to US (the caller that just lost the race), not to the holder,
+      // and the two differ by 15 minutes on the commonest pairing.
+      // Omitted rather than guessed when a pre-migration row has no stamp.
+      ...(row?.turnLeaseStartedAt ? { since: row.turnLeaseStartedAt } : {}),
     },
   };
+}
+
+/**
+ * Claim the machine, WAITING up to `waitMs` for a busy one to free up.
+ *
+ * A user who types while a background sweep holds the machine used to be told
+ * to send their message again — we rejected their turn and made them redo it.
+ * Background sweeps are short (AGENT_TURN_TIMEOUT_MS is 4 minutes, and the
+ * median run is far under that), so most of those bounces were avoidable by
+ * simply waiting a moment.
+ *
+ * Bounded, not unbounded: the caller is an open HTTP request from Sokosumi,
+ * so we must answer well before any client-side timeout. If the wait runs out
+ * we fall back to the honest busy reply rather than hanging.
+ */
+export async function acquireMachineTurnWithWait(
+  instanceId: string,
+  kind: string,
+  opts: { waitMs: number; ttlMs?: number; pollMs?: number },
+): Promise<AcquireResult> {
+  const deadline = Date.now() + opts.waitMs;
+  const pollMs = opts.pollMs ?? 1_500;
+  let last = await acquireMachineTurn(instanceId, kind, opts.ttlMs);
+  while (!last.ok && Date.now() < deadline) {
+    // Never sleep past the holder's own expiry — once it lapses the next
+    // acquire succeeds, and sleeping longer just adds dead latency.
+    const untilExpiry = last.busy.until.getTime() - Date.now();
+    const nap = Math.max(250, Math.min(pollMs, untilExpiry + 250, deadline - Date.now()));
+    await new Promise((r) => setTimeout(r, nap));
+    last = await acquireMachineTurn(instanceId, kind, opts.ttlMs);
+  }
+  return last;
 }
 
 /**
@@ -105,12 +141,42 @@ export async function acquireMachineTurn(
  * cannot free the turn that replaced it. Never throws — a failed release just
  * means the lease expires on its own.
  */
+/**
+ * Called after every successful release. Registered by index.ts so the queued
+ * -turn drainer runs the instant a machine frees up, without this module
+ * importing the queue (which imports cron-agent-turn, which imports this —
+ * a cycle). Unset in tests, where release stays a pure DB write.
+ */
+let onReleased: ((instanceId: string) => void) | null = null;
+
+export function setLeaseReleaseHook(fn: (instanceId: string) => void): void {
+  onReleased = fn;
+}
+
 export async function releaseMachineTurn(handle: LeaseHandle | null): Promise<void> {
   if (!handle) return;
+  try {
+    await releaseInner(handle);
+  } finally {
+    // The release must never be blocked or failed by a drain.
+    try {
+      onReleased?.(handle.instanceId);
+    } catch (err) {
+      logger.warn({ err, instanceId: handle.instanceId }, 'lease_release_hook_failed');
+    }
+  }
+}
+
+async function releaseInner(handle: LeaseHandle): Promise<void> {
   await prisma.hermesInstance
     .updateMany({
       where: { id: handle.instanceId, turnLeaseOwner: handle.token },
-      data: { turnLeaseUntil: null, turnLeaseOwner: null, turnLeaseKind: null },
+      data: {
+        turnLeaseUntil: null,
+        turnLeaseOwner: null,
+        turnLeaseKind: null,
+        turnLeaseStartedAt: null,
+      },
     })
     .catch((err) => logger.warn({ err, instanceId: handle.instanceId }, 'machine_lease_release_failed'));
 }
