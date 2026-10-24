@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Provisions and manages per-user Hermes Agent instances on Sprites.dev microVMs",
   "engines": {
-    "node": ">=20.10"
+    "node": "^22.23.4"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

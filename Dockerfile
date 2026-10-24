@@ -3,7 +3,7 @@
 # Dockerfile.hermes-user (see its header for build/push), not in this container.
 
 # ---------- build stage ----------
-FROM node:20-bookworm-slim AS build
+FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
@@ -20,7 +20,7 @@ RUN npx prisma generate \
 RUN npm prune --omit=dev
 
 # ---------- runtime stage ----------
-FROM node:20-bookworm-slim AS runtime
+FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
